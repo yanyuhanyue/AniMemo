@@ -428,12 +428,16 @@ class ReleaseCliTests(unittest.TestCase):
     def test_resolve_version_consumes_the_canonical_incident_reservation(self):
         with tempfile.TemporaryDirectory() as directory:
             tags = Path(directory) / "tags.txt"
+            legacy = json.loads((ROOT / "release" / "publication-reservations.json").read_bytes())
+            legacy["reservations"] = [v for v in legacy["reservations"] if "kind" not in v]
+            legacy_path = Path(directory) / "legacy-reservations.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
             tags.write_text("v1.0.0\n", encoding="utf-8")
             completed = self.run_cli(
                 "resolve-version",
                 "--tags-file", tags,
                 "--publication-reservations-file",
-                ROOT / "release" / "publication-reservations.json",
+                legacy_path,
                 "--bump", "minor",
                 "--channel", "rc",
             )

@@ -1,0 +1,84 @@
+name: Release Read Contract Check
+
+on:
+  pull_request:
+    types: [ready_for_review]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  read-contract:
+    if: >-
+      github.repository == 'yanyuhanyue/AniMemo' && github.actor == 'yanyuhanyue' &&
+      github.run_attempt == 1 &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' ||
+       github.event_name == 'pull_request' && github.event.pull_request.number == 263 &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'diag/rc2-hosted-draft-readback-20260919')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Bind reviewed checkout before repository code
+        id: binding
+        shell: bash
+        run: |
+          python3 -I - <<'PY'
+          import datetime, json, os, re
+          def require(value):
+              if not value:
+                  raise SystemExit('READ_CHECK_BINDING_REJECTED')
+          require(datetime.datetime(2026,9,19,11,27,1,tzinfo=datetime.timezone.utc) <= datetime.datetime.now(datetime.timezone.utc)
+                  < datetime.datetime(2026,9,21,11,27,1,tzinfo=datetime.timezone.utc))
+          require(os.environ['GITHUB_REPOSITORY_ID']=='1327429673' and os.environ['GITHUB_ACTOR_ID']=='111261350'
+                  and os.environ['GITHUB_TRIGGERING_ACTOR']=='yanyuhanyue' and os.environ['GITHUB_RUN_ATTEMPT']=='1')
+          if os.environ['GITHUB_EVENT_NAME']=='pull_request':
+              with open(os.environ['GITHUB_EVENT_PATH'],encoding='utf-8') as stream:
+                  event=json.load(stream)
+              pr=event['pull_request']
+              require(event['action']=='ready_for_review' and pr['number']==263 and pr['draft'] is False
+                      and pr['user']['id']==111261350 and pr['base']['ref']=='main')
+              for side in ('head','base'):
+                  repo=pr[side]['repo']
+                  require(repo['id']==1327429673 and repo['full_name']=='yanyuhanyue/AniMemo'
+                          and repo['owner']['id']==111261350 and repo['fork'] is False)
+              sha=pr['head']['sha']
+              require(re.findall(r'<!-- animemo-reviewed-head: ([0-9a-f]{40}) -->',pr.get('body') or '')==[sha])
+          else:
+              require(os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch' and os.environ['GITHUB_REF']=='refs/heads/main')
+              sha=os.environ['GITHUB_SHA']
+          require(re.fullmatch('[0-9a-f]{40}',sha))
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as stream:
+              stream.write('checkout_sha='+sha+'\n')
+          PY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ steps.binding.outputs.checkout_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install existing hash-locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir /tmp/animemo-release-read-venv
+          /usr/bin/python3 -I -c 'import sys; assert sys.version_info[:2] == (3, 12)'
+          /usr/bin/python3 -m venv /tmp/animemo-release-read-venv
+          /tmp/animemo-release-read-venv/bin/python -m pip install --require-hashes --only-binary=:all: -r release/requirements.lock
+      - name: Verify production read contract using native job identity
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: /tmp/animemo-release-read-venv/bin/python -B -m release.readback_check
+      - name: Upload reviewed safe read projections
+        if: ${{ always() && steps.binding.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-read-contract-${{ github.run_id }}
+          path: /tmp/animemo-release-read-contract/result.json
+          if-no-files-found: error
+          retention-days: 7

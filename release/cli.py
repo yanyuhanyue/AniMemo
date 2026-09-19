@@ -8,6 +8,7 @@ import secrets
 import stat
 import sys
 from pathlib import Path
+from .frozen_occupancy import FrozenOccupancyError
 
 from updater import __version__ as UPDATER_VERSION
 from updater.oci import (
@@ -366,14 +367,16 @@ def _verify_stable_source_presentation(args) -> dict[str, object]:
 
 
 def _resolve(args) -> dict[str, object]:
+    from .frozen_occupancy import frozen_records, verify_live
+    config = _read_json(args.publication_reservations_file)
+    proof = verify_live(config, Path.cwd()) if frozen_records(config) else None
     payload = resolve_prerelease(
         tags=_read_tags(args.tags_file),
         bump=args.bump,
         channel=args.channel,
         target_version_override=args.target_version_override,
-        publication_reservations=_read_json(
-            args.publication_reservations_file
-        ),
+        publication_reservations=config,
+        frozen_observations=proof,
     )
     _write_outputs(args.github_output, payload)
     return payload
@@ -1608,6 +1611,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except (
         ReleaseContractError,
+        FrozenOccupancyError,
         AcceptanceError,
         ReleaseNotesError,
         PublicationError,

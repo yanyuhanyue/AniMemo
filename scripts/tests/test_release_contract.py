@@ -307,6 +307,13 @@ class VersionResolutionTests(unittest.TestCase):
         )
         self.assertIs(validate_publication_reservations(payload), payload)
         self.assertEqual(payload["schemaVersion"], 1)
+        from release.test_frozen_occupancy import FrozenGitFixture
+        from release.frozen_occupancy import verify_live
+        proof = verify_live(payload, root, run_git=FrozenGitFixture())
+        self.assertEqual(len(payload["reservations"]), 6)
+        # Keep the historical signed partial-publication assertions independent
+        # of the new negative-only frozen record (covered by canonical replay).
+        payload = dict(payload, reservations=[v for v in payload["reservations"] if "kind" not in v])
         self.assertEqual(len(payload["reservations"]), 5)
         self.assertEqual(
             [item["releaseTag"] for item in payload["reservations"]],
@@ -474,11 +481,15 @@ class VersionResolutionTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        from release.test_frozen_occupancy import FrozenGitFixture
+        from release.frozen_occupancy import verify_live
+        proof = verify_live(reservations, root, run_git=FrozenGitFixture())
         resolved = resolve_prerelease(
             tags=["v1.0.0", "v1.1.0-rc.8"],
             bump="minor",
             channel="rc",
             publication_reservations=reservations,
+            frozen_observations=proof,
         )
         self.assertEqual(resolved["targetVersion"], "v1.1.0")
         self.assertEqual(resolved["releaseTag"], "v1.1.0-rc.9")
