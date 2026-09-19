@@ -510,6 +510,22 @@ class GitTagAdapter:
         )
 
 
+class GitHubReleaseReadbackError(ConnectionError):
+    """Stable stage code only; no credentials, response bodies or free text."""
+
+    def __init__(self, code: str) -> None:
+        allowed = {"GITHUB_RELEASE_" + stage + "_UNVERIFIED" for stage in (
+            "BY_TAG_HTTP", "BY_TAG_JSON", "LIST_HTTP", "LIST_JSON",
+            "LIST_PAGE_LINK", "LIST_ITEM_SHAPE", "REPOSITORY_HTTP",
+            "REPOSITORY_JSON", "PERMISSIONS_SHAPE", "DRAFT_VISIBILITY",
+            "UNIQUE_ID_READBACK",
+        )}
+        if code not in allowed:
+            raise ValueError("Invalid release readback diagnostic code")
+        self.code = code
+        super().__init__(code)
+
+
 class GitHubReleaseAdapterBase:
     def __init__(
         self,
@@ -563,76 +579,87 @@ class GitHubReleaseAdapterBase:
             raise ConnectionError("GitHub release pagination is incomplete")
         return "next" in relations
 
+    def _release_object(self, endpoint: str, stage: str) -> dict[str, Any] | None:
+        try:
+            response = self.request("GET", endpoint, None)
+        except ConnectionError:
+            raise GitHubReleaseReadbackError("GITHUB_RELEASE_" + stage + "_HTTP_UNVERIFIED") from None
+        if response.status not in {200, 404}:
+            raise GitHubReleaseReadbackError("GITHUB_RELEASE_" + stage + "_HTTP_UNVERIFIED")
+        try:
+            return _json_object(response)
+        except ConnectionError:
+            raise GitHubReleaseReadbackError("GITHUB_RELEASE_" + stage + "_JSON_UNVERIFIED") from None
+
     def _release(self) -> dict[str, Any] | None:
         encoded = urllib.parse.quote(self.tag, safe="")
-        published = _json_object(
-            self.request(
-                "GET", f"repos/{self.repository}/releases/tags/{encoded}", None
-            )
+        published = self._release_object(
+            f"repos/{self.repository}/releases/tags/{encoded}", "BY_TAG"
         )
         if published is not None:
             return published
 
-        # The by-tag endpoint returns published releases only. A 404 cannot
-        # prove that this transaction's draft is absent. Scan the authenticated
-        # release collection completely, then refresh the unique match by ID.
+        # Complete authenticated discovery; a by-tag 404 alone proves nothing.
         seen_ids: set[int] = set()
         matches: list[int] = []
         for page in range(1, 101):
-            response = self.request(
-                "GET",
-                f"repos/{self.repository}/releases?per_page=100&page={page}",
-                None,
-            )
+            try:
+                response = self.request(
+                    "GET", f"repos/{self.repository}/releases?per_page=100&page={page}", None,
+                )
+            except ConnectionError:
+                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_HTTP_UNVERIFIED") from None
             if response.status != 200:
-                raise ConnectionError("GitHub release listing is unknown")
+                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_HTTP_UNVERIFIED")
             try:
                 has_next = self._next_release_page(response, page)
+            except (ConnectionError, ValueError):
+                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_PAGE_LINK_UNVERIFIED") from None
+            try:
                 items = json.loads(response.body.decode("utf-8", errors="strict"))
-            except (UnicodeDecodeError, ValueError) as error:
-                raise ConnectionError("GitHub release listing is unknown") from error
+            except (UnicodeDecodeError, ValueError):
+                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_JSON_UNVERIFIED") from None
             if not isinstance(items, list) or len(items) > 100:
-                raise ConnectionError("GitHub release listing is unknown")
+                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_ITEM_SHAPE_UNVERIFIED")
             for item in items:
                 if not isinstance(item, dict):
-                    raise ConnectionError("GitHub release listing is unknown")
+                    raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_ITEM_SHAPE_UNVERIFIED")
                 release_id = item.get("id")
                 if (
-                    type(release_id) is not int
-                    or release_id <= 0
-                    or release_id in seen_ids
+                    type(release_id) is not int or release_id <= 0 or release_id in seen_ids
                     or not isinstance(item.get("tag_name"), str)
                 ):
-                    raise ConnectionError("GitHub release listing is unknown")
+                    raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_ITEM_SHAPE_UNVERIFIED")
                 seen_ids.add(release_id)
                 if item["tag_name"] == self.tag:
                     matches.append(release_id)
             if has_next and not items:
-                raise ConnectionError("GitHub release listing is incomplete")
+                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_PAGE_LINK_UNVERIFIED")
             if len(items) < 100 and not has_next:
                 break
         else:
-            raise ConnectionError("GitHub release listing is incomplete")
+            raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_PAGE_LINK_UNVERIFIED")
         if not matches:
-            repository = _json_object(
-                self.request("GET", f"repos/{self.repository}", None)
-            )
+            repository = self._release_object(f"repos/{self.repository}", "REPOSITORY")
             permissions = repository.get("permissions") if repository else None
-            if not isinstance(permissions, dict) or permissions.get("push") is not True:
-                raise ConnectionError("GitHub draft visibility is unknown")
+            if not isinstance(permissions, dict) or type(permissions.get("push")) is not bool:
+                raise GitHubReleaseReadbackError("GITHUB_RELEASE_PERMISSIONS_SHAPE_UNVERIFIED")
+            if permissions["push"] is not True:
+                raise GitHubReleaseReadbackError("GITHUB_RELEASE_DRAFT_VISIBILITY_UNVERIFIED")
             return None
         if len(matches) != 1:
-            raise ConnectionError("GitHub release listing is ambiguous")
-        release = _json_object(
-            self.request("GET", f"repos/{self.repository}/releases/{matches[0]}", None)
-        )
+            raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_ITEM_SHAPE_UNVERIFIED")
+        try:
+            release = _json_object(
+                self.request("GET", f"repos/{self.repository}/releases/{matches[0]}", None)
+            )
+        except ConnectionError:
+            raise GitHubReleaseReadbackError("GITHUB_RELEASE_UNIQUE_ID_READBACK_UNVERIFIED") from None
         if (
-            release is None
-            or type(release.get("id")) is not int
-            or release["id"] != matches[0]
-            or release.get("tag_name") != self.tag
+            release is None or type(release.get("id")) is not int
+            or release["id"] != matches[0] or release.get("tag_name") != self.tag
         ):
-            raise ConnectionError("GitHub release identity changed during readback")
+            raise GitHubReleaseReadbackError("GITHUB_RELEASE_UNIQUE_ID_READBACK_UNVERIFIED")
         return release
 
 
@@ -664,8 +691,11 @@ class GitHubDraftAdapter(GitHubReleaseAdapterBase):
     def observe(self, intent: MutationIntent) -> RemoteObservation:
         try:
             release = self._release()
-        except ConnectionError:
-            return RemoteObservation.unknown("GITHUB_DRAFT_READBACK_UNKNOWN")
+        except ConnectionError as error:
+            return RemoteObservation.unknown(
+                error.code if isinstance(error, GitHubReleaseReadbackError)
+                else "GITHUB_DRAFT_READBACK_UNKNOWN"
+            )
         if release is None:
             return RemoteObservation.absent()
         body = release.get("body")
@@ -748,8 +778,11 @@ class GitHubAssetAdapter(GitHubReleaseAdapterBase):
     def observe(self, intent: MutationIntent) -> RemoteObservation:
         try:
             release = self._release()
-        except ConnectionError:
-            return RemoteObservation.unknown("GITHUB_ASSET_READBACK_UNKNOWN")
+        except ConnectionError as error:
+            return RemoteObservation.unknown(
+                error.code if isinstance(error, GitHubReleaseReadbackError)
+                else "GITHUB_ASSET_READBACK_UNKNOWN"
+            )
         if release is None:
             return RemoteObservation.absent()
         assets = release.get("assets")
@@ -850,8 +883,11 @@ class GitHubPublishAdapter(GitHubReleaseAdapterBase):
     def observe(self, intent: MutationIntent) -> RemoteObservation:
         try:
             release = self._release()
-        except ConnectionError:
-            return RemoteObservation.unknown("GITHUB_PUBLISH_READBACK_UNKNOWN")
+        except ConnectionError as error:
+            return RemoteObservation.unknown(
+                error.code if isinstance(error, GitHubReleaseReadbackError)
+                else "GITHUB_PUBLISH_READBACK_UNKNOWN"
+            )
         if release is None:
             return RemoteObservation.absent()
         assets = release.get("assets")
