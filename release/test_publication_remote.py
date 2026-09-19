@@ -144,6 +144,7 @@ class PublicationRemoteTests(unittest.TestCase):
                 {
                     "name": "release-manifest.json",
                     "digest": None,
+                    "id": 7,
                     "size": len(content),
                     "url": "https://api.github.com/repos/yanyuhanyue/AniMemo/releases/assets/7",
                 }

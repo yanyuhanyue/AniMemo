@@ -198,6 +198,8 @@ jobs:
             [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-${RELEASE_CHANNEL}\.[1-9][0-9]*$ ]]
             [[ "$target_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
             test "${release_tag%%-*}" = "$target_version"
+            python -m release.frozen_occupancy --target "$release_tag" \
+              --bump "$VERSION_BUMP" --channel "$RELEASE_CHANNEL"
             echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
             echo "target_version=$target_version" >> "$GITHUB_OUTPUT"
           else
@@ -2223,6 +2225,7 @@ jobs:
       - name: Reconcile the complete RC transaction before its first mutation
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2235,6 +2238,7 @@ jobs:
       - name: Publish the four exact Candidate registry keys through the durable controller
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2248,6 +2252,7 @@ jobs:
         id: tx_attest_api
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2269,6 +2274,7 @@ jobs:
       - name: Reconcile the API image attestation readback
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2282,6 +2288,7 @@ jobs:
         id: tx_attest_web
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2303,6 +2310,7 @@ jobs:
       - name: Reconcile the Web image attestation readback
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2316,6 +2324,7 @@ jobs:
         id: tx_attest_file_01
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2335,6 +2344,7 @@ jobs:
       - name: Reconcile the manifest attestation readback
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2348,6 +2358,7 @@ jobs:
         id: tx_attest_file_02
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2367,6 +2378,7 @@ jobs:
       - name: Reconcile the deployment contract attestation readback
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2380,6 +2392,7 @@ jobs:
         id: tx_attest_file_03
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2399,6 +2412,7 @@ jobs:
       - name: Reconcile the installer materials attestation readback
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2438,6 +2452,7 @@ jobs:
       - name: Commit RC tag, Draft, individual assets, and publish through one controller
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2450,6 +2465,7 @@ jobs:
       - name: Finalize and export the durable RC transaction receipt
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail

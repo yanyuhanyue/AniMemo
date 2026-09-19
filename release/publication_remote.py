@@ -7,6 +7,7 @@ are validation evidence only and are never executed.
 from __future__ import annotations
 
 import hashlib
+import functools
 import http.client
 import json
 import os
@@ -91,9 +92,45 @@ class GitHubReadError(ConnectionError):
 
     code = "RECOVERY_RESPONSE_BODY_INCOMPLETE"
 
-    def __init__(self, response):
+    def __init__(self, response, reason="BODY_INTERRUPTED"):
         self.response = response
+        self.reason = reason
         super().__init__(self.code)
+
+
+def _read_complete_chunks(response, limit, headers):
+    """Strict bounded framing for Python HTTPResponse's already-read headers."""
+    if response.chunk_left is not None:
+        raise GitHubReadError(headers)
+    body = bytearray()
+    framing_bytes = 0
+    def line():
+        nonlocal framing_bytes
+        value = response.fp.readline(65537)
+        framing_bytes += len(value)
+        if len(value)>65536 or framing_bytes>262144 or not value.endswith(b"\r\n"):
+            raise http.client.IncompleteRead(b"")
+        return value
+    while True:
+        chunk_line = line()[:-2]
+        # Extensions cannot change the declared byte count. Reject controls and
+        # whitespace in the size; never let int() accept signs or non-hex forms.
+        if re.fullmatch(rb"[0-9a-fA-F]{1,16}(?:;[^\x00-\x1f\x7f]+)?", chunk_line) is None:
+            raise http.client.IncompleteRead(b"")
+        size = int(chunk_line.split(b";",1)[0],16)
+        if size == 0:
+            while True:
+                trailer = line()
+                if trailer == b"\r\n":
+                    response._close_conn()
+                    return bytes(body)
+                if re.fullmatch(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+:[\t\x20-\x7e\x80-\xff]*\r\n",trailer) is None:
+                    raise http.client.IncompleteRead(b"")
+        if len(body)+size > limit:
+            raise GitHubReadError(headers,"BODY_LIMIT_EXCEEDED")
+        body.extend(response._safe_read(size))
+        if response._safe_read(2) != b"\r\n":
+            raise http.client.IncompleteRead(b"")
 
 
 def read_github_response(response, maximum=None):
@@ -108,10 +145,42 @@ def read_github_response(response, maximum=None):
         response.headers.get("X-RateLimit-Reset"),
         response.headers.get("Retry-After"),
     )
+    limit = 4 * 1024 * 1024
+    if hasattr(response.headers, "get_all") and any(
+        len(response.headers.get_all(name) or []) > 1
+        for name in ("Link", "X-GitHub-Api-Version-Selected")
+    ):
+        raise GitHubReadError(headers, "BODY_FRAMING_CONFLICT")
+    transfer = response.headers.get("Transfer-Encoding")
+    length = response.headers.get("Content-Length")
+    if transfer is not None and (not isinstance(transfer, str) or transfer.strip().lower() != "chunked"
+                                 or length is not None
+                                 or hasattr(response.headers, "get_all") and len(response.headers.get_all("Transfer-Encoding")) != 1):
+        raise GitHubReadError(headers, "BODY_FRAMING_CONFLICT")
+    if maximum is not None and (type(maximum) is not int or maximum <= 0):
+        raise GitHubReadError(headers, "BODY_LIMIT_EXCEEDED")
+    limit = min(maximum if maximum is not None else limit, limit)
+    amount = limit + 1
+    transport = response if isinstance(response, http.client.HTTPResponse) else getattr(response, "fp", None)
     try:
-        body = response.read() if maximum is None else response.read(maximum)
+        if transfer is not None:
+            if not isinstance(transport,http.client.HTTPResponse) or not transport.chunked:
+                raise GitHubReadError(headers)
+            body = _read_complete_chunks(transport,limit,headers)
+        else:
+            body = response.read(amount)
+    except GitHubReadError:
+        raise
     except (OSError, http.client.HTTPException):
         raise GitHubReadError(headers) from None
+    if len(body) > limit or isinstance(length, str) and re.fullmatch(r"[0-9]{1,16}", length) and int(length) > limit:
+        raise GitHubReadError(headers, "BODY_LIMIT_EXCEEDED")
+    if length is not None and (
+        not isinstance(length, str) or re.fullmatch(r"[0-9]{1,16}", length) is None
+        or int(length) != len(body)
+        or hasattr(response.headers, "get_all") and len(response.headers.get_all("Content-Length")) != 1
+    ):
+        raise GitHubReadError(headers)
     return GitHubResponse(
         headers.status,
         body,
@@ -178,12 +247,24 @@ def _json_object(response: GitHubResponse) -> dict[str, Any] | None:
     if response.status != 200:
         raise ConnectionError("GitHub remote state is unknown")
     try:
-        value = json.loads(response.body.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        value = strict_github_json(response.body)
+    except (UnicodeDecodeError, ValueError) as error:
         raise ConnectionError("GitHub remote state is unknown") from error
     if not isinstance(value, dict):
         raise ConnectionError("GitHub remote state is unknown")
     return value
+
+
+def strict_github_json(body: bytes):
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("GITHUB_JSON_DUPLICATE_KEY")
+            result[key] = value
+        return result
+    return json.loads(body.decode("utf-8", errors="strict"), object_pairs_hook=object_pairs,
+                      parse_constant=lambda _: (_ for _ in ()).throw(ValueError("GITHUB_JSON_NONFINITE")))
 
 
 def _open_github_asset_stream(url: str, token: str, *, observe=None):
@@ -518,7 +599,8 @@ class GitHubReleaseReadbackError(ConnectionError):
             "BY_TAG_HTTP", "BY_TAG_JSON", "LIST_HTTP", "LIST_JSON",
             "LIST_PAGE_LINK", "LIST_ITEM_SHAPE", "REPOSITORY_HTTP",
             "REPOSITORY_JSON", "PERMISSIONS_SHAPE", "DRAFT_VISIBILITY",
-            "UNIQUE_ID_READBACK",
+            "UNIQUE_ID_READBACK", "UNIQUE_ID_READBACK_HTTP", "UNIQUE_ID_READBACK_JSON",
+            "CONTROL_HTTP", "CONTROL_JSON", "IDENTITY_SCOPE",
         )}
         if code not in allowed:
             raise ValueError("Invalid release readback diagnostic code")
@@ -533,10 +615,16 @@ class GitHubReleaseAdapterBase:
         repository: str,
         tag: str,
         request: GitHubRequester = github_request,
+        discovery=None,
     ) -> None:
         self.repository = repository
         self.tag = tag
         self.request = request
+        from .github_release_read import GitHubReleaseDiscovery
+        if discovery is not None and (not isinstance(discovery, GitHubReleaseDiscovery)
+                                      or discovery.repository != repository or discovery.tag != tag):
+            raise ValueError("GITHUB_DISCOVERY_SCOPE_MISMATCH")
+        self.discovery = discovery or GitHubReleaseDiscovery(repository, tag, request)
 
     def _next_release_page(
         self, response: GitHubResponse, page: int, *, endpoint: str | None = None
@@ -579,88 +667,22 @@ class GitHubReleaseAdapterBase:
             raise ConnectionError("GitHub release pagination is incomplete")
         return "next" in relations
 
-    def _release_object(self, endpoint: str, stage: str) -> dict[str, Any] | None:
-        try:
-            response = self.request("GET", endpoint, None)
-        except ConnectionError:
-            raise GitHubReleaseReadbackError("GITHUB_RELEASE_" + stage + "_HTTP_UNVERIFIED") from None
-        if response.status not in {200, 404}:
-            raise GitHubReleaseReadbackError("GITHUB_RELEASE_" + stage + "_HTTP_UNVERIFIED")
-        try:
-            return _json_object(response)
-        except ConnectionError:
-            raise GitHubReleaseReadbackError("GITHUB_RELEASE_" + stage + "_JSON_UNVERIFIED") from None
-
     def _release(self) -> dict[str, Any] | None:
-        encoded = urllib.parse.quote(self.tag, safe="")
-        published = self._release_object(
-            f"repos/{self.repository}/releases/tags/{encoded}", "BY_TAG"
-        )
-        if published is not None:
-            return published
-
-        # Complete authenticated discovery; a by-tag 404 alone proves nothing.
-        seen_ids: set[int] = set()
-        matches: list[int] = []
-        for page in range(1, 101):
-            try:
-                response = self.request(
-                    "GET", f"repos/{self.repository}/releases?per_page=100&page={page}", None,
-                )
-            except ConnectionError:
-                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_HTTP_UNVERIFIED") from None
-            if response.status != 200:
-                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_HTTP_UNVERIFIED")
-            try:
-                has_next = self._next_release_page(response, page)
-            except (ConnectionError, ValueError):
-                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_PAGE_LINK_UNVERIFIED") from None
-            try:
-                items = json.loads(response.body.decode("utf-8", errors="strict"))
-            except (UnicodeDecodeError, ValueError):
-                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_JSON_UNVERIFIED") from None
-            if not isinstance(items, list) or len(items) > 100:
-                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_ITEM_SHAPE_UNVERIFIED")
-            for item in items:
-                if not isinstance(item, dict):
-                    raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_ITEM_SHAPE_UNVERIFIED")
-                release_id = item.get("id")
-                if (
-                    type(release_id) is not int or release_id <= 0 or release_id in seen_ids
-                    or not isinstance(item.get("tag_name"), str)
-                ):
-                    raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_ITEM_SHAPE_UNVERIFIED")
-                seen_ids.add(release_id)
-                if item["tag_name"] == self.tag:
-                    matches.append(release_id)
-            if has_next and not items:
-                raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_PAGE_LINK_UNVERIFIED")
-            if len(items) < 100 and not has_next:
-                break
-        else:
-            raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_PAGE_LINK_UNVERIFIED")
-        if not matches:
-            repository = self._release_object(f"repos/{self.repository}", "REPOSITORY")
-            permissions = repository.get("permissions") if repository else None
-            if not isinstance(permissions, dict) or type(permissions.get("push")) is not bool:
-                raise GitHubReleaseReadbackError("GITHUB_RELEASE_PERMISSIONS_SHAPE_UNVERIFIED")
-            if permissions["push"] is not True:
-                raise GitHubReleaseReadbackError("GITHUB_RELEASE_DRAFT_VISIBILITY_UNVERIFIED")
-            return None
-        if len(matches) != 1:
-            raise GitHubReleaseReadbackError("GITHUB_RELEASE_LIST_ITEM_SHAPE_UNVERIFIED")
         try:
-            release = _json_object(
-                self.request("GET", f"repos/{self.repository}/releases/{matches[0]}", None)
-            )
-        except ConnectionError:
-            raise GitHubReleaseReadbackError("GITHUB_RELEASE_UNIQUE_ID_READBACK_UNVERIFIED") from None
-        if (
-            release is None or type(release.get("id")) is not int
-            or release["id"] != matches[0] or release.get("tag_name") != self.tag
-        ):
-            raise GitHubReleaseReadbackError("GITHUB_RELEASE_UNIQUE_ID_READBACK_UNVERIFIED")
-        return release
+            return self.discovery.get()
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise GitHubReleaseReadbackError("GITHUB_RELEASE_IDENTITY_SCOPE_UNVERIFIED") from None
+
+
+def invalidate_on_mutation(method):
+    @functools.wraps(method)
+    def guarded(self, *args, **kwargs):
+        self.discovery.invalidate()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self.discovery.invalidate()
+    return guarded
 
 
 class GitHubDraftAdapter(GitHubReleaseAdapterBase):
@@ -673,8 +695,9 @@ class GitHubDraftAdapter(GitHubReleaseAdapterBase):
         body: bytes,
         prerelease: bool,
         request: GitHubRequester = github_request,
+        discovery=None,
     ) -> None:
-        super().__init__(repository=repository, tag=tag, request=request)
+        super().__init__(repository=repository, tag=tag, request=request, discovery=discovery)
         self.title = title
         self.body = body
         self.prerelease = prerelease
@@ -715,8 +738,14 @@ class GitHubDraftAdapter(GitHubReleaseAdapterBase):
             return RemoteObservation.same(intent.expected_identity)
         return RemoteObservation.different(actual)
 
+    @invalidate_on_mutation
     def mutate(self, intent: MutationIntent) -> MutationResponse:
         try:
+            current = self.observe(intent)
+            if current.classification.value == "SAME":
+                return MutationResponse.acknowledged()
+            if current.classification.value != "ABSENT":
+                return MutationResponse.ambiguous("GITHUB_DRAFT_PRECREATE_CONFLICT")
             body = self.body.decode("utf-8", errors="strict")
             response = self.request(
                 "POST",
@@ -747,9 +776,10 @@ class GitHubAssetAdapter(GitHubReleaseAdapterBase):
         expected_digest: str,
         expected_size: int,
         request: GitHubRequester = github_request,
+        discovery=None,
         run: CommandRunner = run_command,
     ) -> None:
-        super().__init__(repository=repository, tag=tag, request=request)
+        super().__init__(repository=repository, tag=tag, request=request, discovery=discovery)
         self.path = Path(path)
         self.expected_digest = expected_digest
         self.expected_size = expected_size
@@ -808,7 +838,9 @@ class GitHubAssetAdapter(GitHubReleaseAdapterBase):
                 return RemoteObservation.same(intent.expected_identity)
             return RemoteObservation.different(actual)
         url = item.get("url")
-        if not isinstance(url, str) or not url.startswith("https://api.github.com/"):
+        asset_id = item.get("id")
+        if (type(asset_id) is not int or asset_id <= 0
+                or url != f"https://api.github.com/repos/{self.repository}/releases/assets/{asset_id}"):
             return RemoteObservation.unknown("GITHUB_ASSET_READBACK_INVALID")
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
         if not token:
@@ -830,23 +862,27 @@ class GitHubAssetAdapter(GitHubReleaseAdapterBase):
             return RemoteObservation.same(intent.expected_identity)
         return RemoteObservation.different(actual)
 
+    @invalidate_on_mutation
     def mutate(self, intent: MutationIntent) -> MutationResponse:
         if not self._local_exact():
             return MutationResponse.terminal("GITHUB_ASSET_LOCAL_IDENTITY_INVALID")
         try:
+            release = self._release()
+            if release is None or type(release.get("id")) is not int or release["id"] <= 0:
+                return MutationResponse.ambiguous("GITHUB_ASSET_RELEASE_ID_UNVERIFIED")
+            endpoint = (f"https://uploads.github.com/repos/{self.repository}/releases/{release['id']}/assets"
+                        + "?name=" + urllib.parse.quote(self.path.name, safe=""))
             result = self.run(
                 (
-                    "gh",
-                    "release",
-                    "upload",
-                    self.tag,
-                    str(self.path),
-                    "--repo",
-                    self.repository,
+                    "gh", "api", "--method", "POST", endpoint,
+                    "-H", "Content-Type: application/octet-stream",
+                    "-H", f"Content-Length: {self.expected_size}",
+                    "-H", "X-GitHub-Api-Version: 2026-03-10",
+                    "--input", str(self.path),
                 ),
                 300,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, ConnectionError):
             return MutationResponse.ambiguous("GITHUB_ASSET_UPLOAD_TIMEOUT")
         return (
             MutationResponse.acknowledged()
@@ -864,8 +900,9 @@ class GitHubPublishAdapter(GitHubReleaseAdapterBase):
         prerelease: bool,
         expected_assets: Mapping[str, Mapping[str, Any]],
         request: GitHubRequester = github_request,
+        discovery=None,
     ) -> None:
-        super().__init__(repository=repository, tag=tag, request=request)
+        super().__init__(repository=repository, tag=tag, request=request, discovery=discovery)
         self.prerelease = prerelease
         self.expected_assets = {
             name: {"sha256": item["sha256"], "size": item["size"]}
@@ -954,10 +991,11 @@ class GitHubPublishAdapter(GitHubReleaseAdapterBase):
             return RemoteObservation.same(intent.expected_identity)
         return RemoteObservation.different(actual)
 
+    @invalidate_on_mutation
     def mutate(self, intent: MutationIntent) -> MutationResponse:
         try:
             release = self._release()
-            if release is None or not isinstance(release.get("id"), int):
+            if release is None or type(release.get("id")) is not int or release["id"] <= 0:
                 return MutationResponse.terminal("GITHUB_RELEASE_ID_MISSING")
             response = self.request(
                 "PATCH",
@@ -1124,6 +1162,7 @@ def build_publication_runtime(
     remote: str = "origin",
     request: GitHubRequester = github_request,
     run: CommandRunner = run_command,
+    release_reader=None,
 ) -> PublicationRuntime:
     plan = validate_publication_plan(plan_value)
     if not _COMMIT.fullmatch(source_tree):
@@ -1276,6 +1315,8 @@ def build_publication_runtime(
         tag_adapter,
         publication_steps,
     )
+    from .github_release_read import GitHubReleaseDiscovery
+    discovery = GitHubReleaseDiscovery(repository, tag, release_reader.request if release_reader is not None else request)
     draft_adapter = GitHubDraftAdapter(
         repository=repository,
         tag=tag,
@@ -1283,6 +1324,7 @@ def build_publication_runtime(
         body=body,
         prerelease=prerelease,
         request=request,
+        discovery=discovery,
     )
     add(
         "release-draft",
@@ -1301,6 +1343,7 @@ def build_publication_runtime(
             expected_digest=item["sha256"],
             expected_size=item["size"],
             request=request,
+            discovery=discovery,
             run=run,
         )
         add(
@@ -1317,6 +1360,7 @@ def build_publication_runtime(
         prerelease=prerelease,
         expected_assets=assets,
         request=request,
+        discovery=discovery,
     )
     add(
         "release-publish",

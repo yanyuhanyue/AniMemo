@@ -150,6 +150,186 @@
           "sha-db34a3fb0e44ff3143cce8c196e6f7d0ec6baa71"
         ]
       }
+    },
+    {
+      "kind": "FROZEN_UNATTEMPTED_VERSION_OCCUPANCY",
+      "repository": "yanyuhanyue/AniMemo",
+      "releaseTag": "v2.0.0-rc.2",
+      "reusable": false,
+      "candidateSha": "089519b4ad07a29571b970a48537f439a0432965",
+      "candidateTreeSha": "8c241b28080635939d60a089259f717f22c9dace",
+      "qualificationRunId": 35058340714,
+      "publishRunId": 35435464718,
+      "operationId": "sha256:e2a55f79e9dd10a24929f57f4ebcc904f083328578aa6e776313dcf87651bf60",
+      "journalRef": "refs/heads/publication-transactions/e2a55f79e9dd10a24929f57f4ebcc904f083328578aa6e776313dcf87651bf60",
+      "journalHead": "2f7d20ea55ef61a760e3b9d7854503818851b0cd",
+      "journalRevision": 1,
+      "journalState": "FROZEN",
+      "ledgerIdentity": "sha256:9149693b32399f9eb0bc98f4b43f27fde0ddcd5f5397de258f1c135bb68f3733",
+      "ledgerFileSha256": "sha256:0c628baab74a546267d64e9bafa9ea64b7b6e3b2553525a3b8d9e992d5d597d0",
+      "ledgerFileBytes": 8186,
+      "steps": [
+        {
+          "name": "registry-api-version",
+          "kind": "REGISTRY_PUSH",
+          "remoteKey": "ghcr.io/yanyuhanyue/animemo-api:v2.0.0-rc.2",
+          "expectedIdentity": "sha256:1a10d2e84706c6cda287b5dd0c6de6429babe6b1cf76437487059ad4043c3592",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "registry-api-source",
+          "kind": "REGISTRY_PUSH",
+          "remoteKey": "ghcr.io/yanyuhanyue/animemo-api:sha-089519b4ad07a29571b970a48537f439a0432965",
+          "expectedIdentity": "sha256:1a10d2e84706c6cda287b5dd0c6de6429babe6b1cf76437487059ad4043c3592",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "registry-web-version",
+          "kind": "REGISTRY_PUSH",
+          "remoteKey": "ghcr.io/yanyuhanyue/animemo-web:v2.0.0-rc.2",
+          "expectedIdentity": "sha256:f59a6202c2c68f16d6e96c477f84509b0a36b4afeb838ff58dc8ccfda619c384",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "registry-web-source",
+          "kind": "REGISTRY_PUSH",
+          "remoteKey": "ghcr.io/yanyuhanyue/animemo-web:sha-089519b4ad07a29571b970a48537f439a0432965",
+          "expectedIdentity": "sha256:f59a6202c2c68f16d6e96c477f84509b0a36b4afeb838ff58dc8ccfda619c384",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "attestation-api",
+          "kind": "ATTESTATION",
+          "remoteKey": "oci://ghcr.io/yanyuhanyue/animemo-api@sha256:1a10d2e84706c6cda287b5dd0c6de6429babe6b1cf76437487059ad4043c3592",
+          "expectedIdentity": "sha256:dcaa866c44b66e6dec4b222fcb4cd6bb21cbfc88f021d7d5130b3fbdc69dba47",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "attestation-web",
+          "kind": "ATTESTATION",
+          "remoteKey": "oci://ghcr.io/yanyuhanyue/animemo-web@sha256:f59a6202c2c68f16d6e96c477f84509b0a36b4afeb838ff58dc8ccfda619c384",
+          "expectedIdentity": "sha256:2787bf96ac79ea4eab61748211bf7d7282afb0b7557473a61388f656ab8f6347",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "attestation-file-01",
+          "kind": "ATTESTATION",
+          "remoteKey": "github:yanyuhanyue/AniMemo:attestation:v2.0.0-rc.2:sha256:362354439ed5bf46f53784c12ed39415f5cb47290beb8f9e7dde8b2a2476be07",
+          "expectedIdentity": "sha256:ea89a6d368963c49becb2e8ef61b86c70d2fa3cc1a6a5a3b86b5567485a21eed",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "attestation-file-02",
+          "kind": "ATTESTATION",
+          "remoteKey": "github:yanyuhanyue/AniMemo:attestation:v2.0.0-rc.2:sha256:e59488431dfc4349ecbdabb70085d241481e98ce2bf982097e5179a52471d6fd",
+          "expectedIdentity": "sha256:047a0a22e8b7ddbe8541480843c7a75d2680ad13a1047d96e018f378ed1e3ceb",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "attestation-file-03",
+          "kind": "ATTESTATION",
+          "remoteKey": "github:yanyuhanyue/AniMemo:attestation:v2.0.0-rc.2:sha256:762f049da6ff4bed7363d0e2309afba1827a70346633d392c9967e26a2d60293",
+          "expectedIdentity": "sha256:8ce5c71c8cbe646f0c74eecbc431931a149f74fb07ba57d8e387791252ce106b",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "git-tag",
+          "kind": "GIT_TAG",
+          "remoteKey": "git:yanyuhanyue/AniMemo:refs/tags/v2.0.0-rc.2",
+          "expectedIdentity": "sha256:ac896ef8cb5c5fb30b892695e5e977d21de847b60c665711e08dd5ad7d3c2802",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "release-draft",
+          "kind": "GITHUB_RELEASE_DRAFT",
+          "remoteKey": "github:yanyuhanyue/AniMemo:release:v2.0.0-rc.2:draft",
+          "expectedIdentity": "sha256:011bc0fb6274c1e0fe77e71a32092d9f09ad785aaf271f16740a3af70d5f13ed",
+          "state": "FROZEN",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "release-asset-01",
+          "kind": "GITHUB_RELEASE_ASSET",
+          "remoteKey": "github:yanyuhanyue/AniMemo:release:v2.0.0-rc.2:asset:release-manifest.json",
+          "expectedIdentity": "sha256:b1b3c9e6e5100f2f7c595d47bc631afea57e3309d389578f70f39cfb57c97d76",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "release-asset-02",
+          "kind": "GITHUB_RELEASE_ASSET",
+          "remoteKey": "github:yanyuhanyue/AniMemo:release:v2.0.0-rc.2:asset:deployment-contract.json",
+          "expectedIdentity": "sha256:f9f85eee3b0d1da922426d746c4ea2d9ea3768cb01878bc0169dbcafc3e33662",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "release-asset-03",
+          "kind": "GITHUB_RELEASE_ASSET",
+          "remoteKey": "github:yanyuhanyue/AniMemo:release:v2.0.0-rc.2:asset:installer-materials.tar",
+          "expectedIdentity": "sha256:01d2b3bd99f346c06cd372c8eb6ba4aba0d10a438a9372184b4a99ba8456fe12",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "release-asset-04",
+          "kind": "GITHUB_RELEASE_ASSET",
+          "remoteKey": "github:yanyuhanyue/AniMemo:release:v2.0.0-rc.2:asset:checksums.txt",
+          "expectedIdentity": "sha256:bbf211e819041d1ef99b60aeb6d57bd426d8611d60ebdcce9b0136e2ce015bd5",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "release-asset-05",
+          "kind": "GITHUB_RELEASE_ASSET",
+          "remoteKey": "github:yanyuhanyue/AniMemo:release:v2.0.0-rc.2:asset:animemo-v2.0.0-rc.2-portable.tar",
+          "expectedIdentity": "sha256:33952adb0e5d06f9e7b3de872bd8cb60f5e2bb3215753ec6503e2c64aa77a1b2",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        },
+        {
+          "name": "release-publish",
+          "kind": "GITHUB_RELEASE_PUBLISH",
+          "remoteKey": "github:yanyuhanyue/AniMemo:release:v2.0.0-rc.2:publish",
+          "expectedIdentity": "sha256:946c665a6db1f4db72e4b1011ff25775169f8d9d04cc702a83f9e5a0f0f41dfb",
+          "state": "WAITING",
+          "attempts": [],
+          "committed": false
+        }
+      ],
+      "decision": {
+        "action": "EXCLUDE_VERSION_PRESERVE_FROZEN_TRANSACTION",
+        "authorization": "ANIMEMO_V2_DRAFT_READ_AUTHORITY_FROZEN_RC2_SUCCESSOR_V1",
+        "issuedAt": "2026-09-19T11:27:01Z",
+        "sourceFile": "AniMemo_GPT6_读取权威与冻结占用修复_新候选收口_20260919.md",
+        "sourceSha256": "sha256:3528f998d442d40026a97b03d05838475e9034b930954b660d46595de8798efd"
+      }
     }
   ]
 }

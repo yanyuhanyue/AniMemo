@@ -19,6 +19,8 @@ from release.publication_transaction import (
     PublicationTransactionError, RemoteObservation,
 )
 from release.test_publication_remote import _response
+from release.test_frozen_occupancy import FrozenGitFixture, verified_config
+from release.contract import resolve_prerelease
 from scripts import release_publication as cli
 
 
@@ -45,7 +47,9 @@ class RecoveryCliTests(unittest.TestCase):
         self.assets.mkdir()
         self.source = "1" * 40
         self.tree = "2" * 40
-        self.tag = "v2.0.0-rc.1"
+        reservations, proof = verified_config()
+        self.tag = resolve_prerelease(tags=["v1.1.0", "v2.0.0-rc.1"], bump="major", channel="rc",
+                                      publication_reservations=reservations, frozen_observations=proof)["releaseTag"]
         self.writes = []
         self.release = None
         self.interrupt = None
@@ -127,11 +131,13 @@ class RecoveryCliTests(unittest.TestCase):
         return _response(self.release)
 
     def run_command(self, argv, timeout):
-        self.assertEqual(argv[:3], ("gh", "release", "upload"))
+        self.assertEqual(argv[:4], ("gh", "api", "--method", "POST"))
         self.assertNotIn("--clobber", argv)
-        path = Path(argv[4])
+        path = Path(argv[argv.index("--input")+1])
+        self.assertEqual(argv[4], "https://uploads.github.com/repos/yanyuhanyue/AniMemo/releases/999/assets?name="+path.name)
         self.assertFalse(any(a["name"] == path.name for a in self.release["assets"]))
         content = path.read_bytes()
+        self.assertIn("Content-Length: "+str(len(content)), argv)
         self.release["assets"].append({
             "name": path.name, "size": len(content), "state": "uploaded",
             "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
@@ -152,6 +158,7 @@ class RecoveryCliTests(unittest.TestCase):
             args += ["--receipt", str(self.root / "receipt.json")]
         output, error = io.StringIO(), io.StringIO()
         with (
+            mock.patch("release.publication_transaction._run_git_command", side_effect=FrozenGitFixture()),
             mock.patch.object(cli, "build_publication_runtime", return_value=self.runtime),
             mock.patch.object(cli, "GitRemoteAppendOnlyJournal", return_value=self.journal),
             contextlib.redirect_stdout(output), contextlib.redirect_stderr(error),
@@ -167,6 +174,38 @@ class RecoveryCliTests(unittest.TestCase):
         step = next(s for s in self.controller.ledger["steps"] if s["name"] == "release-draft")
         self.assertEqual((step["state"], step["attempts"][0]["response"]["classification"]), ("READY", "ACKNOWLEDGED"))
         return copy.deepcopy(step["attempts"])
+
+    def test_resolved_successor_material_names_and_all_seventeen_local_steps(self):
+        # This is a non-authoritative isolated replay, not a Candidate receipt.
+        from release.candidate import validate_candidate_input
+        from release.test_candidate import candidate_input
+        from release.test_release_notes import context
+        from release.notes import build_release_notes, render_release_notes
+        from release.portable import portable_release_asset_name
+        from release.test_publication_transaction import FakeAdapter
+        from scripts.tests.test_release_contract import manifest
+        candidate = candidate_input()
+        candidate.update(candidate_version=self.tag, target_version="v2.0.0", candidate_sequence=3,
+                         source_sha=self.source, source_tree=self.tree)
+        candidate["qualification_workflow_identity"]["sha"] = self.source
+        self.assertEqual(validate_candidate_input(candidate)["candidate_version"], self.tag)
+        self.assertFalse(candidate["publish_authorized"])
+        notes = build_release_notes(context=context(candidate_sha=self.source, release_tag=self.tag,
+                                                     target_version="v2.0.0", previous_stable="v1.1.0"), pulls=[])
+        self.assertIn(self.tag, render_release_notes(notes))
+        self.assertEqual(manifest(version=self.tag, commit=self.source)["release"]["version"], self.tag)
+        self.assertIn(portable_release_asset_name(self.tag), self.plan["transport_assets"])
+        self.assertEqual(self.plan["predecessor_frozen_occupancies"][0]["releaseTag"], "v2.0.0-rc.2")
+        adapters = {intent.name: FakeAdapter(intent.expected_identity) for intent in self.runtime.intents}
+        controller = DurablePublicationController.open(self.plan, source_tree=self.tree,
+            intents=self.runtime.intents, adapters=adapters, journal=LocalAtomicJournal(self.root/"all-fake-journal"))
+        controller.preflight_all()
+        for intent in self.runtime.intents:
+            controller.advance(intent.name)
+        controller.finalize()
+        self.assertEqual(controller.ledger["finalState"], "COMPLETE")
+        self.assertEqual(sum(adapter.mutate_count for adapter in adapters.values()), 17)
+        self.assertEqual(self.writes, [])
 
     def test_ready_ack_reconciles_then_five_assets_publish_and_finalize(self):
         attempts = self.seed_ready_ack()

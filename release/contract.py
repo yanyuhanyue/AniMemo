@@ -320,6 +320,16 @@ def validate_publication_reservations(payload: object) -> dict[str, object]:
 
     seen_release_tags: set[str] = set()
     for reservation in reservations:
+        from .frozen_occupancy import KIND, FrozenOccupancyError, validate_record
+        if isinstance(reservation, dict) and reservation.get("kind") == KIND:
+            try:
+                frozen = validate_record(reservation)
+            except FrozenOccupancyError as error:
+                raise ReleaseContractError(str(error)) from None
+            if frozen["releaseTag"] in seen_release_tags:
+                raise ReleaseContractError("Publication reservation releaseTag is duplicated")
+            seen_release_tags.add(frozen["releaseTag"])
+            continue
         if not isinstance(reservation, dict) or set(reservation) != (
             _PUBLICATION_RESERVATION_FIELDS
         ):
@@ -440,6 +450,7 @@ def resolve_prerelease(
     channel: str,
     target_version_override: str = "",
     publication_reservations: object | None = None,
+    frozen_observations=None,
 ) -> dict[str, object]:
     if bump not in {"patch", "minor", "major"}:
         raise ReleaseContractError(f"Invalid version bump: {bump!r}")
@@ -478,6 +489,12 @@ def resolve_prerelease(
         validated_reservations = validate_publication_reservations(
             publication_reservations
         )
+        from .frozen_occupancy import VerifiedFrozenOccupancies, frozen_records
+        records = frozen_records(validated_reservations)
+        if records:
+            if not isinstance(frozen_observations, VerifiedFrozenOccupancies):
+                raise ReleaseContractError("FROZEN_OCCUPANCY_LIVE_READ_REQUIRED")
+            frozen_observations.require_records(records)
         occupied_prerelease_tags.update(
             reservation["releaseTag"]
             for reservation in validated_reservations["reservations"]

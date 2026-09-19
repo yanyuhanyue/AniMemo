@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -14,6 +15,7 @@ REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_IMPORT_ROOT))
 
+from release.frozen_occupancy import FrozenOccupancyError
 from release.publication import (
     PublicationError,
     declared_publication_assets,
@@ -130,6 +132,18 @@ def _transaction_controller(
     args: argparse.Namespace,
 ) -> tuple[DurablePublicationController, Any]:
     plan = _read_json(args.plan)
+    from release.frozen_occupancy import frozen_records, reject_frozen_remote_keys, verify_live
+    from release.github_release_read import HostedGitHubReadClient
+    config = _read_json(REPO_IMPORT_ROOT / "release" / "publication-reservations.json")
+    verify_live(config, args.repository_path, remote=args.remote, active_plan=plan, source_tree=args.source_tree)
+    release_reader = None
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        if not os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") != os.environ.get("GITHUB_TOKEN"):
+            raise PublicationError("PUBLICATION_NATIVE_READ_TOKEN_BINDING_REQUIRED")
+        try:
+            release_reader = HostedGitHubReadClient.from_current_job()
+        except (ConnectionError, ValueError, KeyError, TypeError, AttributeError, OSError):
+            raise PublicationError("PUBLICATION_HOSTED_READ_AUTHORITY_UNVERIFIED") from None
     runtime = build_publication_runtime(
         plan,
         source_tree=args.source_tree,
@@ -137,7 +151,9 @@ def _transaction_controller(
         candidate_root=args.candidate_root,
         repository_path=args.repository_path,
         remote=args.remote,
+        release_reader=release_reader,
     )
+    reject_frozen_remote_keys(runtime.intents, frozen_records(config))
     journal = GitRemoteAppendOnlyJournal(
         args.repository_path,
         remote=args.remote,
@@ -323,6 +339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         OSError,
         json.JSONDecodeError,
         PublicationError,
+        FrozenOccupancyError,
         PublicationTransactionError,
     ) as error:
         print(

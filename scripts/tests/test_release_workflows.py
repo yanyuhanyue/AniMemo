@@ -711,6 +711,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             tags = Path(directory) / "tags.txt"
             tags.write_text("v1.0.0\n", encoding="utf-8")
+            legacy = json.loads((ROOT / "release" / "publication-reservations.json").read_bytes())
+            legacy["reservations"] = [v for v in legacy["reservations"] if "kind" not in v]
+            legacy_path = Path(directory) / "legacy-reservations.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
             completed = subprocess.run(
                 [
                     os.sys.executable,
@@ -720,7 +724,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     "--tags-file",
                     str(tags),
                     "--publication-reservations-file",
-                    str(ROOT / "release" / "publication-reservations.json"),
+                    str(legacy_path),
                     "--bump",
                     "minor",
                     "--channel",

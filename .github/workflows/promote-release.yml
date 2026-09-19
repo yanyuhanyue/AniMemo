@@ -302,6 +302,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
+      actions: read
       contents: write
       packages: write
       id-token: write
@@ -399,6 +400,7 @@ jobs:
       - name: Reconcile the complete Stable transaction before its first mutation
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -411,6 +413,7 @@ jobs:
       - name: Add only absent Stable registry tags through the durable controller
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -424,6 +427,7 @@ jobs:
         id: tx_attest_file_01
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -443,6 +447,7 @@ jobs:
       - name: Reconcile the Stable manifest attestation readback
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -456,6 +461,7 @@ jobs:
         id: tx_attest_file_02
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -475,6 +481,7 @@ jobs:
       - name: Reconcile the Stable deployment contract attestation readback
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -488,6 +495,7 @@ jobs:
         id: tx_attest_file_03
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -507,6 +515,7 @@ jobs:
       - name: Reconcile the Stable installer materials attestation readback
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -532,6 +541,7 @@ jobs:
       - name: Commit Stable tag, Draft, individual assets, and publish through one controller
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
@@ -544,6 +554,7 @@ jobs:
       - name: Finalize and export the durable Stable transaction receipt
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |

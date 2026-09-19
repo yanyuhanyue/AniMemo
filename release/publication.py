@@ -229,6 +229,11 @@ def build_publication_plan(
         raise PublicationError("publication tag and channel differ")
     if not isinstance(commit, str) or not _COMMIT.fullmatch(commit):
         raise PublicationError("publication commit is invalid")
+    from .frozen_occupancy import FrozenOccupancyError, reject_frozen_target
+    try:
+        reject_frozen_target(tag)
+    except FrozenOccupancyError as error:
+        raise PublicationError(str(error)) from None
     normalized_assets = _normalize_assets(assets)
     normalized_transport_assets = (
         _normalize_transport_assets(transport_assets, tag=tag)
@@ -297,6 +302,10 @@ def build_publication_plan(
         "external_mutation_mode": "PLAN_ONLY",
         "commands": commands,
     }
+    from .frozen_occupancy import declared_predecessors
+    predecessors = declared_predecessors(tag)
+    if predecessors:
+        unsigned["predecessor_frozen_occupancies"] = predecessors
     if transport_assets is not None:
         unsigned["transport_assets"] = normalized_transport_assets
     return {**unsigned, "identity": _identity(unsigned)}
@@ -329,6 +338,9 @@ def validate_publication_plan(value: Any) -> dict[str, Any]:
     }
     if schema == SCHEMA:
         required.add("transport_assets")
+    from .frozen_occupancy import declared_predecessors
+    if declared_predecessors(value.get("tag")):
+        required.add("predecessor_frozen_occupancies")
     if set(value) != required:
         raise PublicationError("publication plan has unknown or missing fields")
     rebuilt = build_publication_plan(
