@@ -33,6 +33,7 @@ jobs:
           import datetime, json, os, pathlib, re, urllib.request, urllib.error
 
           M = '089519b4ad07a29571b970a48537f439a0432965'
+          OUTPUT_ROOT = pathlib.Path('/tmp/animemo-rc2-draft-readback')
           REPO = 'yanyuhanyue/AniMemo'
           BRANCH = 'diag/rc2-hosted-draft-readback-20260919'
           WORKFLOW = '.github/workflows/rc2-draft-readback-diagnostic.yml'
@@ -125,8 +126,8 @@ jobs:
               allowed[f'actions/workflows/{workflow_id}']='2026-03-10'
               workflow=get(f'actions/workflows/{workflow_id}')
               require(workflow['id']==workflow_id and workflow['path']==WORKFLOW)
-              root=pathlib.Path(os.environ['RUNNER_TEMP'])/'animemo-draft-diagnostic'
-              root.mkdir(exist_ok=False)
+              root=OUTPUT_ROOT
+              root.mkdir(mode=0o700,exist_ok=False)
               identity={'schema':'animemo.hosted-diagnostic-binding/v1','product_source_sha':M,
                         'checkout_sha':expected,'pr_head_sha':live['head']['sha'],'pr_base_sha':live['base']['sha'],
                         'pr_number':number,'pr_merge_ref_sha':os.environ['GITHUB_SHA'],
@@ -135,7 +136,8 @@ jobs:
                         'declared_permissions':{'contents':'write','actions':'read','pull-requests':'read','others':'none'},
                         'permission_evidence':'DECLARATION_ONLY_SEE_RUNNER_SETUP_LOG_FOR_REPORTED_TOKEN_PERMISSIONS',
                         'GET_count':len(events),'requests':events}
-              (root/'identity.json').write_text(json.dumps(identity,indent=2)+'\n',encoding='utf-8')
+              with (root/'identity.json').open('x',encoding='utf-8') as stream:
+                  stream.write(json.dumps(identity,indent=2)+'\n')
               with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as output:
                   output.write('checkout_sha='+expected+'\n')
 
@@ -178,7 +180,7 @@ jobs:
         with:
           name: rc2-draft-readback-diagnostic-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/animemo-draft-diagnostic/identity.json
-            ${{ runner.temp }}/animemo-draft-diagnostic/diagnostic.json
+            /tmp/animemo-rc2-draft-readback/identity.json
+            /tmp/animemo-rc2-draft-readback/diagnostic.json
           if-no-files-found: error
           retention-days: 7

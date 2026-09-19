@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from release.draft_readback_diagnostic import (
-    ASSETS, CONTROL, MAX_BODY, PREFIX, REPOSITORY, TAG, ReadOnlyProbe, run_probe,
+    ASSETS, CONTROL, CONTROL_FIELDS, MAX_BODY, PREFIX, REPOSITORY, TAG, ReadOnlyProbe, run_probe,
 )
 from release.publication_remote import GitHubAssetAdapter, GitHubDraftAdapter, GitHubPublishAdapter
 from release.publication_transaction import MutationIntent, ObservationClass
@@ -53,7 +53,7 @@ class DiagnosticTests(unittest.TestCase):
         self.notes = Path(__file__).with_name("diagnostic-rc2-notes.txt").read_bytes()
         self.target = {"id": 999, "tag_name": TAG, "name": TAG, "body": self.notes.decode(),
                        "draft": True, "prerelease": True, "assets": []}
-        self.control = {"id": CONTROL, "tag_name": "v2.0.0", "draft": True}
+        self.control = copy.deepcopy(CONTROL_FIELDS)
         self.responses = {
             PREFIX + "/releases/tags/" + TAG: lambda: Response({}, 404),
             PREFIX + "/releases?per_page=100&page=1": lambda: Response([self.control]),
@@ -235,7 +235,8 @@ class DiagnosticTests(unittest.TestCase):
             root=Path(directory)/'animemo-draft-diagnostic';root.mkdir()
             (root/'identity.json').write_text(json.dumps({'checkout_sha':'a'*40}))
             opener=Opener(self.responses)
-            with (mock.patch.dict(os.environ,{'GH_TOKEN':'SECRET_SENTINEL','RUNNER_TEMP':directory,'CHECKOUT_SHA':'a'*40},clear=True),
+            with (mock.patch.dict(os.environ,{'GH_TOKEN':'SECRET_SENTINEL','RUNNER_TEMP':'/untrusted/ignored','CHECKOUT_SHA':'a'*40},clear=True),
+                  mock.patch('release.draft_readback_diagnostic.OUTPUT_ROOT',root),
                   mock.patch('urllib.request.build_opener',return_value=opener),
                   mock.patch('subprocess.run',side_effect=AssertionError('command/git push denied')),
                   mock.patch('release.publication_transaction.GitRemoteAppendOnlyJournal.append',side_effect=AssertionError('journal denied')),
@@ -247,13 +248,82 @@ class DiagnosticTests(unittest.TestCase):
             self.assertNotIn('SECRET_SENTINEL',output)
             self.assertEqual(json.loads(output)['original_classifier']['classification'],'ABSENT')
 
+    def test_output_directory_and_identity_symlinks_are_rejected(self):
+        from release.draft_readback_diagnostic import main
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'output';root.mkdir()
+            identity=root/'identity.json';identity.write_text(json.dumps({'checkout_sha':'a'*40}))
+            with (mock.patch.dict(os.environ,{'GH_TOKEN':'sentinel','CHECKOUT_SHA':'a'*40},clear=True),
+                  mock.patch('release.draft_readback_diagnostic.OUTPUT_ROOT',root),
+                  mock.patch.object(type(root),'is_symlink',return_value=True),
+                  mock.patch('urllib.request.build_opener') as opener,
+                  self.assertRaisesRegex(RuntimeError,'DIAGNOSTIC_OUTPUT_DIRECTORY_INVALID')):
+                main()
+            opener.assert_not_called()
+            with (mock.patch.dict(os.environ,{'GH_TOKEN':'sentinel','CHECKOUT_SHA':'a'*40},clear=True),
+                  mock.patch('release.draft_readback_diagnostic.OUTPUT_ROOT',root),
+                  mock.patch.object(type(root),'is_symlink',side_effect=[False,True]),
+                  mock.patch('urllib.request.build_opener') as opener,
+                  self.assertRaisesRegex(RuntimeError,'DIAGNOSTIC_IDENTITY_FILE_INVALID')):
+                main()
+            opener.assert_not_called()
+
+    def test_existing_diagnostic_file_cannot_be_overwritten(self):
+        from release.draft_readback_diagnostic import main
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'output';root.mkdir()
+            (root/'identity.json').write_text(json.dumps({'checkout_sha':'a'*40}))
+            output=root/'diagnostic.json';output.write_text('preserve-existing')
+            with (mock.patch.dict(os.environ,{'GH_TOKEN':'sentinel','CHECKOUT_SHA':'a'*40},clear=True),
+                  mock.patch('release.draft_readback_diagnostic.OUTPUT_ROOT',root),
+                  mock.patch('urllib.request.build_opener',return_value=Opener(self.responses)),
+                  self.assertRaises(FileExistsError)):
+                main()
+            self.assertEqual(output.read_text(),'preserve-existing')
+
     def test_positive_control_does_not_override_original_failure(self):
-        self.responses[PREFIX]=lambda:Response({})
+        self.responses[PREFIX]=lambda:Response({'id':1327429673,'full_name':REPOSITORY,'permissions':{'push':False}})
         result=run_probe(self.probe())
         self.assertEqual(result['original_classifier']['classification'],'UNKNOWN')
         self.assertEqual(result['control_by_id'],'VISIBLE')
         self.assertTrue(result['control_in_list'])
+        self.assertEqual(result['alternative_read_contract']['classification'],'ABSENT')
+        self.assertEqual(result['GET_count'],8)
         self.assertNotIn('SECRET_SENTINEL',json.dumps(result))
+
+    def test_witness_wrong_repository_id_limited_visibility_and_control_drift(self):
+        repository={'id':1327429673,'full_name':REPOSITORY,'permissions':{'push':False}}
+        self.responses[PREFIX]=lambda:Response(repository)
+        baseline=dict(self.responses)
+        cases=[(PREFIX,lambda:Response(repository|{'id':999})),
+               (PREFIX,lambda:Response(repository|{'id':1327429673.0})),
+               (PREFIX,lambda:Response(repository|{'id':'1327429673'})),
+               (PREFIX,lambda:Response(repository|{'full_name':'wrong/repo'})),
+               (PREFIX+'/releases/'+str(CONTROL),lambda:Response(self.control|{'id':999})),
+               (PREFIX+'/releases/'+str(CONTROL),lambda:Response(self.control|{'updated_at':'2026-09-19T10:00:00Z'})),
+               (PREFIX+'/releases/'+str(CONTROL),lambda:Response({},404)),
+               (PREFIX+'/releases?per_page=100&page=1',lambda:Response([])),
+               (PREFIX+'/releases?per_page=100&page=1',lambda:Response([self.control],link='invalid'))]
+        for endpoint,response in cases:
+            self.responses=baseline|{endpoint:response}
+            result=run_probe(self.probe())
+            self.assertEqual(result['alternative_read_contract']['classification'],'UNKNOWN')
+        self.responses=baseline
+        calls=[]
+        def changing_control():
+            calls.append(1)
+            return Response(self.control if len(calls)==1 else self.control|{'draft':False})
+        self.responses[PREFIX+'/releases/'+str(CONTROL)]=changing_control
+        result=run_probe(self.probe())
+        self.assertEqual(result['alternative_read_contract']['classification'],'UNKNOWN')
+        self.responses=baseline
+        calls=[]
+        def changing_collection():
+            calls.append(1)
+            return Response([self.control] if len(calls)==1 else [self.control,{'id':999,'tag_name':'other','draft':False,'updated_at':'2026-09-19T10:00:00Z'}])
+        self.responses[PREFIX+'/releases?per_page=100&page=1']=changing_collection
+        result=run_probe(self.probe())
+        self.assertEqual(result['alternative_read_contract']['classification'],'UNKNOWN')
 
     def test_metadata_headers_are_projected_not_echoed(self):
         def malicious():
@@ -305,6 +375,7 @@ class BootstrapTests(unittest.TestCase):
     def test_bootstrap_live_pr_run_and_workflow_binding(self):
         ns=self.namespace
         with tempfile.TemporaryDirectory() as directory:
+            ns['OUTPUT_ROOT']=Path(directory)/'animemo-draft-diagnostic'
             event_path=Path(directory)/'event.json'
             event_path.write_text(json.dumps({'action':'ready_for_review','sender':{'id':111261350},'pull_request':self.pr}))
             environment={'GITHUB_EVENT_NAME':'pull_request','GITHUB_REPOSITORY':REPOSITORY,'GITHUB_REPOSITORY_ID':'1327429673',

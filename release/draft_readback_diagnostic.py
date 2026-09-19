@@ -23,12 +23,18 @@ PREFIX = "repos/" + REPOSITORY
 TAG = "v2.0.0-rc.2"
 CONTROL = 373784357
 MAX_BODY = 4 * 1024 * 1024
+OUTPUT_ROOT = Path("/tmp/animemo-rc2-draft-readback")
 ASSETS = {
     "checksums.txt": (269, "a5d39f3584761a13ebd051e6789ff7339b2c61d7774a460b79abf3d9b998d421"),
     "deployment-contract.json": (48335, "e59488431dfc4349ecbdabb70085d241481e98ce2bf982097e5179a52471d6fd"),
     "installer-materials.tar": (133898240, "762f049da6ff4bed7363d0e2309afba1827a70346633d392c9967e26a2d60293"),
     "release-manifest.json": (3305, "362354439ed5bf46f53784c12ed39415f5cb47290beb8f9e7dde8b2a2476be07"),
     "animemo-v2.0.0-rc.2-portable.tar": (410081280, "a84452882342253bc00e05b53280fa0e5b2fdc056d3a94f67d2fa39eb6dbf6dc"),
+}
+CONTROL_FIELDS = {
+    "id": CONTROL, "tag_name": "v2.0.0", "draft": True, "prerelease": False,
+    "immutable": False, "published_at": None, "updated_at": "2026-09-16T05:07:36Z",
+    "assets": [],
 }
 
 
@@ -69,6 +75,10 @@ class ReadOnlyProbe:
         self.collection_complete = False
         self.control_in_list = False
         self.control_by_id = False
+        self.control_exact = False
+        self.control_in_list_exact = False
+        self.collection_signature = None
+        self._collection_rows = []
 
     def endpoint(self, method, endpoint, payload):
         if method != "GET" or payload is not None or not isinstance(endpoint, str):
@@ -144,12 +154,14 @@ class ReadOnlyProbe:
         if kind == "REPOSITORY":
             event["permissions"] = field_shape(value, "permissions")
             event["push"] = field_shape(value.get("permissions") if isinstance(value, dict) else None, "push")
-            event["repository_identity_matches"] = isinstance(value, dict) and value.get("id") == 1327429673 and value.get("full_name") == REPOSITORY
+            event["repository_identity_matches"] = isinstance(value, dict) and type(value.get("id")) is int and value["id"] == 1327429673 and value.get("full_name") == REPOSITORY
         if kind == "LIST":
             self._collection(event, result, value, page)
         if kind == "CONTROL_ID":
             self.control_by_id = result.status == 200 and isinstance(value, dict) and type(value.get("id")) is int and value["id"] == CONTROL and value.get("tag_name") == "v2.0.0" and value.get("draft") is True
+            self.control_exact = result.status == 200 and exact_control(value)
             event["control_visible"] = self.control_by_id
+            event["frozen_control_matches"] = self.control_exact
         if kind == "UNIQUE_ID_READBACK":
             event["identity_matches"] = result.status == 200 and isinstance(value, dict) and type(value.get("id")) is int and value["id"] == self.target_id and value.get("tag_name") == TAG
         return result
@@ -167,6 +179,8 @@ class ReadOnlyProbe:
             self._ids, self._matches = set(), []
             self._next_page, self.target_id = 1, None
             self.collection_complete, self.control_in_list = False, False
+            self.control_in_list_exact, self.collection_signature = False, None
+            self._collection_rows = []
         event["item_count"] = len(value) if isinstance(value, list) else None
         try:
             has_next = GitHubReleaseAdapterBase(repository=REPOSITORY, tag=TAG)._next_release_page(result, page)
@@ -177,16 +191,20 @@ class ReadOnlyProbe:
                 if not isinstance(item, dict) or type(item.get("id")) is not int or item["id"] <= 0 or item["id"] in self._ids or not isinstance(item.get("tag_name"), str):
                     raise ValueError
                 self._ids.add(item["id"])
+                self._collection_rows.append((item["id"], item["tag_name"], item.get("draft"), item.get("updated_at")))
                 if item["tag_name"] == TAG:
                     self._matches.append(item["id"])
                 if item["id"] == CONTROL and item["tag_name"] == "v2.0.0" and item.get("draft") is True:
                     self.control_in_list = True
+                    self.control_in_list_exact = exact_control(item)
             if has_next and not value:
                 raise ValueError
             self.collection_complete = not has_next and len(value) < 100
             self._next_page = page + 1
             if self.collection_complete and len(self._matches) == 1:
                 self.target_id = self._matches[0]
+            if self.collection_complete:
+                self.collection_signature = tuple(sorted(self._collection_rows))
             event.update(target_match_count=len(self._matches), control_visible=self.control_in_list,
                          collection_complete=self.collection_complete)
         except (ConnectionError, ValueError):
@@ -194,6 +212,50 @@ class ReadOnlyProbe:
             self._next_page = -1
             self.collection_complete = False
             event["collection_complete"] = False
+
+
+def exact_control(value):
+    """All frozen control fields must be explicitly present with exact types."""
+    return isinstance(value, dict) and all(
+        key in value and type(value[key]) is type(expected) and value[key] == expected
+        for key, expected in CONTROL_FIELDS.items()
+    )
+
+
+def witnessed_absence(probe, original):
+    """Non-authoritative prototype, never wired into a publication controller.
+
+    A false/missing push metadata field is not granted a default. Instead require
+    actual visibility of the protected draft in two complete, unchanged listings
+    and two exact ID readbacks, plus exact repository identity, on this guarded
+    job's single request transport. Any missing, partial or drifting evidence is
+    UNKNOWN. This proves this read window only, not future mutation permission.
+    """
+    def sufficient(result):
+        return (result["classification"] == "UNKNOWN" and result["diagnostic_code"] in {
+            "GITHUB_RELEASE_DRAFT_VISIBILITY_UNVERIFIED", "GITHUB_RELEASE_PERMISSIONS_SHAPE_UNVERIFIED"
+        } and probe.collection_complete and probe.target_id is None and not probe._matches
+            and probe.control_in_list_exact and probe.control_exact
+            and probe.collection_signature is not None
+            and all(event["selected_version"] == "2026-03-10" and event["transport"] == "COMPLETE"
+                    for event in probe.events)
+            and all(type(row[2]) is bool and isinstance(row[3], str) for row in probe.collection_signature)
+            and any(row.get("endpoint_class") == "REPOSITORY" and row.get("status") == 200
+                    and row.get("repository_identity_matches") is True for row in probe.events[-2:]))
+    result = {"authority": "NON_AUTHORITATIVE_RECOVERY_PROTOTYPE", "classification": "UNKNOWN",
+              "code": "CONTROL_WITNESS_UNVERIFIED", "production_classifier_changed": False}
+    if not sufficient(original):
+        return result
+    signature = probe.collection_signature
+    probe.control_exact = False
+    repeated = observe_draft(probe)
+    try:
+        probe("GET", PREFIX + "/releases/" + str(CONTROL), None)
+    except ConnectionError:
+        return result
+    if sufficient(repeated) and signature == probe.collection_signature:
+        result.update(classification="ABSENT", code="EXACT_CONTROL_AND_COMPLETE_STABLE_COLLECTIONS")
+    return result
 
 
 def observe_draft(probe):
@@ -214,6 +276,7 @@ def run_probe(probe):
         control_status = "VISIBLE" if probe.control_by_id else "UNVERIFIED"
     except ConnectionError:
         control_status = "UNKNOWN"
+    alternative = witnessed_absence(probe, original)
     assets_status = "NOT_OBSERVED_NO_UNIQUE_TARGET"
     if probe.target_id is not None:
         adapter = GitHubReleaseAdapterBase(repository=REPOSITORY, tag=TAG, request=probe)
@@ -243,6 +306,7 @@ def run_probe(probe):
             assets_status = "UNKNOWN"
     return {"schema": "animemo.hosted-draft-readback-diagnostic/v1",
             "original_classifier": original, "control_by_id": control_status,
+            "alternative_read_contract": alternative,
             "control_in_list": probe.control_in_list, "collection_complete": probe.collection_complete,
             "canonical_assets": assets_status, "requests": probe.events,
             "GET_count": len(probe.events), "business_mutations": 0,
@@ -253,9 +317,14 @@ def main():
     token = os.environ.pop("GH_TOKEN", None)
     if not token or os.environ.get("GITHUB_TOKEN"):
         raise RuntimeError("DIAGNOSTIC_CREDENTIAL_INVALID")
-    root = Path(os.environ["RUNNER_TEMP"]) / "animemo-draft-diagnostic"
+    root = OUTPUT_ROOT
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError("DIAGNOSTIC_OUTPUT_DIRECTORY_INVALID")
     # Bootstrap before checkout has independently verified the live PR and run.
-    identity = json.loads((root / "identity.json").read_text(encoding="utf-8"))
+    identity_path = root / "identity.json"
+    if identity_path.is_symlink() or not identity_path.is_file():
+        raise RuntimeError("DIAGNOSTIC_IDENTITY_FILE_INVALID")
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
     if identity["checkout_sha"] != os.environ["CHECKOUT_SHA"]:
         raise RuntimeError("DIAGNOSTIC_CHECKOUT_INVALID")
     probe = ReadOnlyProbe(token)
@@ -267,9 +336,11 @@ def main():
     except Exception:
         # Never print raw exceptions or server content. Preserve safe events.
         result = {"status": "DIAGNOSTIC_INTERNAL_FAILURE", "requests": probe.events}
-        (root / "diagnostic.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        with (root / "diagnostic.json").open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(result, indent=2) + "\n")
         raise RuntimeError("DIAGNOSTIC_INTERNAL_FAILURE") from None
-    (root / "diagnostic.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    with (root / "diagnostic.json").open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"classification": result["original_classifier"], "GET_count": result["GET_count"]}))
 
 
