@@ -158,6 +158,9 @@ class RecoveryCliTests(unittest.TestCase):
             args += ["--receipt", str(self.root / "receipt.json")]
         output, error = io.StringIO(), io.StringIO()
         with (
+            # This fixture owns fake remotes and a local journal. It must not
+            # inherit the surrounding CI job's production hosted identity.
+            mock.patch.dict("os.environ", {"GITHUB_ACTIONS": "false", "GH_TOKEN": "", "GITHUB_TOKEN": ""}),
             mock.patch("release.publication_transaction._run_git_command", side_effect=FrozenGitFixture()),
             mock.patch.object(cli, "build_publication_runtime", return_value=self.runtime),
             mock.patch.object(cli, "GitRemoteAppendOnlyJournal", return_value=self.journal),
