@@ -16,5 +16,5 @@ requests>=2.33,<3
 python-dotenv>=1.2.2,<2
 Pillow>=12.3,<13
 cryptography>=50,<51
-packaging>=25,<26
+packaging>=26.3,<27
 sqlparse>=0.6,<0.7
