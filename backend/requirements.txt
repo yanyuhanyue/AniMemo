@@ -30,7 +30,7 @@ cryptography==50.0.0
     # via -r requirements.in
 dj-database-url==2.3.0
     # via -r requirements.in
-django==5.2.17
+django==6.1
     # via
     #   -r requirements.in
     #   dj-database-url
@@ -119,10 +119,6 @@ typing-extensions==4.16.0
     #   dj-database-url
     #   psycopg
     #   referencing
-tzdata==2026.3 ; sys_platform == "win32"
-    # via
-    #   django
-    #   psycopg
 uritemplate==4.2.0
     # via drf-spectacular
 urllib3==2.7.0
