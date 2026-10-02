@@ -30,7 +30,7 @@
     "@fortawesome/react-fontawesome": "^3.1.1",
     "@vitejs/plugin-react": "5.0.4",
     "autoprefixer": "^10.4.21",
-    "axios": "^1.11.0",
+    "axios": "^1.20.0",
     "gsap": "^3.13.0",
     "postcss": "8.5.26",
     "qrcode.react": "^4.2.0",
