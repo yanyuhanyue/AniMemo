@@ -56,6 +56,18 @@ class LocalBatchScopeTests(unittest.TestCase):
             with self.subTest(plan=type(plan).__name__), self.assertRaises(scope.ControllerFailure):
                 self.authorization.reserve_round(plan)
 
+    def test_later_round_cannot_switch_confirmed_profile_mode(self):
+        from scripts.candidate_vm_harness import canonical_json_bytes, sha256_bytes
+        self.authorization.reserve_round(self.plan).close()
+        later = self.next_plan(2)
+        for flags in ({'platform_diagnostic': True, 'profiles': later.profiles[:1]},
+                      {'runtime_offline_only': True, 'profiles': later.profiles[2:]}):
+            plan = replace(later, **flags)
+            plan = replace(plan, plan_digest=sha256_bytes(canonical_json_bytes(plan.identity_body())))
+            with self.subTest(flags=tuple(flags)), self.assertRaises(scope.ControllerFailure):
+                self.authorization.reserve_round(plan)
+        self.assertEqual(len(self.authorization._reservations), 1)
+
     def test_expiry_close_and_serialization_cannot_reopen_reservation(self):
         reservation = self.authorization.reserve_round(self.plan)
         for value in (reservation, self.authorization):

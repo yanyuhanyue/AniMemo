@@ -27,6 +27,13 @@ DEVELOPMENT_RUNTIME_FILES = (
     'scripts/development_workload_root.py',
     'scripts/development_platform_diagnostic.py',
     'scripts/linux_attestation_probe.py',
+    'scripts/development_published_planning.py',
+    'scripts/development_published_observer.py',
+    'scripts/development_diagnostic_preflight.py',
+    'scripts/runtime_development_boundary.py',
+    'scripts/runtime_development_retention.py',
+    'scripts/userspace_platform_probe.py',
+    'scripts/development_userspace_inputs.py',
 )
 
 
@@ -42,20 +49,26 @@ def require_material_compatibility(material_source_sha, execution_source_sha):
     for name in filter(None, paths):
         path = PurePosixPath(name)
         projected_source = path.suffix in {'.py','.json','.md'} and path.parts[0] in {
-            'scripts', 'installer', 'durability', 'release', 'updater'}
+            'scripts', 'installer', 'durability', 'release', 'updater', 'bootstrap_kit'}
         # CI and documentation are not qualified OCI or wheel bytes. Runtime
         # source/schema deltas are copied into the separately identified DEV
         # tree; the original Q/OCI/pretrust bytes remain independently bound.
-        non_runtime = name == '.gitattributes' or path.parts[0] == 'docs' or (
+        projected_deployment = (name == 'deploy/install-updater.sh'
+                                and name in _FIXED_DEPLOYMENT_FILES)
+        # These portal/test files are outside the runtime projection. Build
+        # recipes and all other deployment paths still require rebuilt material.
+        non_runtime = name in {'.gitattributes', 'sites/install-portal/app.js',
+            'tests/install-portal-static.test.mjs', 'tests/test_install_bootstrap.py'} or (
+            path.parts[0] == 'docs') or (
             path.parts[:2] == ('.github','workflows') and path.suffix in {'.yml','.yaml'})
-        if not projected_source and not non_runtime:
+        if not projected_source and not projected_deployment and not non_runtime:
             raise h.CandidateHarnessError('DEVELOPMENT_LOCAL_MATERIAL_REBUILD_REQUIRED')
 
 
 def execution_file_identities(source_sha, source_tree):
     _check_checkout(source_sha, source_tree)
     raw = subprocess.check_output(['git', '-C', str(ROOT), 'ls-tree', '-rz',
-        'HEAD', '--', 'durability', 'release', 'updater', 'installer',
+        'HEAD', '--', 'durability', 'release', 'updater', 'installer', 'bootstrap_kit',
         *_FIXED_DEPLOYMENT_FILES, *DEVELOPMENT_RUNTIME_FILES], timeout=30)
     blobs = {}
     for record in filter(None, raw.decode('utf-8').split('\0')):
@@ -125,7 +138,7 @@ def project_execution_tree(*, code_root, code_identities, material_root, materia
 
 
 class HeldDevelopmentSource:
-    __slots__ = ('_root', '_source_root', '_holds', '_closed', '_execution', 'source_sha', 'source_tree', 'inventory_digest')
+    __slots__ = ('_root', '_source_root', '_holds', '_closed', '_execution', 'source_sha', 'source_tree', 'inventory_digest', 'published_subject_digest', 'userspace_probe_digest')
 
     def __init__(self, *_args, **_kwargs):
         raise TypeError('Development source authority is acquired only through its factory')
@@ -162,7 +175,10 @@ class HeldDevelopmentSource:
 
 
 @contextmanager
-def acquire_development_source(provider, *, source_sha, source_tree, attestation_probe_inputs=None):
+def acquire_development_source(provider, *, source_sha, source_tree, attestation_probe_inputs=None,
+                               published_planning_inputs=None, userspace_inputs=None):
+    if sum(item is not None for item in (attestation_probe_inputs, published_planning_inputs, userspace_inputs)) > 1:
+        raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_INPUT_MODES_CONFLICT')
     if os.name != 'nt' or type(provider) is not h.ClosedVmwareProvider:
         raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_PROVIDER_INVALID')
     provider._require_active_execution_authority()
@@ -182,6 +198,8 @@ def acquire_development_source(provider, *, source_sha, source_tree, attestation
     value = object.__new__(HeldDevelopmentSource)
     value._root, value._closed, value._execution = root, False, provider._execution
     value.source_sha, value.source_tree = source_sha, source_tree
+    value.published_subject_digest = None
+    value.userspace_probe_digest = None
     value._holds = ExitStack()
     try:
         value._holds.enter_context(hold_windows_private_path_chain(root, allow_leaf_child_writes=True))
@@ -202,11 +220,29 @@ def acquire_development_source(provider, *, source_sha, source_tree, attestation
             if set(additions)&set(identities):
                 raise h.CandidateHarnessError('DEVELOPMENT_PROBE_INPUT_COLLISION')
             identities.update(additions)
+        if published_planning_inputs is not None:
+            from scripts.development_published_planning import prepare_published_planning_inputs
+            readback = create_windows_private_directory(root, prefix='published-readback')
+            additions, subject_digest = prepare_published_planning_inputs(
+                loaded=loaded, execution_root=draft, readback_root=readback,
+                **published_planning_inputs)
+            if set(additions) & set(identities):
+                raise h.CandidateHarnessError('DEVELOPMENT_PROBE_INPUT_COLLISION')
+            identities.update(additions)
+            value.published_subject_digest = subject_digest
+        if userspace_inputs is not None:
+            from scripts.development_userspace_inputs import prepare_userspace_inputs
+            additions, probe_digest = prepare_userspace_inputs(execution_root=draft,
+                source_sha=source_sha, source_tree=source_tree, **userspace_inputs)
+            if set(additions) & set(identities):
+                raise h.CandidateHarnessError('DEVELOPMENT_PROBE_INPUT_COLLISION')
+            identities.update(additions)
+            value.userspace_probe_digest = probe_digest
         value._source_root = create_windows_private_named_directory(root,
             name=hashlib.sha256(h.canonical_json_bytes(identities)).hexdigest())
         value._holds.enter_context(hold_windows_private_tree_snapshot(draft,
             expected_file_identities=identities, private_root=value._source_root,
-            maximum_files=4096, maximum_file_bytes=64 * 1024 * 1024,
+            maximum_files=4096, maximum_file_bytes=(256 if published_planning_inputs is not None or userspace_inputs is not None else 64) * 1024 * 1024,
             maximum_total_bytes=512 * 1024 * 1024))
         # The final snapshot also holds its draft source files without DELETE
         # sharing. Keep both trees until close() releases every snapshot hold.
@@ -233,4 +269,8 @@ def require_development_source(provider, plan):
             or authority.inventory_digest != plan.execution_inventory_digest):
         raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_AUTHORITY_INVALID')
     authority.require_open()
+    if getattr(authority, 'published_subject_digest', None) != plan.published_subject_digest:
+        raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_AUTHORITY_INVALID')
+    if getattr(authority, 'userspace_probe_digest', None) != plan.userspace_probe_digest:
+        raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_AUTHORITY_INVALID')
     return authority

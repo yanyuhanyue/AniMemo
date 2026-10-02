@@ -291,7 +291,7 @@ class InstallerMaterialsTests(unittest.TestCase):
                 target = source_root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(relative + "\n", encoding="utf-8")
-            for package in ("durability", "release", "updater", "installer"):
+            for package in ("durability", "release", "updater", "installer", "bootstrap_kit"):
                 package_root = source_root / package
                 package_root.mkdir(parents=True, exist_ok=True)
                 (package_root / "__init__.py").write_text("", encoding="utf-8")
@@ -356,7 +356,7 @@ class InstallerMaterialsTests(unittest.TestCase):
                 target = source_root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(relative + "\n", encoding="utf-8")
-            for package in ("durability", "release", "updater", "installer"):
+            for package in ("durability", "release", "updater", "installer", "bootstrap_kit"):
                 package_root = source_root / package
                 package_root.mkdir(parents=True, exist_ok=True)
                 (package_root / "__init__.py").write_text("", encoding="utf-8")

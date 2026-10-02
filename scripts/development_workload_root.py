@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,9 @@ def _seal_development_tree(stage, parent_path, leaf, inventory_digest):
 
 
 def run_fixed_development(*, profile, input_digest, material_inventory_digest,
-                          execution_inventory_digest, binding, context, diagnostic):
+                          execution_inventory_digest, binding, context, diagnostic,
+                          runtime_deadline=None, preparation_check=None,
+                          runtime_inputs_inventory_digest=None):
     session_id = binding.get('session_id')
     workload_mode = binding.get('workload_mode')
     if (os.geteuid() != 0 or type(session_id) is not str
@@ -50,9 +53,27 @@ def run_fixed_development(*, profile, input_digest, material_inventory_digest,
                    for value in (input_digest, material_inventory_digest, execution_inventory_digest))
             or binding.get('execution_inventory_digest') != execution_inventory_digest):
         raise ValueError('DEVELOPMENT_ROOT_SCOPE_INVALID')
-    if (workload_mode not in {'CLEAN_PREACCEPTANCE', 'PLATFORM_DIAGNOSTIC'}
-            or workload_mode == 'PLATFORM_DIAGNOSTIC' and profile != 'FRESH_BASE'):
+    if (workload_mode not in {'CLEAN_PREACCEPTANCE', 'PLATFORM_DIAGNOSTIC', 'PUBLISHED_PLATFORM_PLAN'}
+            or workload_mode in {'PLATFORM_DIAGNOSTIC', 'PUBLISHED_PLATFORM_PLAN'} and profile != 'FRESH_BASE'):
         raise ValueError('DEVELOPMENT_ROOT_SCOPE_INVALID')
+    if 'runtime_offline_only' in binding and (
+            binding['runtime_offline_only'] is not True or workload_mode != 'CLEAN_PREACCEPTANCE'
+            or profile != 'RUNTIME_BASE_OFFLINE' or type(context) is not dict
+            or context.get('profile') != 'RUNTIME_BASE_OFFLINE'):
+        raise ValueError('DEVELOPMENT_ROOT_SCOPE_INVALID')
+    if binding.get('runtime_offline_only'):
+        if (runtime_deadline is None or preparation_check is None
+                or type(runtime_inputs_inventory_digest) is not str
+                or re.fullmatch('sha256:[0-9a-f]{64}', runtime_inputs_inventory_digest) is None):
+            raise ValueError('DEVELOPMENT_RUNTIME_BOUNDARY_REQUIRED')
+        runtime_deadline.check('ROOT_PREPARATION')
+        preparation_check(binding, (
+            '/var/lib/animemo/prepublication-candidates/v2/' + input_digest[7:],
+            '/var/lib/animemo/local-development/' + execution_inventory_digest[7:],
+            '/var/lib/animemo/local-development/runtime-inputs/' + binding['runtime_trust_selection_digest'][7:],
+            '/var/lib/animemo/local-development/python-runtime',
+            '/var/lib/animemo/local-development/profile-report.json',
+            '/var/lib/animemo/local-development/runtime-authority/' + session_id + '.json'))
     os.umask(0o077)
     os.chdir('/')
     os.environ.clear()
@@ -66,6 +87,45 @@ def run_fixed_development(*, profile, input_digest, material_inventory_digest,
         Path('/tmp') / ('animemo-development-' + session_id + '-' + profile),
         Path('/var/lib/animemo/local-development'),
         execution_inventory_digest.removeprefix('sha256:'), execution_inventory_digest)
+    if binding.get('runtime_offline_only'):
+        runtime_deadline.check('ROOT_TRUST_SEAL')
+        _seal_development_tree(Path('/tmp') / ('animemo-runtime-inputs-' + session_id),
+            Path('/var/lib/animemo/local-development/runtime-inputs'),
+            binding['runtime_trust_selection_digest'][7:], runtime_inputs_inventory_digest)
+        channel_parent = _root_directory(Path('/var/lib/animemo/local-development/runtime-authority'))
+        try:
+            fd = os.open(session_id + '.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600, dir_fd=channel_parent)
+            with os.fdopen(fd, 'wb') as channel:
+                channel.write((json.dumps(binding, ensure_ascii=False, sort_keys=True,
+                    separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8'))
+                channel.flush()
+                os.fsync(channel.fileno())
+        finally:
+            os.close(channel_parent)
+    if workload_mode == 'PUBLISHED_PLATFORM_PLAN':
+        planning = execution_root / 'published-planning'
+        subject_raw = (planning / 'subject.json').read_bytes()
+        if 'sha256:' + hashlib.sha256(subject_raw).hexdigest() != binding.get('published_subject_digest'):
+            raise ValueError('DEVELOPMENT_PUBLISHED_SUBJECT_CHANGED')
+        subject = json.loads(subject_raw)
+        product = _seal_development_tree(planning / 'published-product',
+            Path('/var/lib/animemo/bootstrap-authority/v1'), 'materials', subject['product_inventory_digest'])
+        # These are fixed verified Guest writes needed by online Stage-0, not
+        # an authorization record. Only production Stage-0 may create that record.
+        for name, target, digest in (
+            ('installer-materials.tar', product.parent / 'installer-materials.tar', subject['archive_sha256']),
+            ('gh_2.97.0_linux_amd64.deb', product / 'gh_2.97.0_linux_amd64.deb', subject['gh_package_sha256']),
+        ):
+            hashed = hashlib.sha256()
+            with (planning / name).open('rb') as source, target.open('xb') as output:
+                for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                    hashed.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if 'sha256:' + hashed.hexdigest() != digest:
+                raise ValueError('DEVELOPMENT_PUBLISHED_INPUT_CHANGED')
     diagnostic.stage('MATERIAL_VERIFIED')
     receipt = Path('/var/lib/animemo/local-development/profile-report.json')
     parent = _root_directory(receipt.parent)
@@ -79,6 +139,11 @@ def run_fixed_development(*, profile, input_digest, material_inventory_digest,
         program = ('import sys;from pathlib import Path;sys.path.insert(0,' + repr(str(execution_root))
             + ');from scripts.development_runtime_entry import main;raise SystemExit(main(Path('
             + repr(str(material_root)) + '),workload_mode=' + repr(workload_mode) + '))')
+        if workload_mode == 'PUBLISHED_PLATFORM_PLAN':
+            # A separate interpreter loads only original product modules. The
+            # reviewed observer is an explicit file, never a same-name package.
+            program = ('import runpy;runpy.run_path(' + repr(str(execution_root /
+                'scripts/development_published_observer.py')) + ",run_name='__main__')")
         environment = dict(os.environ)
         environment['ANIMEMO_CANDIDATE_PROFILE_CONTEXT_B64URL'] = base64.urlsafe_b64encode(
             (json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode()).decode().rstrip('=')
@@ -89,7 +154,8 @@ def run_fixed_development(*, profile, input_digest, material_inventory_digest,
             completed = subprocess.run(['/usr/bin/python3', '-I', '-B', '-c', program,
                 '--profile', profile, '--binding', json.dumps(binding, sort_keys=True, separators=(',', ':'))],
                 env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, pass_fds=(fd,), timeout=4 * 60 * 60)
+                stderr=subprocess.DEVNULL, pass_fds=(fd,),
+                timeout=runtime_deadline.workload_timeout(4 * 60 * 60) if runtime_deadline else 4 * 60 * 60)
         finally:
             os.close(fd)
         diagnostic.exited('RUNTIME_RUNNER', completed.returncode)

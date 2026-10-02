@@ -11,8 +11,10 @@ import os
 import signal
 import subprocess
 
+from bootstrap_kit.owned_process import ChildProcessError as AccountedChildError
 
-class ChildProcessError(RuntimeError):
+
+class ChildProcessError(AccountedChildError):
     code = 'CANDIDATE_CHILD_PROCESS_SCOPE_FAILED'
 
     def __init__(self):
@@ -43,6 +45,7 @@ class _WindowsJob:
             'SetInformationJobObject': ([ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32], ctypes.c_int),
             'AssignProcessToJobObject': ([ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int),
             'TerminateJobObject': ([ctypes.c_void_p, ctypes.c_uint32], ctypes.c_int),
+            'QueryInformationJobObject': ([ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p], ctypes.c_int),
             'CloseHandle': ([ctypes.c_void_p], ctypes.c_int),
             'CreateToolhelp32Snapshot': ([ctypes.c_uint32, ctypes.c_uint32], ctypes.c_void_p),
             'Thread32First': ([ctypes.c_void_p, ctypes.POINTER(ThreadEntry)], ctypes.c_int),
@@ -98,6 +101,12 @@ class _WindowsJob:
         if not self.api.TerminateJobObject(self.handle, 1):
             raise ChildProcessError()
 
+    def active_processes(self):
+        # Reuse the existing Job accounting implementation; do not infer tree
+        # completion from the root process exit or a successful CloseHandle.
+        from bootstrap_kit.owned_process import _WindowsJob as AccountedJob
+        return AccountedJob.active_processes(self)
+
     def close(self):
         if self.handle is not None:
             if not self.api.CloseHandle(self.handle):
@@ -109,6 +118,8 @@ class OwnedChild:
     """Private command lifetime; tree=False is reserved for vmrun containment."""
     def __init__(self, argv, *, tree=True, **options):
         self.tree, self.job, self.process = tree, None, None
+        self.receipt = None
+        self._closed = False
         if os.name == 'nt':
             options['creationflags'] = options.get('creationflags', 0) | 0x08000000
             if tree:
@@ -136,6 +147,27 @@ class OwnedChild:
             self.process.kill()
 
     def close(self):
+        if self._closed:
+            return self.receipt
+        if self.tree:
+            # This existing supervisor provides independently observed Job/group
+            # emptiness and retains a precise failure receipt.
+            from bootstrap_kit.owned_process import OwnedProcess
+            owner = object.__new__(OwnedProcess)
+            owner.process, owner.job = self.process, self.job
+            owner.closed, owner.receipt = False, None
+            try:
+                self.receipt = owner.stop_and_reap()
+            finally:
+                self.receipt = owner.receipt
+                if self.process is not None and self.process.poll() is not None:
+                    for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                        if stream is not None:
+                            stream.close()
+                    if os.name == 'nt':
+                        self.process._handle.Close()
+                self._closed = owner.closed
+            return self.receipt
         try:
             if self.job is not None:
                 self.job.close()
@@ -149,6 +181,10 @@ class OwnedChild:
                 for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
                     if stream is not None:
                         stream.close()
+                self.receipt = {'pid': self.process.pid, 'root_reaped': True,
+                    'tree_empty': None, 'job_or_group': 'ROOT_ONLY', 'failures': ()}
+                self._closed = True
+        return self.receipt
 
     def __enter__(self):
         return self

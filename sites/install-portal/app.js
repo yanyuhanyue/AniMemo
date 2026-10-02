@@ -156,10 +156,6 @@ export function validateReleaseState(candidate) {
   return Object.freeze({ ...candidate });
 }
 
-function shellSingleQuote(value) {
-  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
-}
-
 export function createTransportPlan(candidate, transport) {
   const state = validateReleaseState(candidate);
   if (state.state !== "REAL_VERIFIED_RELEASE") {
@@ -173,47 +169,14 @@ export function createTransportPlan(candidate, transport) {
     });
   }
 
-  const { release } = state;
-  const stageDirectory = "./animemo-stage0";
-  const installerPath = `${stageDirectory}/${release.assets.installer.name}`;
-  const installerSha256 = release.assets.installer.sha256.slice("sha256:".length);
-  const verificationCommands = Object.freeze([
-    `gh release verify ${release.tag} --repo ${release.repository}`,
-    `gh release verify-asset ${release.tag} ${shellSingleQuote(installerPath)} --repo ${release.repository}`,
-    `printf '%s  %s\\n' ${shellSingleQuote(installerSha256)} ${shellSingleQuote(installerPath)} | sha256sum --check --strict -`,
-  ]);
-  const prepareStage = `install -d -m 0700 ${shellSingleQuote(stageDirectory)}`;
-
-  if (transport === "github") {
+  if (transport === "github" || transport === "official-mirror") {
     return Object.freeze({
-      acquisitionCommand: `${prepareStage} && gh release download ${release.tag} --repo ${release.repository} --pattern ${shellSingleQuote(release.assets.installer.name)} --dir ${shellSingleQuote(stageDirectory)}`,
+      acquisitionCommand: null,
       authority: RELEASE_AUTHORITY,
-      available: true,
-      reason: null,
+      available: false,
+      reason: "独立首信任交付待验证，在线安装入口暂不可用",
       transport,
-      verificationCommands,
-    });
-  }
-  if (transport === "official-mirror") {
-    if (state.officialMirror === null) {
-      return Object.freeze({
-        acquisitionCommand: null,
-        authority: RELEASE_AUTHORITY,
-        available: false,
-        reason: "当前没有已资格认证的 Official Mirror",
-        transport,
-        verificationCommands,
-      });
-    }
-    const baseUrl = `${state.officialMirror.baseUrl.replace(/\/$/, "")}/`;
-    const assetUrl = new URL(state.officialMirror.installerPath, baseUrl);
-    return Object.freeze({
-      acquisitionCommand: `${prepareStage} && curl --fail --location --proto '=https' --tlsv1.2 --output ${shellSingleQuote(installerPath)} ${shellSingleQuote(assetUrl.href)}`,
-      authority: RELEASE_AUTHORITY,
-      available: true,
-      reason: null,
-      transport,
-      verificationCommands,
+      verificationCommands: Object.freeze([]),
     });
   }
   if (transport === "local-bundle") {

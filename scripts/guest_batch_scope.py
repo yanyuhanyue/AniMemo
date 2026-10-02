@@ -48,14 +48,19 @@ def material_identity(plan):
 
 
 def _require_plan(purpose, plan):
-    from scripts.candidate_vm_harness import CandidateHarnessPlan, PROFILES, canonical_json_bytes, sha256_bytes
-    from scripts.development_plan import is_development_plan
+    from scripts.candidate_vm_harness import (
+        CandidateHarnessError, CandidateHarnessPlan, PROFILES, canonical_json_bytes, sha256_bytes,
+    )
+    from scripts.development_plan import confirmed_profile_names, is_development_plan
     from scripts.formal_plan import is_formal_plan
     accepted = (is_development_plan(plan) if purpose == 'LOCAL_INSTALLER_DEVELOPMENT'
         else type(plan) is CandidateHarnessPlan if purpose == 'CANDIDATE_ACCEPTANCE'
         else is_formal_plan(plan) if purpose == 'FORMAL_POSTPUBLICATION' else False)
     _require(accepted)
-    expected_profiles = ('FRESH_BASE',) if is_development_plan(plan) and plan.platform_diagnostic else PROFILES
+    try:
+        expected_profiles = confirmed_profile_names(plan.identity_body()) if is_development_plan(plan) else PROFILES
+    except CandidateHarnessError:
+        raise ControllerFailure('LOCAL_BATCH_AUTHORIZATION_INVALID') from None
     _require(sha256_bytes(canonical_json_bytes(plan.identity_body())) == plan.plan_digest
         and tuple(p.profile for p in plan.profiles) == expected_profiles
         and len({p.clone_identity for p in plan.profiles}) == len(expected_profiles))
@@ -85,12 +90,30 @@ class LocalRoundReservation:
 
 
 class LocalBatchAuthorization:
-    def __init__(self, issuer, *, body, root, holds, monotonic_now):
+    def __init__(self, issuer, *, body, root, holds, monotonic_now, runtime_handoff=None):
         _require(issuer is _ISSUER)
         self._body = json.loads(json.dumps(body))
         self.root, self._holds = root, holds
         self.deadline = monotonic_now + WINDOW_SECONDS
         self.expires_utc = body['confirmed_utc_seconds'] + WINDOW_SECONDS
+        initial = body.get('initial_plan', {})
+        if initial.get('runtimeBaselineOnly') is True:
+            _require(type(body.get('capture_limit')) is int and body['capture_limit'] == 0)
+        self._runtime_handoff = runtime_handoff
+        if initial.get('runtimeOfflineOnly') is True:
+            from scripts.runtime_target_handoff import RuntimeTargetHandoff
+            _require(type(runtime_handoff) is RuntimeTargetHandoff)
+            from scripts.runtime_development_boundary import (
+                parse_authorization_deadline,
+            )
+            expires = parse_authorization_deadline(initial.get('runtimeAuthorizationDeadline'))
+            self.expires_utc = min(self.expires_utc, expires)
+            self.deadline = min(self.deadline, monotonic_now + expires - body['confirmed_utc_seconds'])
+            target_expires, target_deadline = runtime_handoff.expiry_limits
+            self.expires_utc = min(self.expires_utc, target_expires)
+            self.deadline = min(self.deadline, target_deadline)
+        else:
+            _require(runtime_handoff is None)
         self.purpose, self.authorization_id = body['purpose'], body['authorization_id']
         self.round_limit = body['round_limit']
         _require(type(self.round_limit) is int and 1 <= self.round_limit <= PURPOSES[self.purpose])
@@ -105,12 +128,32 @@ class LocalBatchAuthorization:
     def require_open(self):
         _require(not self._closed and time.monotonic() < self.deadline
             and time.time() < self.expires_utc)
+        if self._runtime_handoff is not None:
+            self._runtime_handoff.require_consent_open()
+
+    def require_runtime_target(self, provider, plan):
+        self.require_open()
+        if getattr(plan, 'runtime_offline_only', False):
+            _require(self._runtime_handoff is not None)
+            self._runtime_handoff.require_active_target(provider, plan)
+        else:
+            _require(self._runtime_handoff is None)
 
     def reserve_round(self, plan):
         from scripts.candidate_vm_harness import canonical_json_bytes, sha256_bytes
         with self._lock:
             self.require_open()
+            if self._runtime_handoff is not None:
+                self._runtime_handoff.require_frozen_target()
             _require_plan(self.purpose, plan)
+            if self.purpose == 'LOCAL_INSTALLER_DEVELOPMENT':
+                initial, current = self._body['initial_plan'], plan.identity_body()
+                _require(current['developmentMode'] == initial['developmentMode']
+                    and current.get('runtimeOfflineOnly', False) == initial.get('runtimeOfflineOnly', False)
+                    and current.get('runtimeBaselineOnly', False) == initial.get('runtimeBaselineOnly', False)
+                    and all(current.get(name) == initial.get(name) for name in (
+                        'runtimeAuthorizationDeadline', 'runtimeTrustSelectionDigest', 'runtimeRetentionPolicy'))
+                    and (not current.get('runtimeOfflineOnly') or self.round_limit == 1))
             _require(material_identity(plan) == self._body['material_identity']
                 and sha256_bytes(canonical_json_bytes(plan.identity_body())) == plan.plan_digest
                 and len(self._reservations) < self.round_limit
@@ -131,6 +174,10 @@ class LocalBatchAuthorization:
     def consume_capture(self):
         with self._lock:
             self.require_open()
+            _require(self._body.get('capture_limit', 1) == 1
+                and self._body.get('initial_plan', {}).get('runtimeBaselineOnly', False) is False)
+            if self._runtime_handoff is not None:
+                self._runtime_handoff.require_frozen_target()
             _require(not self._capture_consumed and bool(self._reservations))
             _write(self.root/'capture-attempt.json', {'attempt': 1, 'authorization_id': self.authorization_id})
             self._capture_consumed = True
@@ -160,15 +207,27 @@ def authorization_root(authorization_id):
     return Path('E:/')/hashlib.sha256(authorization_id.encode('ascii')).hexdigest()
 
 
-def confirm_local_batch(*, authorization_id, purpose, plan, round_limit=1):
+def confirm_local_batch(*, authorization_id, purpose, plan, round_limit=1, runtime_handoff=None):
     from scripts.candidate_vm_harness import canonical_json_bytes, sha256_bytes
     from release.candidate_failure_policy import FAILURE_POLICY
     validate_authorization_id(authorization_id, purpose)
     _require(type(round_limit) is int and 1 <= round_limit <= PURPOSES[purpose])
     _require_plan(purpose, plan)
+    runtime = getattr(plan, 'runtime_offline_only', False)
+    baseline = getattr(plan, 'runtime_baseline_only', False)
+    if runtime:
+        from scripts.runtime_target_handoff import RuntimeTargetHandoff
+        _require(purpose == 'LOCAL_INSTALLER_DEVELOPMENT' and type(runtime_handoff) is RuntimeTargetHandoff)
+    else:
+        _require(runtime_handoff is None)
+    if getattr(plan, 'runtime_offline_only', False):
+        from scripts.runtime_development_boundary import parse_authorization_deadline
+        _require(time.time() < parse_authorization_deadline(plan.runtime_authorization_deadline))
     if purpose == 'LOCAL_INSTALLER_DEVELOPMENT':
         from scripts.development_plan import is_development_plan
         _require(is_development_plan(plan))
+        if plan.published_subject_digest is not None or plan.runtime_offline_only:
+            _require(round_limit == 1)
     elif purpose == 'CANDIDATE_ACCEPTANCE':
         from scripts.candidate_vm_harness import CandidateHarnessPlan
         _require(type(plan) is CandidateHarnessPlan)
@@ -180,18 +239,34 @@ def confirm_local_batch(*, authorization_id, purpose, plan, round_limit=1):
     body = {'schema': 'animemo.local-batch-confirmation/v1', 'purpose': purpose,
         'authorization_id': authorization_id, 'initial_plan_digest': plan.plan_digest,
         'material_identity': material_identity(plan), 'initial_plan': plan.as_dict(),
-        'round_limit': round_limit, 'capture_limit': 1, 'window_seconds': WINDOW_SECONDS,
+        'round_limit': round_limit, 'capture_limit': 0 if baseline else 1, 'window_seconds': WINDOW_SECONDS,
         'failure_policy': FAILURE_POLICY,
         'release_authority_granted': False, 'publish_authorized': False}
     body['execution_source_sha'] = getattr(plan, 'execution_source_sha', plan.source_sha)
     body['execution_source_tree'] = getattr(plan, 'execution_source_tree', plan.source_tree)
+    target = None
+    confirm_options = {}
+    if runtime:
+        target, timeout = runtime_handoff.confirmation(plan)
+        _require(target['authorization_id'] == authorization_id)
+        body['runtime_target_binding'] = target
+        body['runtime_target_binding_digest'] = sha256_bytes(canonical_json_bytes(target))
+        confirm_options['timeout_seconds'] = timeout
     console = WindowsConsoleCapture()
-    console.confirm_batch('PREPRODUCTION ONLY. Confirm this frozen batch before any Clone.\n'
+    prompt = ('B ONLY: approve this exact new clone for one read-only baseline diagnosis.\n'
+        'Success and failure stop before password capture, sudo or Installer; retain the stopped clone.\n'
+        'PREPRODUCTION ONLY. Zero password captures; cancellation/failure spends this diagnosis.\n'
+        if baseline else ('B ONLY: approve this exact new clone and the existing single Runtime batch.\n'
+        'A preparation does not grant clone/boot, password capture or Installer execution.\n' if runtime else '')
+        + 'PREPRODUCTION ONLY. Confirm this frozen batch before any Clone.\n'
         'One password capture only; cancelling/failing does not restore it.\n'
         'A verified business failure may continue only after complete Profile cleanup; '
-        'identity, delivery, timeout or cleanup uncertainty revokes the batch.\n'
+        'identity, delivery, timeout or cleanup uncertainty revokes the batch.\n')
+    console.confirm_batch(prompt
         + json.dumps({key: value for key, value in body.items() if key != 'initial_plan'}, ensure_ascii=False, indent=2)
-        + '\nProfiles: '+json.dumps([p.as_dict() for p in plan.profiles],ensure_ascii=False))
+        + '\nProfiles: '+json.dumps([p.as_dict() for p in plan.profiles],ensure_ascii=False), **confirm_options)
+    if runtime:
+        runtime_handoff.accept_confirmation(plan, target)
     holds = ExitStack()
     try:
         # Exclusive task-wide directory prevents process/plan/source changes
@@ -201,6 +276,9 @@ def confirm_local_batch(*, authorization_id, purpose, plan, round_limit=1):
         now = time.monotonic()
         body['confirmed_utc_seconds'] = time.time()
         _write(root/'scope.json', body)
-        return LocalBatchAuthorization(_ISSUER, body=body, root=root, holds=holds.pop_all(), monotonic_now=now)
+        authorization = LocalBatchAuthorization(_ISSUER, body=body, root=root, holds=holds,
+            monotonic_now=now, runtime_handoff=runtime_handoff)
+        authorization._holds = holds.pop_all()
+        return authorization
     finally:
         holds.close()

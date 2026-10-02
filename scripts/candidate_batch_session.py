@@ -104,14 +104,18 @@ class CandidateBatch:
     def __init__(self, provider, plan, *, authorization_id=None, clock=time.monotonic, development_owner=None, local_authorization=None):
         from scripts.development_plan import is_development_plan
         from scripts.formal_plan import is_formal_plan
-        from scripts.guest_batch_scope import LocalBatchAuthorization
+        from scripts.guest_batch_scope import LocalBatchAuthorization, _require_plan
         self._development = is_development_plan(plan)
+        if self._development:
+            _require_plan('LOCAL_INSTALLER_DEVELOPMENT', plan)
         self._formal = is_formal_plan(plan)
         self._roles = ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO', 'FORMAL_WORKLOAD') if self._formal else ROLES
         self._development_reservation = None
         self._authorization_id = authorization_id
         self._development_owner = development_owner
         self._local_authorization = local_authorization or getattr(development_owner, '_authorization', None)
+        if self._development and plan.runtime_offline_only and self._local_authorization is None:
+            raise ControllerFailure('DEVELOPMENT_LOCAL_CONFIRMATION_REQUIRED')
         if self._local_authorization is not None:
             if (type(self._local_authorization) is not LocalBatchAuthorization
                     or self._local_authorization.authorization_id != authorization_id
@@ -119,8 +123,14 @@ class CandidateBatch:
                         else 'FORMAL_POSTPUBLICATION' if self._formal else 'CANDIDATE_ACCEPTANCE')):
                 raise ControllerFailure('LOCAL_BATCH_AUTHORIZATION_INVALID')
             self._local_authorization.require_open()
-            if self._development and development_owner is None:
+            if self._development and plan.runtime_offline_only:
+                self._local_authorization.require_runtime_target(provider, plan)
+            if self._development and development_owner is None and not (
+                    getattr(plan, 'runtime_baseline_only', False) is True
+                    and self._local_authorization.body.get('capture_limit') == 0):
                 raise ControllerFailure('DEVELOPMENT_SESSION_OWNER_REQUIRED')
+        if getattr(plan, 'runtime_baseline_only', False) and development_owner is not None:
+            raise ControllerFailure('RUNTIME_BASELINE_ONLY_OWNER_FORBIDDEN')
         if self._formal and self._local_authorization is None:
             raise ControllerFailure('FORMAL_LOCAL_BATCH_AUTHORIZATION_REQUIRED')
         if development_owner is not None:
@@ -212,7 +222,15 @@ class CandidateBatch:
             raise ControllerFailure('CANDIDATE_BATCH_SCOPE_CHANGED')
         self.provider._require_active_execution_authority()
         if self._local_authorization is not None:
-            self._local_authorization.require_open()
+            try:
+                self._local_authorization.require_open()
+                if self._development and self.plan.runtime_offline_only:
+                    self._local_authorization.require_runtime_target(self.provider, self.plan)
+            except BaseException:
+                if self._development and self.plan.runtime_offline_only:
+                    self.revoke('RUNTIME_TARGET_CONTEXT_CHANGED')
+                    raise ControllerFailure('RUNTIME_TARGET_CONTEXT_CHANGED') from None
+                raise
         if self._development:
             from scripts.development_source import require_development_source
             try:
@@ -225,6 +243,18 @@ class CandidateBatch:
             require_formal_tool_source(self.provider, self.plan)
 
     def _expiry(self):
+        if self._development and self.plan.runtime_offline_only:
+            lifetime = getattr(self.provider, '_runtime_lifetime', None)
+            if lifetime is not None and (self._operation is None or self._operation[0] != 'CLEANUP'):
+                from scripts.runtime_development_boundary import RuntimeBoundaryError
+                try:
+                    if (self._operation is not None and self._operation[0] == 'WORKLOAD'
+                            and self._record['profiles']['RUNTIME_BASE_OFFLINE']['CANDIDATE_WORKLOAD']['delivery_completed'] == 1):
+                        lifetime.workload_timeout(OPERATION_SECONDS['WORKLOAD'])
+                    else:
+                        lifetime.check('SECRET_OWNER')
+                except RuntimeBoundaryError:
+                    return 'RUNTIME_EXECUTION_BUDGET_EXHAUSTED'
         if self._local_authorization is not None:
             try:
                 self._local_authorization.require_open()
@@ -289,6 +319,16 @@ class CandidateBatch:
 
     def capture_after_bootstrap_observation(self, profile):
         with self._lock:
+            if getattr(self.plan, 'runtime_baseline_only', False):
+                raise ControllerFailure('RUNTIME_BASELINE_ONLY_CREDENTIALS_FORBIDDEN')
+            if self._development and self.plan.runtime_offline_only:
+                from scripts.runtime_development_boundary import (
+                    require_confirmed_runtime_boundary,
+                    require_runtime_lifetime,
+                )
+                require_confirmed_runtime_boundary(self.provider, self.plan)
+                require_runtime_lifetime(self.provider, self.plan, profile).check(
+                    'SECRET_CAPTURE', minimum_seconds=120)
             if self._captured_at is not None:
                 self.require_live()
                 return
@@ -372,6 +412,8 @@ class CandidateBatch:
 
     def issue(self, profile, lease, roles):
         with self._lock:
+            if getattr(self.plan, 'runtime_baseline_only', False):
+                raise ControllerFailure('RUNTIME_BASELINE_ONLY_CREDENTIALS_FORBIDDEN')
             self.require_live()
             if (profile not in self.plan.profiles or roles not in (self._roles[:2], self._roles[2:])
                     or self._operation is None or self._operation[:2] !=
@@ -431,7 +473,7 @@ class CandidateBatch:
             with self._lock:
                 entry['delivery_completed'] = 1
                 self._completed_roles.add(key)
-                if len(self._completed_roles) == len(h.PROFILES) * len(self._roles):
+                if len(self._completed_roles) == len(self._record['profiles']) * len(self._roles):
                     self.release_secret()
         except BaseException:
             self.revoke('CANDIDATE_BATCH_DELIVERY_UNCERTAIN')

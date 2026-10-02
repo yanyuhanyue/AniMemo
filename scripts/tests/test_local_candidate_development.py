@@ -3,6 +3,7 @@ import base64
 import copy
 import json
 import os
+import shlex
 import tempfile
 import unittest
 import zlib
@@ -77,13 +78,25 @@ class DevelopmentPlanTests(unittest.TestCase):
         provider._candidate_material_authority = SimpleNamespace(tree_inventory_identity='sha256:' + 'd' * 64)
         with mock.patch.object(guest, 'require_development_source', return_value=SimpleNamespace(
                 root=Path(guest.__file__).resolve().parents[1])):
-            command = guest._root_program(provider, self.plan, self.plan.profiles[0])
-        parsed = ast.parse(command)
+            program = guest._root_program(provider, self.plan, self.plan.profiles[0])
+        self.assertLessEqual(len(program.encode('utf-8')) + 1, guest.c.MAX_ROOT_PROGRAM_BYTES)
+        compile(program, '<development-root-test>', 'exec')
+        command = guest.c._remote_workload_command(program, 'sha256:' + 'e' * 64)
+        parsed = ast.parse(shlex.split(command)[4])
         encoded = next(ast.literal_eval(node.args[0]) for node in ast.walk(parsed)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'b64decode')
-        program = zlib.decompress(base64.b64decode(encoded)).decode()
-        self.assertLessEqual(len(program.encode('utf-8')), guest.c.MAX_ROOT_PROGRAM_BYTES)
-        compile(program, '<development-root-test>', 'exec')
+        transport = zlib.decompress(base64.b64decode(encoded)).decode()
+        argv = next(ast.literal_eval(node.args[0]) for node in ast.walk(ast.parse(transport))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'Popen')
+        self.assertEqual(argv[-1], program)
+        self.assertEqual(argv[:6], ['/usr/bin/sudo', '-S', '-k', '-p', '', '--'])
+        diagnostic_source = next(ast.literal_eval(node.args[0]) for node in ast.walk(ast.parse(transport))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'compile' and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == '<fixed-diagnostic>')
+        self.assertEqual(diagnostic_source, Path(guest.c.diagnostics.__file__).read_text(encoding='utf-8'))
+        guest.c.validate_workload_command_budget(('C:/held/ssh.exe', 'x' * 4096, command))
         self.assertIn("scope['run_fixed_development']", program)
         self.assertIn(self.plan.execution_inventory_digest, program)
 

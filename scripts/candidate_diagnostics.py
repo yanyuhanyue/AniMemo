@@ -42,6 +42,8 @@ FAULT_MODULES = frozenset({
     'durability.private_store',
     'scripts.candidate_profile_runner', 'scripts.development_profile_runner',
     'installer.development', 'installer.platform_bootstrap', 'release.candidate',
+    'scripts.formal_profile_runner', 'installer.bootstrap',
+    'installer.tokenless_stage0', 'installer.anonymous_release_transport',
 })
 FAULT_TYPES = frozenset({
     'StateError', 'LocatorError', 'CommandExited', 'CommandTimedOut', 'CommandStartFailed',
@@ -50,6 +52,8 @@ FAULT_TYPES = frozenset({
     'PrivateStoreError', 'ManagedConfigError', 'InstallerAdapterError', 'OTHER',
     'ProfileRunnerError', 'CandidateContractError', 'DevelopmentServiceError',
     'PlatformBootstrapError',
+    'FormalProfileRunnerError', 'FormalProducerError', 'BootstrapAuthorityError',
+    'GhVersionOutputError', 'InstallerError', 'TokenlessStage0Error', 'AnonymousReleaseError',
 })
 INSTALLER_FAILURE_CODES = (
     'INSTALL_ROOT_PREPARATION_FAILED', 'INSTALL_CONFIG_PUBLICATION_FAILED',
@@ -101,6 +105,7 @@ RUNNER_FAILURE_CODES = (
     'DEVELOPMENT_PROFILE_BINDING_INVALID', 'DEVELOPMENT_MATERIAL_BINDING_INVALID',
 )
 ERRORS = (
+    'FAILURE_DIAGNOSTIC_INCOMPLETE',
     'APT_DIAGNOSTIC_WRITE_FAILED',
     'UNKNOWN_BEFORE_ROOT_START', 'ROOT_INITIALIZATION_FAILED',
     'MATERIAL_FINALIZATION_FAILED', 'MATERIAL_INVENTORY_MISMATCH',
@@ -230,6 +235,14 @@ def validate_event(value, operation):
             and type(value['module']) is str and value['module'] in FAULT_MODULES
             and type(value['line']) is int and 1 <= value['line'] <= 100000
             and type(value['category']) is str and value['category'] in FAULT_TYPES)
+    elif kind == 'FAULT_BEGIN':
+        valid = set(value) == common
+    elif kind == 'FAULT_END':
+        count = value.get('count')
+        valid = (set(value) == common | {'count', 'status'}
+            and type(count) is int and 0 <= count <= 3
+            and ((count > 0 and value['status'] == 'COMPLETE')
+                 or (count == 0 and value['status'] == 'NO_LOCATION')))
     elif kind == 'REPORT_COUNTS':
         fields = {'commands', 'pull_denied_commands', 'doctor_checks'}
         valid = (set(value) == common | fields
@@ -265,37 +278,47 @@ class DiagnosticWriter:
     def exited(self, component, exit_code):
         self.event('EXIT', component=component, exit_code=exit_code)
 
-    def fault(self, error):
+    def fault(self, error, *, maximum_locations=6):
         """Expose six bounded call sites, never exception text or locals."""
+        if type(maximum_locations) is not int or not 1 <= maximum_locations <= 6:
+            raise DiagnosticError()
         seen = set()
         emitted = set()
+        chain = []
         for _ in range(4):
             if error is None or id(error) in seen:
                 break
             seen.add(id(error))
+            chain.append(error)
+            error = error.__cause__ if error.__cause__ is not None else error.__context__
+        # Preserve the deepest available cause when a wrapper uses most of
+        # the location budget. The outer boundary still owns the error code.
+        for error in reversed(chain):
             trace, locations = error.__traceback__, []
             for _ in range(80):
                 if trace is None:
                     break
                 module = trace.tb_frame.f_globals.get('__name__')
                 filename = trace.tb_frame.f_code.co_filename.replace('\\', '/')
-                if module == '__main__' and filename.endswith('/scripts/development_profile_runner.py'):
-                    module = 'scripts.development_profile_runner'
+                if module == '__main__':
+                    for entry in ('development_profile_runner', 'formal_profile_runner'):
+                        if filename.endswith('/scripts/' + entry + '.py'):
+                            module = 'scripts.' + entry
                 if (type(module) is str and module in FAULT_MODULES
                         and filename.endswith('/' + module.replace('.', '/') + '.py')
                         and 1 <= trace.tb_lineno <= 100000):
                     locations.append((module, trace.tb_lineno))
                 trace = trace.tb_next
             for module, line in reversed(locations[-3:]):
-                if len(emitted) >= 6:
-                    return
+                if len(emitted) >= maximum_locations:
+                    return len(emitted)
                 if (module, line) in emitted:
                     continue
                 emitted.add((module, line))
                 category = type(error).__name__
                 self.event('FAULT', module=module, line=line,
                     category=category if category in FAULT_TYPES else 'OTHER')
-            error = error.__cause__ if error.__cause__ is not None else error.__context__
+        return len(emitted)
 
     def frame(self, kind, raw):
         limit = MAX_DIAGNOSTIC_BYTES if kind == b'D' else MAX_RECEIPT_BYTES
@@ -319,6 +342,30 @@ def inherited_writer():
     return DiagnosticWriter(int(fd), operation)
 
 
+def best_effort_fault(error, *, code='RUNNER_EXECUTION_FAILED'):
+    """Bounded secondary observation; never replace the caller's failure.
+
+    Only three locations are added at this outer boundary: the late Docker
+    failure path can already contain five APT events and six inner locations.
+    BEGIN/END makes an interrupted projection distinguishable from legacy
+    diagnostics, even if the same descriptor cannot report its own failure.
+    """
+    try:
+        if type(code) is not str or code not in ERRORS:
+            return 'UNAVAILABLE'
+        writer = inherited_writer()
+        if writer is None:
+            return 'UNAVAILABLE'
+        writer.error(code)
+        writer.event('FAULT_BEGIN')
+        count = writer.fault(error, maximum_locations=3)
+        status = 'COMPLETE' if count else 'NO_LOCATION'
+        writer.event('FAULT_END', count=count, status=status)
+        return status
+    except Exception:  # noqa: BLE001 - secondary diagnostics must preserve the original failure.
+        return 'WRITE_FAILED'
+
+
 class DiagnosticReader:
     def __init__(self, operation):
         if type(operation) is not str or not _OPERATION.fullmatch(operation):
@@ -331,6 +378,9 @@ class DiagnosticReader:
         self._stages = set()
         self._exits = set()
         self._stage_index = -1
+        self._fault_pending = None
+        self._fault_end = None
+        self._fault_interrupted = False
 
     def accept(self, kind, body):
         if kind == b'D':
@@ -338,6 +388,34 @@ class DiagnosticReader:
             if self.diagnostic_bytes > MAX_DIAGNOSTIC_BYTES or len(self.events) >= MAX_EVENTS:
                 raise DiagnosticError('TRANSPORT_LIMIT_EXCEEDED')
             event = validate_event(_json(body), self.operation)
+            if event['kind'] == 'FAULT_BEGIN':
+                if (self._fault_pending is not None or self._fault_end is not None
+                        or self._fault_interrupted or not self.events
+                        or self.events[-1]['kind'] != 'ERROR'):
+                    raise DiagnosticError()
+                self._fault_pending = []
+            elif event['kind'] == 'FAULT_END':
+                if (self._fault_pending is None or self._fault_end is not None
+                        or len(self._fault_pending) != event['count']):
+                    raise DiagnosticError()
+                self._fault_end = event
+                self._fault_pending = None
+                if event['status'] == 'NO_LOCATION':
+                    self.error_code = 'FAILURE_DIAGNOSTIC_INCOMPLETE'
+            elif event['kind'] == 'FAULT':
+                if self._fault_end is not None:
+                    raise DiagnosticError()
+                if self._fault_pending is not None:
+                    identity = (event['module'], event['line'], event['category'])
+                    if identity in self._fault_pending or len(self._fault_pending) >= 3:
+                        raise DiagnosticError()
+                    self._fault_pending.append(identity)
+            elif self._fault_pending is not None:
+                # Keep the original exit/error observations even when a child
+                # lost its diagnostic fd midway through its secondary report.
+                self._fault_pending = None
+                self._fault_interrupted = True
+                self.error_code = 'FAILURE_DIAGNOSTIC_INCOMPLETE'
             if event['kind'] == 'STAGE':
                 index = STAGES.index(event['stage'])
                 if event['stage'] == 'HOST_PARSED' or event['stage'] in self._stages or index <= self._stage_index:
@@ -358,16 +436,28 @@ class DiagnosticReader:
         self.receipt = value
         return None
 
+    def finish(self):
+        """Close the stream without manufacturing a missing report footer."""
+        if self._fault_pending is not None:
+            self.error_code = 'FAILURE_DIAGNOSTIC_INCOMPLETE'
+        return self.error_code
+
     def public(self):
         stages = [e['stage'] for e in self.events if e['kind'] == 'STAGE']
         exits = {e['component']: e['exit_code'] for e in self.events if e['kind'] == 'EXIT'}
         errors = [e['code'] for e in self.events if e['kind'] == 'ERROR']
+        incomplete = (self._fault_pending is not None or self._fault_interrupted
+            or self.error_code is not None or self._fault_end is not None
+            and self._fault_end['status'] != 'COMPLETE')
+        projection = ('INCOMPLETE' if incomplete else 'COMPLETE' if self._fault_end else 'UNAVAILABLE')
         return dict(schema=SCHEMA, operation=self.operation, events=list(self.events),
             last_stage=stages[-1] if stages else 'NOT_REACHED',
             root_started='ROOT_STARTED' in stages,
             exit_codes={component: exits.get(component) for component in COMPONENTS},
             transport_error=self.error_code, errors=errors,
-            profile_draft_received=self.receipt is not None, host_receipt_parse='NOT_REACHED')
+            profile_draft_received=self.receipt is not None, host_receipt_parse='NOT_REACHED',
+            failure_diagnostic={'status': projection,
+                'locations': self._fault_end['count'] if self._fault_end else None})
 
 
 def read_frame(stream):

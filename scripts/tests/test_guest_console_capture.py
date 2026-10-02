@@ -62,11 +62,10 @@ class ConsoleFixture:
         )
         self.confirmations = []
         self.confirm_answer = 7
-        self.user32 = types.SimpleNamespace(IsWindowVisible=Function(lambda window: self.visible),
-            MessageBoxW=Function(self.confirm))
+        self.user32 = types.SimpleNamespace(IsWindowVisible=Function(lambda window: self.visible))
 
-    def confirm(self, window, text, title, flags):
-        self.confirmations.append((window, text, title, flags))
+    def confirm_public(self, window, text, *, timeout_seconds, cancelled):
+        self.confirmations.append((window, text, timeout_seconds, cancelled))
         return self.confirm_answer
 
     def process_list(self, output, capacity):
@@ -155,7 +154,7 @@ class ConsoleCaptureTests(unittest.TestCase):
         capture = c.WindowsConsoleCapture(_api=fixture)
         with self.assertRaisesRegex(c.ConsoleCaptureError, 'BATCH_CONFIRMATION_CANCELLED'):
             capture.confirm_batch('Synthetic frozen plan')
-        self.assertEqual(fixture.confirmations[0][3], 0x124)
+        self.assertEqual(fixture.confirmations[0], (fixture.window, 'Synthetic frozen plan', None, None))
         self.assertEqual(fixture.read_modes, [])
         self.assertEqual(fixture.set_modes, [])
         fixture.confirm_answer = 6
@@ -164,10 +163,10 @@ class ConsoleCaptureTests(unittest.TestCase):
 
     def test_batch_confirmation_rechecks_console_after_dialog(self):
         fixture = ConsoleFixture()
-        def drift(*args):
+        def drift(*args, **kwargs):
             fixture.mode ^= 1
             return 6
-        fixture.user32.MessageBoxW = Function(drift)
+        fixture.confirm_public = drift
         with self.assertRaisesRegex(c.ConsoleCaptureError, 'BATCH_CONFIRMATION_CANCELLED'):
             c.WindowsConsoleCapture(_api=fixture).confirm_batch('Synthetic frozen plan')
         self.assertEqual(fixture.read_modes, [])

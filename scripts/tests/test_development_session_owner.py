@@ -94,7 +94,7 @@ class DevelopmentMemoryOwnerTests(unittest.TestCase):
                 entry.update(delivery_attempts=1, delivery_completed=1, target_verified=True, lease_verified=True,
                     operation_result='FAIL' if name == profile and role == 'CANDIDATE_WORKLOAD' else 'PASS')
         batch.close()
-        return {'credential_session': batch.record, 'source_preserved': True, 'cleanup_errors': [],
+        return {'plan': batch.plan.as_dict(), 'credential_session': batch.record, 'source_preserved': True, 'cleanup_errors': [],
             'failure_policy': FAILURE_POLICY,
             'profile_results': {name: {'status': 'ERROR' if name == profile else 'PASS'}
                 for name in ('FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE')},
@@ -169,7 +169,7 @@ class DevelopmentMemoryOwnerTests(unittest.TestCase):
             self.assertEqual(process.stdin.getvalue(), self.original + b'\n')
         self.assertEqual(self.secret, self.original)
         batch.close()
-        report = {'credential_session': batch.record, 'source_preserved': True, 'cleanup_errors': [],
+        report = {'plan': batch.plan.as_dict(), 'credential_session': batch.record, 'source_preserved': True, 'cleanup_errors': [],
             'failure_policy': FAILURE_POLICY,
             'profile_results': {name: {'status': 'PASS'} for name in ('FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE')},
             'private_material_root_released': True, 'private_execution_source_root_released': True,

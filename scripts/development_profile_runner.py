@@ -24,7 +24,7 @@ _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 
 
 def validate_development_report(value, *, loaded, expected_binding, expected_context, expected_service_source):
-    validate_binding(expected_binding)
+    validate_binding(expected_binding, profile=expected_context.get('profile'))
     if expected_binding['workload_mode'] != 'CLEAN_PREACCEPTANCE':
         raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
     fields = {'schema', 'purpose', 'result', 'binding', 'context', 'installer_output',
@@ -44,12 +44,43 @@ def validate_development_report(value, *, loaded, expected_binding, expected_con
             or type(value['installer_output']) is not dict
             or value['installer_output'].get('developmentServiceSourceObservation') != expected_service_source):
         raise runner.ProfileRunnerError('DEVELOPMENT_SERVICE_SOURCE_MISMATCH')
-    # Reuse every production observation check. Its temporary Draft is never
-    # emitted as development authority or exposed as a Candidate receipt.
+    if expected_binding.get('runtime_offline_only'):
+        from installer.development_boundary import validate_operation_result
+        from installer.development_lifecycle import validate_instance_stop
+        validate_operation_result(value['installer_output'].get('developmentOperationPlan'),
+            expected_binding, value['installer_output'])
+        validate_instance_stop(value['installer_output'].get('developmentInstanceStop'),
+            binding=expected_binding,
+            installer_plan_digest=value['installer_output'].get('installerPlanDigest'))
+    # Runtime DEV uses its confirmed public LocalBundle identity. The original
+    # candidate input remains a separate identity and cannot stand in for it.
     try:
-        runner.build_profile_receipt(loaded=loaded, profile=expected_context['profile'],
-            context=expected_context, installer_output=value['installer_output'],
-            started_at=value['started_at'], completed_at=value['completed_at'])
+        if expected_binding.get('runtime_offline_only'):
+            material = expected_binding['runtime_operation_boundary']['material']
+            if material['images'] != {item.role: item.digest for item in loaded.images.images}:
+                raise runner.ProfileRunnerError('DEVELOPMENT_MATERIAL_BINDING_INVALID')
+            from release.candidate import _parse_time
+            start = _parse_time(value['started_at'], code='DEVELOPMENT_REPORT_TIME_INVALID').timestamp()
+            completed = _parse_time(value['completed_at'], code='DEVELOPMENT_REPORT_TIME_INVALID').timestamp()
+            lifetime = expected_binding['runtime_operation_boundary']['lifetime']
+            production = value['installer_output'].get('productionExecutionObservation', {})
+            resources = expected_binding['runtime_operation_boundary']['resources']
+            if (not lifetime['boot_started_utc_seconds'] - 5 <= start <= completed <= lifetime['effective_expires_utc_seconds']
+                    or production.get('doctorReport', {}).get('instanceId')
+                        != value['installer_output']['installerResult']['instanceId']
+                    or production.get('networkObservation', {}).get('egressIsolation', {}).get('service')
+                        != resources['service']
+                    or production.get('networkObservation', {}).get('egressIsolation', {}).get('containerNetwork')
+                        != resources['compose_project'] + '_animemo'):
+                raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_RESULT_SCOPE_MISMATCH')
+            runner.validate_profile_execution(profile=expected_context['profile'],
+                context=expected_context, installer_output=value['installer_output'],
+                expected_material_identity=material['release']['materialIdentityDigest'],
+                expected_images=material['images'])
+        else:
+            runner.build_profile_receipt(loaded=loaded, profile=expected_context['profile'],
+                context=expected_context, installer_output=value['installer_output'],
+                started_at=value['started_at'], completed_at=value['completed_at'])
     except BaseException:
         diagnostic = inherited_writer()
         observation = value['installer_output'].get('productionExecutionObservation')
@@ -66,13 +97,27 @@ def validate_development_report(value, *, loaded, expected_binding, expected_con
     return value
 
 
-def validate_binding(binding):
-    if (type(binding) is not dict or set(binding) != {'plan_digest', 'session_id',
+def validate_binding(binding, *, profile=None):
+    published = type(binding) is dict and binding.get('workload_mode') == 'PUBLISHED_PLATFORM_PLAN'
+    expected = {'plan_digest', 'session_id',
             'execution_source_sha', 'execution_source_tree', 'execution_inventory_digest',
             'verified_candidate_digest', 'material_source_sha', 'material_source_tree',
             'qualification_run_id', 'workload_mode'}
+    if published:
+        expected.add('published_subject_digest')
+    offline = type(binding) is dict and 'runtime_offline_only' in binding
+    if offline:
+        expected.update(('runtime_offline_only', 'runtime_trust_selection_digest', 'candidate_input_digest'))
+        if type(binding) is dict and ('runtime_operation_boundary' in binding or 'runtime_lifetime' in binding):
+            expected.update(('runtime_operation_boundary', 'runtime_lifetime'))
+    if (type(binding) is not dict or set(binding) != expected
             or type(binding['workload_mode']) is not str
-            or binding['workload_mode'] not in {'CLEAN_PREACCEPTANCE', 'PLATFORM_DIAGNOSTIC'}
+            or binding['workload_mode'] not in {'CLEAN_PREACCEPTANCE', 'PLATFORM_DIAGNOSTIC', 'PUBLISHED_PLATFORM_PLAN'}
+            or offline and (binding['runtime_offline_only'] is not True
+                or binding['workload_mode'] != 'CLEAN_PREACCEPTANCE'
+                or profile is not None and profile != 'RUNTIME_BASE_OFFLINE')
+            or published and (type(binding['published_subject_digest']) is not str
+                or not _DIGEST.fullmatch(binding['published_subject_digest']))
             or any(type(binding[name]) is not str or not _SHA.fullmatch(binding[name])
                    for name in ('execution_source_sha', 'execution_source_tree', 'material_source_sha', 'material_source_tree'))
             or any(type(binding[name]) is not str or not _DIGEST.fullmatch(binding[name])
@@ -80,13 +125,32 @@ def validate_binding(binding):
             or type(binding['session_id']) is not str or re.fullmatch('[0-9a-f]{32}', binding['session_id']) is None
             or type(binding['qualification_run_id']) is not int or binding['qualification_run_id'] <= 0):
         raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
+    if offline:
+        if any(type(binding[name]) is not str or not _DIGEST.fullmatch(binding[name])
+               for name in ('runtime_trust_selection_digest', 'candidate_input_digest')):
+            raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
+        if 'runtime_operation_boundary' in binding:
+            from installer.development_boundary import (
+                validate_runtime_operation_boundary,
+            )
+            validate_runtime_operation_boundary(binding['runtime_operation_boundary'], binding)
     return binding
 
 
 def execute_development_profile(*, binding, profile, context_b64url, command_runner=None):
-    validate_binding(binding)
+    validate_binding(binding, profile=profile)
     if binding['workload_mode'] != 'CLEAN_PREACCEPTANCE':
         raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
+    if binding.get('runtime_offline_only'):
+        from scripts.candidate_diagnostics import FD_ENV, bounded_process_output
+        from scripts.runtime_development_boundary import RuntimeDeadline
+        lifetime = RuntimeDeadline.from_guest_envelope(binding['runtime_lifetime'], binding=binding)
+        class RuntimeCommandRunner:
+            def run(self, argv, environment):
+                return bounded_process_output(argv, environment=dict(environment),
+                    timeout=lifetime.workload_timeout(4 * 60 * 60),
+                    pass_fds=((int(environment[FD_ENV]),) if FD_ENV in environment else ()))
+        command_runner = command_runner or RuntimeCommandRunner()
     before = load_verified_candidate(binding['verified_candidate_digest']).candidate_input
     if (before['source_sha'] != binding['material_source_sha']
             or before['source_tree'] != binding['material_source_tree']
@@ -122,7 +186,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         from release.materials import reject_duplicate_json_keys
-        if len(args.binding) > 8192:
+        if len(args.binding.encode('utf-8')) > 128 * 1024:
             raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
         binding = json.loads(args.binding, object_pairs_hook=reject_duplicate_json_keys)
         value = execute_development_profile(binding=binding, profile=args.profile,

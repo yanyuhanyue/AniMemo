@@ -161,7 +161,9 @@ class WorkloadTransportTests(unittest.TestCase):
         from scripts.tests.workload_transport_fixture import decode_workload_transport
         program = decode_workload_transport(c._remote_workload_command('pass', OPERATION))
         compile(program, '<synthetic-remote>', 'exec')
-        self.assertEqual(program.count('subprocess.Popen('), 1)
+        calls = [node for node in ast.walk(ast.parse(program)) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == 'Popen']
+        self.assertEqual(len(calls), 1)
         self.assertLess(program.index('password.clear()'), program.index('child.wait()'))
         self.assertIn('bufsize=0', program)
         self.assertNotIn(SENTINEL.decode(), program)

@@ -774,7 +774,7 @@ def _profile_paths(
     formal_windows_pretrust_kit: Path,
 ) -> list[tuple[str, Path]]:
     result = [(relative, root) for relative in _FIXED_DEPLOYMENT_FILES]
-    for package in ("durability", "release", "updater", "installer"):
+    for package in ("durability", "release", "updater", "installer", "bootstrap_kit"):
         package_root = root / package
         if package == "installer" and not package_root.exists():
             continue

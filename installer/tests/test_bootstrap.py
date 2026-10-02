@@ -142,8 +142,6 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         production = (PROJECT_ROOT / "installer" / "production.py").read_text(
             encoding="utf-8"
         )
-        stage0 = _official_mirror_stage0_contract()
-
         release_resolve = production.index(
             "release = self.releases.resolve(request.selector, refresh=False)"
         )
@@ -166,14 +164,6 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         )
         installer_plan = cli.index("plan = runtime.plan(request)", cli_platform_execute)
 
-        self.assertLess(
-            stage0.index('/usr/bin/gh release verify "$EXACT_TAG"'),
-            stage0.index('/usr/bin/tar -xf "$PROTECTED"'),
-        )
-        self.assertLess(
-            stage0.index('/usr/bin/tar -xf "$PROTECTED"'),
-            stage0.index("-m installer \\"),
-        )
         self.assertLess(release_resolve, release_verify)
         self.assertLess(release_verify, source_verify)
         self.assertLess(source_verify, platform_import)
@@ -182,475 +172,11 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         self.assertLess(cli_platform_execute, installer_plan)
         self.assertIn("installer.platform_bootstrap", _REQUIRED_RUNTIME_MODULES)
 
-    def test_github_authority_precedes_fixed_mirror_acquisition_and_execution(
-        self,
-    ) -> None:
+    def test_public_entry_is_blocked_until_independent_trust_is_provisioned(self):
         stage0 = _official_mirror_stage0_contract()
-        architecture_gate = stage0.index(
-            'test "$(/usr/bin/dpkg --print-architecture)" = amd64'
-        )
-        gh_download = stage0.index(
-            '/usr/bin/curl --proto "=https" --proto-redir "=https" '
-            "--tlsv1.2 --location --max-redirs 1"
-        )
-        gh_checksums_download = stage0.index(
-            '"https://api.github.com/repos/cli/cli/releases/assets/$asset_id"'
-        )
-        gh_checksums_verify = stage0.index('test "$(/usr/bin/sha256sum "$GH_CHECKSUMS"')
-        gh_manifest_binding = stage0.index(
-            '/usr/bin/grep -Fxq "$GH_DEB_SHA256  gh_${GH_VERSION}_linux_amd64.deb"'
-        )
-        gh_deb_verify = stage0.index('test "$(/usr/bin/sha256sum "$GH_DEB"')
-        gh_install = stage0.index(
-            '/usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"'
-        )
-        release_verify = stage0.index('/usr/bin/gh release verify "$EXACT_TAG"')
-        mirror_download = stage0.index(
-            "/usr/bin/curl --proto '=https' --tlsv1.2 --location --max-redirs 0",
-            release_verify,
-        )
-        candidate_verify = stage0.index(
-            '/usr/bin/gh release verify-asset "$EXACT_TAG" "$MIRROR_CANDIDATE"'
-        )
-        protected_copy = stage0.index(
-            '/usr/bin/install -o root -g root -m 0600 "$MIRROR_CANDIDATE" "$HANDOFF"'
-        )
-        protected_verify = stage0.index(
-            '/usr/bin/gh release verify-asset "$EXACT_TAG" "$PROTECTED"'
-        )
-        extraction = stage0.index('/usr/bin/tar -xf "$PROTECTED"')
-        execution = stage0.index("-m installer \\")
-
-        self.assertLess(architecture_gate, gh_download)
-        self.assertLess(gh_download, gh_checksums_download)
-        self.assertLess(gh_checksums_download, gh_checksums_verify)
-        self.assertLess(gh_checksums_verify, gh_manifest_binding)
-        self.assertLess(gh_manifest_binding, gh_deb_verify)
-        self.assertLess(gh_deb_verify, gh_install)
-        self.assertLess(gh_install, release_verify)
-        self.assertLess(release_verify, mirror_download)
-        self.assertLess(mirror_download, candidate_verify)
-        self.assertLess(candidate_verify, protected_copy)
-        self.assertLess(protected_copy, protected_verify)
-        self.assertLess(protected_verify, extraction)
-        self.assertLess(extraction, execution)
-        self.assertIn(
-            'MIRROR_URL="https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/$EXACT_TAG/installer-materials.tar"',
-            stage0,
-        )
-        self.assertIn("--source official-mirror", stage0)
-        self.assertIn(
-            "GH_CHECKSUMS_SHA256=61905c69ec8660f310814ec98395cdd0c2d07aabf024c597ec45813984a02334",
-            stage0,
-        )
-        self.assertIn("GH_CHECKSUMS_ASSET_ID=496108250", stage0)
-        self.assertIn("GH_DEB_ASSET_ID=496108248", stage0)
-        self.assertIn(
-            "GH_DEB_SHA256=7c7fa3bb890db0934baf65910d97b8c0fa437b2e590f7f7daf6bdf82c5c486d7",
-            stage0,
-        )
-        self.assertIn(
-            'GH_BOOTSTRAP_DIRECTORY="$(/usr/bin/mktemp -d '
-            '/var/tmp/animemo-gh-bootstrap.XXXXXXXX)"',
-            stage0,
-        )
-        self.assertIn(
-            'test "$(/usr/bin/stat -c "%u:%g:%a" -- '
-            '"$GH_BOOTSTRAP_DIRECTORY")" = 0:0:700',
-            stage0,
-        )
-        self.assertIn(
-            'test "$(/usr/bin/stat -c "%u:%g:%a:%h" -- "$GH_DEB")" = 0:0:600:1',
-            stage0,
-        )
-        self.assertNotIn("cli.github.com/packages", stage0)
-        self.assertNotIn("gh=2.97.0", stage0)
-        self.assertNotIn("github.com/cli/cli/releases/download", stage0)
-        self.assertIn("--retry 5 --retry-all-errors --retry-connrefused", stage0)
-        self.assertIn("--retry-delay 10 --retry-max-time 840 --continue-at -", stage0)
-        self.assertIn(
-            'download_gh_asset "$GH_CHECKSUMS_ASSET_ID" "$GH_CHECKSUMS"',
-            stage0,
-        )
-        self.assertIn(
-            'download_gh_asset "$GH_DEB_ASSET_ID" "$GH_DEB"',
-            stage0,
-        )
-        self.assertEqual(
-            [
-                line.strip()
-                for line in stage0.splitlines()
-                if "/usr/bin/apt-get install " in line
-            ],
-            [
-                (
-                    "sudo /usr/bin/apt-get install --yes --no-install-recommends "
-                    "ca-certificates curl python3-venv"
-                ),
-                '/usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"',
-            ],
-        )
-        self.assertIn('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"', stage0)
-        self.assertIn(
-            "/usr/bin/timeout --signal=TERM --kill-after=5s 30s \\\n"
-            "  /bin/bash --noprofile --norc -c \\\n"
-            "  'exec /usr/bin/gh auth token >\"$1\"' \\\n"
-            '  animemo-gh-token-writer "$GH_TOKEN_PIPE" &',
-            stage0,
-        )
-        self.assertIn(
-            "/usr/bin/timeout --signal=TERM --kill-after=5s 35s \\\n"
-            "    /bin/bash --noprofile --norc -c \\\n"
-            '    \'set -euo pipefail; IFS= read -r -t 30 token <"$1"; '
-            'test -n "$token"; printf "%s" "$token"\' \\\n'
-            '    animemo-gh-token-reader "$GH_TOKEN_PIPE"',
-            stage0,
-        )
-        self.assertNotIn('/usr/bin/printf "%s" "$token"', stage0)
-        self.assertIn("export GH_TOKEN", stage0)
-        installer_execution = stage0.index('"$RUNTIME/bin/python" -P -B -m installer')
-        credential_export = stage0.rindex("export GH_TOKEN", 0, installer_execution)
-        final_launch = stage0.index(
-            '/usr/bin/chmod -R a+rX,go-w "$RUNTIME"', credential_export
-        )
-        self.assertLess(credential_export, installer_execution)
-        self.assertNotIn(
-            "/usr/bin/env -i",
-            stage0[final_launch:installer_execution],
-        )
-        self.assertIn(
-            "export HOME PATH LANG LC_ALL GH_PROMPT_DISABLED GH_TOKEN",
-            stage0[credential_export:installer_execution],
-        )
-        self.assertNotIn("gh release download", stage0)
-        self.assertNotIn("download.animemo.app", stage0)
-        self.assertNotIn("curl |", stage0)
-        self.assertNotIn("rm -rf", stage0)
-
-    @unittest.skipUnless(os.name == "posix", "Credential handoff requires POSIX FIFO")
-    def test_ephemeral_credential_crosses_the_real_fifo_with_deadlines(self) -> None:
-        stage0 = _official_mirror_stage0_contract()
-        start = stage0.index('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"')
-        end = stage0.index("sudo /usr/bin/env -i", start)
-        producer = stage0[start:end].replace(
-            "/usr/bin/gh auth token",
-            'printf "%s\\n" github_pat_fixture',
-        )
-        reader_start = stage0.index('GH_TOKEN="$(')
-        reader_end = stage0.index('\ntest -n "$GH_TOKEN"', reader_start)
-        reader = stage0[reader_start:reader_end]
-        cleanup_start = stage0.index("cleanup_stage0() {")
-        cleanup_end = stage0.index("trap cleanup_stage0 EXIT", cleanup_start) + len(
-            "trap cleanup_stage0 EXIT"
-        )
-        cleanup = stage0[cleanup_start:cleanup_end]
-        script = (
-            "set -euo pipefail\n"
-            'STAGE0_DIRECTORY="$TEST_ROOT/stage0"\n'
-            '/usr/bin/mkdir "$STAGE0_DIRECTORY"\n'
-            'MIRROR_CANDIDATE="$STAGE0_DIRECTORY/candidate.tar"\n'
-            'GH_TOKEN_PIPE="$STAGE0_DIRECTORY/gh-token.pipe"\n'
-            "GH_TOKEN_WRITER=''\n"
-            + cleanup
-            + "\n"
-            + producer
-            + reader
-            + "\n"
-            + 'wait "$GH_TOKEN_WRITER"\n'
-            + "GH_TOKEN_WRITER=''\n"
-            + 'test "$GH_TOKEN" = github_pat_fixture\n'
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
-                ["/bin/bash", "--noprofile", "--norc"],
-                input=script,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=10,
-                env={"TEST_ROOT": directory, "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
-            )
-            self.assertFalse(Path(directory, "stage0").exists())
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    @unittest.skipUnless(os.name == "posix", "Credential handoff requires POSIX FIFO")
-    def test_ephemeral_credential_handoff_bounds_preopen_producer_death(self) -> None:
-        stage0 = _official_mirror_stage0_contract()
-        start = stage0.index('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"')
-        end = stage0.index("sudo /usr/bin/env -i", start)
-        producer = stage0[start:end].replace(
-            "--kill-after=5s 30s", "--kill-after=1s 1s"
-        )
-        reader_start = stage0.index('GH_TOKEN="$(')
-        reader_end = stage0.index('\ntest -n "$GH_TOKEN"', reader_start)
-        reader = (
-            stage0[reader_start:reader_end]
-            .replace("--kill-after=5s 35s", "--kill-after=1s 2s")
-            .replace("-t 30", "-t 1")
-        )
-        cleanup_start = stage0.index("cleanup_stage0() {")
-        cleanup_end = stage0.index("trap cleanup_stage0 EXIT", cleanup_start) + len(
-            "trap cleanup_stage0 EXIT"
-        )
-        cleanup = stage0[cleanup_start:cleanup_end]
-        script = (
-            "set -euo pipefail\n"
-            'STAGE0_DIRECTORY="$TEST_ROOT/stage0"\n'
-            '/usr/bin/mkdir "$STAGE0_DIRECTORY"\n'
-            'MIRROR_CANDIDATE="$STAGE0_DIRECTORY/candidate.tar"\n'
-            'GH_TOKEN_PIPE="$STAGE0_DIRECTORY/gh-token.pipe"\n'
-            "GH_TOKEN_WRITER=''\n"
-            + cleanup
-            + "\n"
-            + producer
-            + "/usr/bin/sleep 3\n"
-            + 'wait "$GH_TOKEN_WRITER" || true\n'
-            + "GH_TOKEN_WRITER=''\n"
-            + reader
-            + "\n"
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
-                ["/bin/bash", "--noprofile", "--norc"],
-                input=script,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=8,
-                env={"TEST_ROOT": directory, "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
-            )
-            self.assertFalse(Path(directory, "stage0").exists())
-
-        self.assertNotEqual(result.returncode, 0)
-
-    def test_failed_protected_reverification_rolls_back_only_this_invocation(
-        self,
-    ) -> None:
-        stage0 = _official_mirror_stage0_contract()
-        self.assertIn("created_protected=0", stage0)
-        self.assertIn("created_protected_root=0", stage0)
-        self.assertIn("completed=0", stage0)
-        self.assertIn('test "$created_protected" = 0 ||', stage0)
-        self.assertIn(
-            'test "$created_protected_root" = 1 && test -e "$PROTECTED_ROOT"',
-            stage0,
-        )
-        self.assertIn('/usr/bin/rm -f -- "$PROTECTED"', stage0)
-        self.assertIn('test ! -L "$path"', stage0)
-        self.assertIn("assert_safe_root_directory /var/lib ''", stage0)
-        self.assertLess(
-            stage0.index('test ! -e "$PROTECTED" && test ! -L "$PROTECTED"'),
-            stage0.index('/usr/bin/ln "$HANDOFF" "$PROTECTED"'),
-        )
-        self.assertLess(
-            stage0.index("created_protected=1"),
-            stage0.index('/usr/bin/ln "$HANDOFF" "$PROTECTED"'),
-        )
-        self.assertLess(
-            stage0.index('/usr/bin/gh release verify-asset "$EXACT_TAG" "$PROTECTED"'),
-            stage0.index("completed=1"),
-        )
-        self.assertEqual(stage0.count("--max-redirs 1"), 1)
-        self.assertEqual(stage0.count("--max-redirs 0"), 1)
-        self.assertEqual(stage0.count('--proto-redir "=https"'), 1)
-        self.assertIn("--connect-timeout 30 --max-time 900", stage0)
-        self.assertIn("--retry 2 --retry-delay 10 --retry-max-time 600", stage0)
-
-    @unittest.skipUnless(os.name == "posix", "Stage-0 shell transaction requires POSIX")
-    def test_candidate_verification_failure_removes_every_stage0_path(self) -> None:
-        stage0 = _official_mirror_stage0_contract()
-        start = stage0.index('STAGE0_DIRECTORY="$(/usr/bin/mktemp -d)"')
-        end = stage0.index('MIRROR_URL="https://download.animemo.cc', start)
-        transaction = stage0[start:end].replace(
-            'STAGE0_DIRECTORY="$(/usr/bin/mktemp -d)"',
-            'STAGE0_DIRECTORY="$TEST_ROOT/candidate"\n'
-            '/usr/bin/install -d -m 0700 -- "$STAGE0_DIRECTORY"',
-        )
-        script = (
-            "set -euo pipefail\n"
-            + transaction
-            + '\nprintf "untrusted" > "$MIRROR_CANDIDATE"\n'
-            + "/bin/false # injected first verify-asset failure\n"
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            result = subprocess.run(
-                ["/bin/bash", "--noprofile", "--norc"],
-                input=script,
-                text=True,
-                capture_output=True,
-                check=False,
-                env={"TEST_ROOT": str(root), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
-            )
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(list(root.iterdir()), [])
-
-    @unittest.skipUnless(os.name == "posix", "Stage-0 root transaction requires POSIX")
-    def test_protected_reverification_failure_rolls_back_created_root_tree(
-        self,
-    ) -> None:
-        sudo = Path("/usr/bin/sudo")
-        if (
-            not sudo.exists()
-            or subprocess.run(
-                [str(sudo), "-n", "/bin/true"],
-                check=False,
-                capture_output=True,
-            ).returncode
-            != 0
-        ):
-            self.skipTest("passwordless sudo is required for the root transaction test")
-
-        stage0 = _official_mirror_stage0_contract()
-        body = stage0.split("<<'ANIMEMO_PROTECTED_HANDOFF'\n", 1)[1].split(
-            "\nANIMEMO_PROTECTED_HANDOFF", 1
-        )[0]
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            candidate = root / "candidate.tar"
-            candidate.write_bytes(b"verified candidate fixture")
-            credential = root / "gh-token.fixture"
-            credential.write_text("github_pat_fixture\n", encoding="ascii")
-            counter = root / "gh-count"
-            counter.write_text("0", encoding="ascii")
-            counter.chmod(0o666)
-            fake_gh = root / "gh"
-            fake_gh.write_text(
-                "#!/bin/sh\n"
-                f'count="$(/usr/bin/cat {counter.as_posix()})"\n'
-                'count="$((count + 1))"\n'
-                f'/usr/bin/printf "%s" "$count" > {counter.as_posix()}\n'
-                'test "$count" -lt 2\n',
-                encoding="utf-8",
-            )
-            fake_gh.chmod(0o755)
-            body = (
-                body.replace(
-                    "ANIMEMO_ROOT=/var/lib/animemo",
-                    'ANIMEMO_ROOT="$TEST_ROOT/animemo"',
-                )
-                .replace(
-                    "PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1",
-                    'PROTECTED_ROOT="$AUTHORITY_PARENT/v1"',
-                )
-                .replace(
-                    "assert_safe_root_directory /var/lib ''",
-                    ": # /var/lib is outside the isolated test namespace",
-                )
-                .replace('test -p "$GH_TOKEN_PIPE"', 'test -f "$GH_TOKEN_PIPE"')
-                .replace("/usr/bin/gh", fake_gh.as_posix())
-            )
-            result = subprocess.run(
-                [
-                    str(sudo),
-                    "-n",
-                    "/usr/bin/env",
-                    "-i",
-                    f"TEST_ROOT={root}",
-                    "EXACT_TAG=v1.1.0-rc.10",
-                    f"MIRROR_CANDIDATE={candidate}",
-                    f"GH_TOKEN_PIPE={credential}",
-                    "HOME=/root",
-                    "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-                    "LANG=C.UTF-8",
-                    "LC_ALL=C.UTF-8",
-                    "/bin/bash",
-                    "--noprofile",
-                    "--norc",
-                ],
-                input=body,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(counter.read_text(encoding="ascii"), "2")
-            self.assertFalse((root / "animemo").exists())
-
-    @unittest.skipUnless(os.name == "posix", "Stage-0 root transaction requires POSIX")
-    def test_partial_directory_creation_failure_removes_earlier_parents(self) -> None:
-        sudo = Path("/usr/bin/sudo")
-        if (
-            not sudo.exists()
-            or subprocess.run(
-                [str(sudo), "-n", "/bin/true"],
-                check=False,
-                capture_output=True,
-            ).returncode
-            != 0
-        ):
-            self.skipTest("passwordless sudo is required for the root transaction test")
-
-        stage0 = _official_mirror_stage0_contract()
-        body = stage0.split("<<'ANIMEMO_PROTECTED_HANDOFF'\n", 1)[1].split(
-            "\nANIMEMO_PROTECTED_HANDOFF", 1
-        )[0]
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            candidate = root / "candidate.tar"
-            candidate.write_bytes(b"candidate fixture")
-            credential = root / "gh-token.fixture"
-            credential.write_text("github_pat_fixture\n", encoding="ascii")
-            counter = root / "install-count"
-            counter.write_text("0", encoding="ascii")
-            counter.chmod(0o666)
-            fake_install = root / "install"
-            fake_install.write_text(
-                "#!/bin/sh\n"
-                f'count="$(/usr/bin/cat {counter.as_posix()})"\n'
-                'count="$((count + 1))"\n'
-                f'/usr/bin/printf "%s" "$count" > {counter.as_posix()}\n'
-                'test "$count" -lt 2 || exit 1\n'
-                'exec /usr/bin/install "$@"\n',
-                encoding="utf-8",
-            )
-            fake_install.chmod(0o755)
-            body = (
-                body.replace(
-                    "ANIMEMO_ROOT=/var/lib/animemo",
-                    'ANIMEMO_ROOT="$TEST_ROOT/animemo"',
-                )
-                .replace(
-                    "PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1",
-                    'PROTECTED_ROOT="$AUTHORITY_PARENT/v1"',
-                )
-                .replace(
-                    "assert_safe_root_directory /var/lib ''",
-                    ": # /var/lib is outside the isolated test namespace",
-                )
-                .replace('test -p "$GH_TOKEN_PIPE"', 'test -f "$GH_TOKEN_PIPE"')
-                .replace("/usr/bin/install", fake_install.as_posix())
-            )
-            result = subprocess.run(
-                [
-                    str(sudo),
-                    "-n",
-                    "/usr/bin/env",
-                    "-i",
-                    f"TEST_ROOT={root}",
-                    "EXACT_TAG=v1.1.0-rc.10",
-                    f"MIRROR_CANDIDATE={candidate}",
-                    f"GH_TOKEN_PIPE={credential}",
-                    "HOME=/root",
-                    "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-                    "LANG=C.UTF-8",
-                    "LC_ALL=C.UTF-8",
-                    "/bin/bash",
-                    "--noprofile",
-                    "--norc",
-                ],
-                input=body,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(counter.read_text(encoding="ascii"), "2")
-            self.assertFalse((root / "animemo").exists())
+        self.assertIn("BOOTSTRAP_TOKENLESS_INDEPENDENT_TRUST_REQUIRED", stage0)
+        self.assertNotIn("gh auth", stage0)
+        self.assertNotIn("sudo", stage0)
 
 
 class BootstrapPrivilegeGateTests(unittest.TestCase):
@@ -773,142 +299,41 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                         release_commit="1" * 40,
                     )
 
-    def test_online_stage0_uses_fixed_gh_and_sanitized_environment(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            protected = root / "installer-materials.tar"
-            protected.write_bytes(b"verified materials")
-            completed = (
-                subprocess.CompletedProcess([], 0, b"gh version 2.97.0\n", b""),
-                subprocess.CompletedProcess([], 0, b'{"release":"verified"}\n', b""),
-                subprocess.CompletedProcess([], 0, b'{"asset":"verified"}\n', b""),
-            )
-            with (
-                authority_test_namespace(root),
-                mock.patch(
-                    "installer.bootstrap.subprocess.run", side_effect=completed
-                ) as run,
-            ):
-                receipt = authorize_online_stage0(
-                    tag="v1.1.0-rc.1",
-                    release_commit="1" * 40,
-                    verified_at="2026-08-19T00:00:00Z",
-                )
-
-            self.assertTrue(receipt.identity.startswith("sha256:"))
-            self.assertEqual(
-                receipt.payload["stage0"]["carrier"],
-                "GH_2_97_0_EXACT_FROM_OFFICIAL_RELEASE_ASSETS_SHA256_BOUND",
-            )
-            self.assertEqual(run.call_count, 3)
-            for call in run.call_args_list:
-                self.assertEqual(call.args[0][0], "/usr/bin/gh")
-                self.assertEqual(
-                    set(call.kwargs["env"]),
-                    {"GH_PROMPT_DISABLED", "HOME", "LANG", "LC_ALL", "PATH"},
-                )
-                self.assertIs(call.kwargs["stdin"], subprocess.DEVNULL)
-                self.assertFalse(call.kwargs["shell"])
-                self.assertFalse(call.kwargs["text"])
-                self.assertTrue(call.kwargs["capture_output"])
-                self.assertEqual(call.kwargs["timeout"], 120)
-            self.assertIn("verify-asset", run.call_args_list[2].args[0])
-            self.assertEqual(run.call_args_list[0].args[0], ["/usr/bin/gh", "version"])
-
-    def test_online_stage0_forwards_only_the_ephemeral_github_credential(self) -> None:
-        completed = subprocess.CompletedProcess([], 0, b"gh version 2.97.0\n", b"")
-        with (
-            mock.patch.dict(
-                os.environ,
-                {
-                    "GH_TOKEN": "github_pat_ephemeral",
-                    "GITHUB_TOKEN": "must-not-forward",
-                },
-                clear=True,
-            ),
-            mock.patch(
-                "installer.bootstrap.subprocess.run", return_value=completed
-            ) as run,
-        ):
-            from installer.bootstrap import _run_stage0_gh
-
-            _run_stage0_gh(("version",))
-
-        self.assertEqual(
-            run.call_args.kwargs["env"]["GH_TOKEN"], "github_pat_ephemeral"
-        )
-        self.assertNotIn("GITHUB_TOKEN", run.call_args.kwargs["env"])
-        self.assertNotIn("github_pat_ephemeral", run.call_args.args[0])
-
-    def test_online_stage0_rejects_malformed_ephemeral_credential_before_exec(
-        self,
-    ) -> None:
-        with (
-            mock.patch.dict(
-                os.environ, {"GH_TOKEN": "invalid\ncredential"}, clear=True
-            ),
-            mock.patch("installer.bootstrap.subprocess.run") as run,
-            self.assertRaisesRegex(
-                BootstrapAuthorityError,
-                "BOOTSTRAP_STAGE0_GH_CREDENTIAL_INVALID",
-            ),
-        ):
-            from installer.bootstrap import _run_stage0_gh
-
-            _run_stage0_gh(("version",))
-        run.assert_not_called()
-
-    def test_online_stage0_accepts_pinned_official_gh_output(self) -> None:
+    def test_online_stage0_rejects_lab_result_before_authority_write(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "installer-materials.tar").write_bytes(b"verified materials")
-            completed = (
-                subprocess.CompletedProcess(
-                    [],
-                    0,
-                    GH_VERSION_FIXTURE.read_bytes(),
-                    b"",
-                ),
-                subprocess.CompletedProcess([], 0, b'{"release":"verified"}\n', b""),
-                subprocess.CompletedProcess([], 0, b'{"asset":"verified"}\n', b""),
-            )
-            with (
-                authority_test_namespace(root),
-                mock.patch("installer.bootstrap.subprocess.run", side_effect=completed),
-            ):
-                receipt = authorize_online_stage0(
-                    tag="v1.1.0-rc.1",
-                    release_commit="1" * 40,
-                    verified_at="2026-08-19T00:00:00Z",
-                )
+            with authority_test_namespace(root), mock.patch(
+                "installer.tokenless_stage0.verify_for_production", return_value={"verified": True}
+            ), mock.patch("installer.bootstrap.commit_bootstrap_authorization") as commit:
+                with self.assertRaisesRegex(BootstrapAuthorityError, "CAPABILITY_REQUIRED"):
+                    authorize_online_stage0(tag="v1.1.0-rc.1", release_commit="1" * 40,
+                        verified_at="2026-08-19T00:00:00Z")
+                commit.assert_not_called()
 
-        self.assertTrue(receipt.identity.startswith("sha256:"))
-
-    def test_old_or_malformed_gh_fails_before_release_verification(self) -> None:
+    def test_online_stage0_propagates_fixed_failure_before_commit(self):
+        from installer.tokenless_stage0 import TokenlessStage0Error
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "installer-materials.tar").write_bytes(b"verified materials")
-            old = subprocess.CompletedProcess([], 0, b"gh version 2.96.0\n", b"")
-            with (
-                authority_test_namespace(root),
-                mock.patch(
-                    "installer.bootstrap.subprocess.run", return_value=old
-                ) as run,
-                self.assertRaisesRegex(
-                    BootstrapAuthorityError,
-                    "BOOTSTRAP_STAGE0_GH_VERSION_INVALID",
-                ),
-            ):
-                authorize_online_stage0(
-                    tag="v1.1.0-rc.1",
-                    release_commit="1" * 40,
-                    verified_at="2026-08-19T00:00:00Z",
-                )
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(
-                {path.name for path in root.iterdir()},
-                {"installer-materials.tar"},
-            )
+            with authority_test_namespace(root), mock.patch(
+                "installer.tokenless_stage0.verify_for_production",
+                side_effect=TokenlessStage0Error("BOOTSTRAP_TOKENLESS_SIGNATURE_REJECTED")
+            ), mock.patch("installer.bootstrap.commit_bootstrap_authorization") as commit:
+                with self.assertRaisesRegex(BootstrapAuthorityError, "SIGNATURE_REJECTED"):
+                    authorize_online_stage0(tag="v1.1.0-rc.1", release_commit="1" * 40,
+                        verified_at="2026-08-19T00:00:00Z")
+                commit.assert_not_called()
+
+    def test_version_diagnostic_never_forwards_parent_canary(self):
+        from installer.bootstrap import _run_stage0_gh
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "NON_SECRET_CANARY"}), mock.patch(
+            "installer.bootstrap.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, b"gh version 2.97.0\n", b"")
+        ) as run:
+            _run_stage0_gh(("version",))
+            self.assertNotIn("GH_TOKEN", run.call_args.kwargs["env"])
+            self.assertNotIn("GITHUB_TOKEN", run.call_args.kwargs["env"])
 
     def test_stage0_records_process_failure_without_trusting_stderr(self) -> None:
         failed = subprocess.CompletedProcess(

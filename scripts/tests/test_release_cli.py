@@ -471,15 +471,20 @@ class ReleaseCliTests(unittest.TestCase):
             self.assertIn("Duplicate JSON field", completed.stderr)
 
     def test_cli_errors_are_machine_readable_and_nonzero(self):
-        completed = self.run_cli(
-            "resolve-version",
-            "--tags-file", ROOT / "release" / "missing-tags.txt",
-            "--publication-reservations-file",
-            ROOT / "release" / "publication-reservations.json",
-            "--bump", "patch",
-            "--channel", "stable",
-            expected=2,
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            reservations = Path(directory) / "publication-reservations.json"
+            # This unit checks the missing tags error, not a live journal.
+            reservations.write_text(
+                '{"schemaVersion":1,"reservations":[]}\n', encoding="utf-8"
+            )
+            completed = self.run_cli(
+                "resolve-version",
+                "--tags-file", ROOT / "release" / "missing-tags.txt",
+                "--publication-reservations-file", reservations,
+                "--bump", "patch",
+                "--channel", "stable",
+                expected=2,
+            )
         payload = json.loads(completed.stderr)
         self.assertEqual(payload["code"], "release_contract_invalid")
         self.assertIn("detail", payload)

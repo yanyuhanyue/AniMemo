@@ -798,11 +798,13 @@ class SigstoreGoEvidenceVerifier:
         material: PretrustedTrustMaterial,
         *,
         runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+        temporary_root: Path | None = None,
     ) -> None:
         if type(material) is not PretrustedTrustMaterial:
             raise ValueError("外部验证器必须绑定预置信任材料")
         self._material = material
         self._runner = runner
+        self._temporary_root = temporary_root
 
     def verify_github_release(
         self,
@@ -938,7 +940,7 @@ class SigstoreGoEvidenceVerifier:
                 "tufRootVersion": current_profile.sigstore_tuf_root_version,
             },
         }
-        with tempfile.TemporaryDirectory(prefix="animemo-tuf-update-") as temp:
+        with tempfile.TemporaryDirectory(prefix="animemo-tuf-update-", dir=self._temporary_root) as temp:
             root = Path(temp)
             package_path = root / "trust-update.json"
             request_path = root / "request.json"
@@ -968,7 +970,7 @@ class SigstoreGoEvidenceVerifier:
         request: Mapping[str, object],
     ) -> Mapping[str, object]:
         sigstore_bundle = _extract_sigstore_bundle(bundle, evidence_name)
-        with tempfile.TemporaryDirectory(prefix="animemo-offline-verify-") as temp:
+        with tempfile.TemporaryDirectory(prefix="animemo-offline-verify-", dir=self._temporary_root) as temp:
             root = Path(temp)
             bundle_path = root / "bundle.json"
             request_path = root / "request.json"

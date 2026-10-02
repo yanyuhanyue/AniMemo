@@ -39,7 +39,13 @@ WORKLOAD_CONSTRUCTION_FAILURE_CODES = frozenset({
 })
 
 
-def validate_workload_command_budget(resolved_argv):
+class WorkloadCommandBudgetFailure(ControllerFailure):
+    def __init__(self, budget):
+        super().__init__('CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED')
+        self.command_budget = dict(budget)
+
+
+def validate_workload_command_budget(resolved_argv, *, program_sizes=None):
     """Bound the actual Windows CreateProcessW command, including its NUL."""
     if (not resolved_argv or any(type(value) is not str or '\0' in value for value in resolved_argv)):
         raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_INVALID')
@@ -48,7 +54,10 @@ def validate_workload_command_budget(resolved_argv):
     except UnicodeEncodeError:
         raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_INVALID') from None
     if units > WINDOWS_COMMAND_MAXIMUM_UNITS:
-        raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED')
+        raise WorkloadCommandBudgetFailure({**(program_sizes or {}),
+            'windows_command_utf16_units_including_nul': units,
+            'windows_command_maximum_units': WINDOWS_COMMAND_MAXIMUM_UNITS,
+            'windows_command_excess_units': units - WINDOWS_COMMAND_MAXIMUM_UNITS})
     return {'windows_command_utf16_units_including_nul': units,
             'windows_command_maximum_units': WINDOWS_COMMAND_MAXIMUM_UNITS}
 
@@ -81,8 +90,15 @@ def bootstrap_candidate(provider, plan, profile, lease, disk, snapshot):
     batch = _batch(provider, plan)
     authority = provider._active_profile_authority(profile, plan)
     with batch.operation('BOOTSTRAP', profile):
-        provider._verify_bootstrap_connection(authority, profile,
+        verified = provider._verify_bootstrap_connection(authority, profile,
             preboot_disk_graph_digest=disk, preboot_snapshot_identity=snapshot)
+        from scripts.development_plan import is_development_plan
+        if is_development_plan(plan) and plan.runtime_offline_only:
+            from scripts.runtime_development_boundary import run_before_capture
+            run_before_capture(provider, plan, profile, lease, verified)
+        if is_development_plan(plan) and plan.published_subject_digest is not None:
+            from scripts.development_diagnostic_preflight import run_before_capture
+            run_before_capture(provider, plan, profile, lease, verified)
         provider._remove_known_hosts(authority)
         batch.capture_after_bootstrap_observation(profile)
         use = batch.issue(profile, lease, ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO'))
@@ -212,17 +228,19 @@ def preflight_candidate_workload_commands(provider, plan):
         plan_digest=plan.plan_digest, profiles=profiles, secret_capture_required=False)
 
 
-def _remote_workload_command(root_program, operation, *, formal_ssh_context=False):
+def _remote_workload_command(root_program, operation, *, formal_ssh_context=False,
+                             runtime_offline_only=False, _program_sizes=None):
     # Only public identity and a bounded receipt reach stdout. The mutable
     # password is wiped immediately after one forwarding write, before wait.
     from scripts.guest_sudo_session import _REMOTE_OBSERVE
     observe = _REMOTE_OBSERVE
     argv = ['/usr/bin/sudo', '-S', '-k', '-p', '', '--', '/usr/bin/python3', '-I', '-B', '-c', root_program]
     diagnostic_source = Path(diagnostics.__file__).read_text(encoding='utf-8')
-    encoded = base64.b64encode(zlib.compress(diagnostic_source.encode(), 9)).decode('ascii')
-    setup = ("\nimport base64,zlib\nscope={'__name__':'_animemo_diagnostic'}\n"
-        + 'exec(compile(zlib.decompress(base64.b64decode(' + repr(encoded)
-        + ")), '<fixed-diagnostic>', 'exec'),scope)\n"
+    # Compress the complete fixed transport once below. An independently
+    # compressed copy here hides repeated diagnostic source from that encoder.
+    setup = ("\nscope={'__name__':'_animemo_diagnostic'}\n"
+        + 'exec(compile(' + repr(diagnostic_source)
+        + ", '<fixed-diagnostic>', 'exec'),scope)\n"
         + "diagnostic=scope['DiagnosticWriter'](1," + repr(operation) + ')\n'
         + "reader=scope['DiagnosticReader'](" + repr(operation) + ")\n"
         + "diagnostic.stage('SSH_OBSERVED')\n")
@@ -275,6 +293,23 @@ sys.exit(code)
     raw = program.encode('utf-8')
     if len(raw) > MAX_REMOTE_PROGRAM_BYTES:
         raise ControllerFailure('CANDIDATE_WORKLOAD_PROGRAM_SIZE_INVALID')
+    if _program_sizes is not None:
+        _program_sizes.update(root_program_utf8_bytes=len(root_program.encode('utf-8')),
+                              decoded_transport_utf8_bytes=len(raw))
+    if runtime_offline_only:
+        import lzma
+        # Only the single Runtime DEV path needs this compact representation.
+        # Preserve the complete transport and its exact sudo argv; bound both
+        # decoder memory and output before compiling any decoded program.
+        encoded = base64.b85encode(lzma.compress(raw, format=lzma.FORMAT_XZ, preset=6)).decode('ascii')
+        wrapper = ('import base64,lzma;d=lzma.LZMADecompressor(format=lzma.FORMAT_XZ,memlimit=67108864);'
+            + 'p=d.decompress(base64.b85decode(' + repr(encoded) + '),max_length='
+            + str(MAX_REMOTE_PROGRAM_BYTES + 1) + ')\n'
+            + 'if not (len(p)<=' + str(MAX_REMOTE_PROGRAM_BYTES)
+            + ' and d.eof and not d.unused_data):'
+            + " raise ValueError('CANDIDATE_WORKLOAD_PROGRAM_SIZE_INVALID')\n"
+            + "exec(compile(p,'<fixed-workload-transport>','exec'))")
+        return '/usr/bin/python3 -I -B -c ' + shlex.quote(wrapper)
     encoded = base64.b64encode(zlib.compress(raw, 9)).decode('ascii')
     # This is a fixed public program built from held source and exact context;
     # no untrusted bytes can enter its compressed payload. Verify its decoded
@@ -326,6 +361,7 @@ def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=
             break
         except queue.Empty:
             continue
+    error = error or reader.finish()
     reader.error_code = error
     observed = reader.public()
     provider._candidate_diagnostics[profile.profile] = observed
@@ -351,11 +387,20 @@ def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=
                 raise ValueError()
             if stages & {'INSTALLER_STARTING', 'INSTALLER_RUNNING', 'INSTALLER_COMPLETED'}:
                 raise ValueError()
-            validate_platform_diagnostic_report(reader.receipt,
-                loaded=provider._candidate_material_authority.loaded,
+            published = batch.plan.published_subject_digest is not None
+            validator = validate_platform_diagnostic_report
+            if published:
+                from scripts.development_published_planning import validate_published_planning_report
+                validator = validate_published_planning_report
+            validator(reader.receipt, loaded=provider._candidate_material_authority.loaded,
                 expected_binding=development_binding(batch.plan),
                 expected_context=_profile_context(batch.plan, profile, h._initial_platform_state(profile.profile)))
-            if reader.receipt['result'] == 'FAIL':
+            if published and reader.receipt['result'] == 'FAIL':
+                if (reader.receipt['diagnostic_status'] != 'COMPLETE'
+                        or observed['failure_diagnostic']['status'] != 'COMPLETE'):
+                    raise ValueError()
+                expected_errors = ['RUNNER_EXECUTION_FAILED']
+            elif reader.receipt['result'] == 'FAIL':
                 expected_errors = ['PLATFORM_PREPARATION_FAILED', reader.receipt['error_code']]
                 if reader.receipt['error_code'] == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
                     expected_errors.append('PLATFORM_PACKAGE_POLICY_INVALID')
@@ -416,15 +461,33 @@ class _WorkloadSupervisor(SessionSupervisor):
             h._initial_platform_state(self._profile.profile))
 
     def execute(self):
+        program_sizes = {}
         command = _remote_workload_command(self._program(), _diagnostic_operation(self._plan, self._profile),
-            formal_ssh_context=self._role == 'FORMAL_WORKLOAD')
+            formal_ssh_context=self._role == 'FORMAL_WORKLOAD',
+            runtime_offline_only=getattr(self._plan, 'runtime_offline_only', False),
+            _program_sizes=program_sizes)
+        program_sizes['remote_command_utf8_bytes'] = len(command.encode('utf-8'))
         try:
-            self._workload_deadline = time.monotonic() + WORKLOAD_SECONDS
+            workload_seconds = WORKLOAD_SECONDS
+            if getattr(self._plan, 'runtime_offline_only', False):
+                from scripts.runtime_development_boundary import (
+                    require_runtime_lifetime,
+                )
+                lifetime = require_runtime_lifetime(self._provider, self._plan, self._profile)
+                lifetime.check('WORKLOAD_START')
+                workload_seconds = lifetime.workload_timeout(WORKLOAD_SECONDS)
+            self._workload_deadline = time.monotonic() + workload_seconds
             argv = self._provider._ssh_argv(self._authority, command)
-            validate_workload_command_budget((str(self._provider._tool_path(h.SSH)), *argv[1:]))
+            try:
+                validate_workload_command_budget((str(self._provider._tool_path(h.SSH)), *argv[1:]),
+                                                  program_sizes=program_sizes)
+            except WorkloadCommandBudgetFailure as error:
+                self._provider._profile_operation_results.setdefault(self._profile.profile, {})[
+                    'workload_command_budget_failure'] = error.command_budget
+                raise
             with hold_windows_private_file(self._authority.known_hosts_file):
                 completed = self._provider._run(argv,
-                    code='CANDIDATE_VM_PROFILE_EXECUTION_FAILED', timeout=WORKLOAD_SECONDS,
+                    code='CANDIDATE_VM_PROFILE_EXECUTION_FAILED', timeout=workload_seconds,
                     allowed=frozenset({0, 2}), openssh=True, guest_exchange=self._exchange_workload)
             if (self._delivery_attempts[self._role] != 1 or self._delivery_completed[self._role] != 1
                     or self._grant is None or not self._grant.used):

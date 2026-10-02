@@ -96,7 +96,7 @@ def frozen_prepublication_fixture(directory: Path):
         target = source / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(relative + "\n", encoding="utf-8", newline="\n")
-    for package in ("durability", "release", "updater", "installer"):
+    for package in ("durability", "release", "updater", "installer", "bootstrap_kit"):
         package_root = source / package
         package_root.mkdir(parents=True, exist_ok=True)
         (package_root / "__init__.py").write_text("", encoding="utf-8")
@@ -839,11 +839,42 @@ class FrozenPrepublicationMaterialTests(unittest.TestCase):
                     payload["pretrust"]["aggregateSha256"],
                 ),
                 (
-                    "sha256:f97df0257a36a58257773307498f01e48f1e909e7c8ad35088903647856a25a5",
+                    # The required bootstrap_kit package adds its empty marker
+                    # to this fixed synthetic material member manifest.
+                    "sha256:b1b9bf785593fd87c6ca0a16573b18e607bd06849c8c608bb7706e6b661383f6",
                     "sha256:ca794441aa84a156fc47d0cf2efc2d04aef61517925e5dcccbbcc181ec98b93a",
                     "sha256:55b1e65bef2482487dfa419dde72f2e99e7db1a02118d7ecf5903c0359af7823",
                 ),
             )
+
+    def test_bootstrap_kit_package_is_required_and_runtime_bytes_are_archived(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            with mock.patch(
+                "release.test_release_pipeline.build_installer_materials",
+                wraps=build_installer_materials,
+            ) as observed_builder:
+                frozen_prepublication_fixture(temporary)
+            source = observed_builder.call_args.args[0]
+            options = {**observed_builder.call_args.kwargs, "output": temporary / "new-materials.tar"}
+            package = source / "bootstrap_kit"
+            self.assertTrue(temporary.resolve() in package.resolve().parents)
+            (package / "__init__.py").unlink()
+            package.rmdir()
+            with self.assertRaisesRegex(MaterialContractError, "bootstrap_kit"):
+                build_installer_materials(source, **options)
+            self.assertFalse(options["output"].exists())
+            package.mkdir()
+            (package / "__init__.py").write_bytes(b"")
+            runtime_bytes = b"# TEST_ONLY runtime closure fixture\n"
+            (package / "runtime.py").write_bytes(runtime_bytes)
+            (package / "tests").mkdir()
+            (package / "tests/test_excluded.py").write_bytes(b"# not a runtime member\n")
+            build_installer_materials(source, **options)
+            with tarfile.open(options["output"], "r:") as archive:
+                self.assertEqual(archive.extractfile("bootstrap_kit/runtime.py").read(), runtime_bytes)
+                self.assertIn("bootstrap_kit/__init__.py", archive.getnames())
+                self.assertNotIn("bootstrap_kit/tests/test_excluded.py", archive.getnames())
 
     def test_source_replacement_during_open_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

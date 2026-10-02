@@ -308,12 +308,29 @@ class ExplicitTransportPolicy:
 
 
 @dataclass(frozen=True)
+class GitHubAssetPlan:
+    """API observation used for selection, never signature authority."""
+    logical_name: str
+    asset_id: int
+    sha256: str
+
+    def __post_init__(self):
+        if (self.logical_name not in RELEASE_BUNDLE_OBJECTS
+                or type(self.asset_id) is not int or self.asset_id <= 0
+                or type(self.sha256) is not str
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", self.sha256) is None):
+            raise TransportError("TRANSPORT_REQUEST_INVALID", "Invalid exact GitHub asset selection")
+
+
+@dataclass(frozen=True)
 class TransportRequest:
     kind: TransportRequestKind
     exact_version: str
     object_plans: tuple[TransportObjectPlan, ...]
     max_object_bytes: int
     max_total_bytes: int
+    github_release_id: int | None = None
+    github_assets: tuple[GitHubAssetPlan, ...] = ()
     identity: str = field(init=False)
 
     @property
@@ -321,6 +338,13 @@ class TransportRequest:
         return tuple(item.logical_name for item in self.object_plans)
 
     def __post_init__(self) -> None:
+        if self.github_release_id is not None or self.github_assets:
+            if (type(self.github_release_id) is not int or self.github_release_id <= 0
+                    or type(self.github_assets) is not tuple
+                    or any(type(item) is not GitHubAssetPlan for item in self.github_assets)
+                    or tuple(item.logical_name for item in self.github_assets) != RELEASE_BUNDLE_OBJECTS
+                    or len({item.asset_id for item in self.github_assets}) != len(self.github_assets)):
+                raise TransportError("TRANSPORT_REQUEST_INVALID", "GitHub release selection is not closed")
         if (
             type(self.kind) is not TransportRequestKind
             or self.kind is not TransportRequestKind.RELEASE_BUNDLE
@@ -361,6 +385,12 @@ class TransportRequest:
                         for item in self.object_plans
                     ],
                     "request_version": 1,
+                    **({"github_selection": {
+                        "repository": "yanyuhanyue/AniMemo", "repository_id": 1327429673,
+                        "release_id": self.github_release_id,
+                        "assets": [{"name": item.logical_name, "id": item.asset_id,
+                                    "sha256": item.sha256} for item in self.github_assets],
+                    }} if self.github_release_id is not None else {}),
                 }
             ),
         )
@@ -373,6 +403,8 @@ class TransportRequest:
         object_plans: tuple[TransportObjectPlan, ...],
         max_object_bytes: int = 512 * 1024 * 1024,
         max_total_bytes: int = 1024 * 1024 * 1024,
+        github_release_id: int | None = None,
+        github_assets: tuple[GitHubAssetPlan, ...] = (),
     ) -> TransportRequest:
         return cls(
             kind=TransportRequestKind.RELEASE_BUNDLE,
@@ -380,6 +412,8 @@ class TransportRequest:
             object_plans=object_plans,
             max_object_bytes=max_object_bytes,
             max_total_bytes=max_total_bytes,
+            github_release_id=github_release_id,
+            github_assets=github_assets,
         )
 
 
@@ -1625,6 +1659,112 @@ class _HttpsTransportSource:
             sha256=digest.hexdigest(),
             size=size,
         )
+
+
+class AnonymousGitHubTransportSource:
+    """Public installation carrier; metadata selects bytes, crypto authorizes them."""
+    transport_id = TransportSourceId.GITHUB
+
+    def __init__(self, *, http_client=None, private_root=None):
+        self._client = http_client
+        # Worker slots are separate from the caller's pending publication tree.
+        # An unreaped worker cannot have its slot deleted by caller rollback.
+        self._private_root = Path(private_root or tempfile.gettempdir())
+        self.last_diagnostics = None
+
+    def acquire(self, request: TransportRequest, private_staging: Path):
+        from bootstrap_kit.http_protocol import HttpFailure, HttpSelection
+        from bootstrap_kit.http_supervisor import SupervisedAnonymousHttp
+        from bootstrap_kit.safe_files import create_private_directory, directory_identity, remove_owned_directory, KitFileError
+
+        self.last_diagnostics = None
+        if type(request) is not TransportRequest or request.github_release_id is None:
+            raise TransportError("TRANSPORT_REQUEST_INVALID", "Exact public GitHub identities are required")
+        staging = _validated_staging(Path(private_staging))
+        pending = create_private_directory(staging, prefix="anonymous-pending-")
+        pending_identity = directory_identity(pending)
+        client = self._client or SupervisedAnonymousHttp(private_root=self._private_root)
+        started = time.monotonic()
+        deadline = started + DEFAULT_TRANSFER_BUDGET_POLICY.maximum_bundle_elapsed_seconds
+        identities = {item.logical_name: item for item in request.github_assets}
+        objects, observations = [], []
+        final, committed, primary = None, False, None
+        try:
+            total = 0
+            for plan in request.object_plans:
+                identity = identities[plan.logical_name]
+                timeout = DEFAULT_TRANSFER_BUDGET_POLICY.timeout_for_size(plan.expected_size)
+                step_started = time.monotonic()
+                step_deadline = min(deadline, step_started + timeout)
+                if step_started >= step_deadline:
+                    raise TransportError("TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED", "Public download deadline expired")
+                selection = HttpSelection.github_asset(version="v" + request.exact_version,
+                    release_id=request.github_release_id, asset_id=identity.asset_id,
+                    name=plan.logical_name, size=plan.expected_size, sha256=identity.sha256)
+                path = pending / plan.logical_name
+                with client.fetch(selection, deadline=step_deadline) as acquired:
+                    digest, size = hashlib.sha256(), 0
+                    acquired.stream.seek(0)
+                    with path.open("xb") as output:
+                        while chunk := acquired.stream.read(min(_READ_CHUNK_BYTES, plan.expected_size - size + 1)):
+                            size += len(chunk)
+                            if (size > plan.expected_size or total + size > request.max_total_bytes
+                                    or time.monotonic() >= step_deadline):
+                                raise TransportError("TRANSPORT_OBJECT_SIZE_OR_DEADLINE", "Public asset exceeded its bound")
+                            digest.update(chunk)
+                            output.write(chunk)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if size != plan.expected_size or "sha256:" + digest.hexdigest() != identity.sha256:
+                        raise TransportError("TRANSPORT_OBJECT_DIGEST_MISMATCH", "Public asset differs from exact selection")
+                _validate_regular_material(path, root=pending)
+                total += size
+                objects.append(TransportObjectReceipt(plan.logical_name, plan.logical_name, digest.hexdigest(), size))
+                observations.append(TransportObjectDiagnostic(plan.logical_name, plan.expected_size,
+                    timeout, 1, 0, (), round((time.monotonic() - step_started) * 1000), "PASS"))
+            if time.monotonic() >= deadline:
+                raise TransportError("TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED", "Public download deadline expired")
+            _fsync_directory(pending)
+            receipt = TransportReceipt(self.transport_id, request.identity, tuple(objects), _canonical_identity({
+                "transport": "ANONYMOUS_GITHUB_ASSET_ID", "request": request.identity,
+                "objects": [{"name": item.logical_name, "sha256": item.sha256, "size": item.size} for item in objects],
+            }))
+            final = staging / ("acquired-anonymous-" + uuid.uuid4().hex)
+            os.replace(pending, final)
+            _fsync_directory(staging)
+            if time.monotonic() >= deadline:
+                raise TransportError("TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED", "Public download deadline expired")
+            diagnostics = TransportAcquisitionDiagnostics(tuple(observations),
+                round((time.monotonic() - started) * 1000), "PASS")
+            result = AcquiredTransportSet(final, tuple(objects), receipt, diagnostics)
+            committed = True
+            self.last_diagnostics = diagnostics
+            return result
+        except HttpFailure as error:
+            primary = TransportError(error.code, "Anonymous public transfer failed", phase="acquire")
+            primary.secondary_errors = error.secondary_errors
+            primary.http_status = error.http_status
+            raise primary from None
+        except OSError:
+            primary = TransportError("TRANSPORT_LOCAL_RESOURCE_FAILED", "Public transfer storage failed")
+            raise primary from None
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            if not committed:
+                for directory in (pending, final):
+                    if directory is None or not directory.exists():
+                        continue
+                    try:
+                        if directory.resolve().parent != staging or directory.is_symlink() or directory.is_junction():
+                            raise OSError("Unsafe cleanup target")
+                        remove_owned_directory(directory, pending_identity)
+                    except (OSError, KitFileError):
+                        if primary is None:
+                            raise TransportError("TRANSPORT_LOCAL_CLEANUP_FAILED", "Public transfer cleanup failed") from None
+                        primary.secondary_errors = (*getattr(primary, "secondary_errors", ()),
+                                                    "TRANSPORT_LOCAL_CLEANUP_FAILED")[:4]
 
 
 class GitHubTransportSource(_HttpsTransportSource):

@@ -1,6 +1,9 @@
 # AniMemo Installer Security Successor Contract v2
 
-Status: FROZEN FOR v1.1 P1 SECURITY REPAIR
+Status: LOCAL TOKENLESS STAGE-0 SUCCESSOR / DEVELOPMENT_ONLY (2026-09-20)
+
+Authorization: ANIMEMO_V2_STAGE0_TOKENLESS_VERIFICATION_LOCAL_REPAIR_V1.
+The published rc.3 contract and product bytes are not rewritten by this local successor.
 
 Predecessor: `docs/installer-contract-v1.md` at Git blob
 `a6307b42928423cea3a2cf04db7836887fc818a0`.
@@ -18,23 +21,11 @@ and bundle-contained roots are `UNTRUSTED_TRANSPORT_INPUT`. TUF authorizes only
 GitHub/Sigstore trust-metadata succession and signer deauthorization; it cannot
 mint an AniMemo Release.
 
-Online Stage-0 uses independently installed `/usr/bin/gh` exactly `2.97.0` to
-verify the exact tag and the exact protected `installer-materials.tar`. Offline
-Stage-0 requires an operator or trusted image to provision the verifier and roots
-independently of the Portable payload. Portable-only first trust is forbidden.
+Online Stage-0 uses the fixed Sigstore Go github-release verifier with independently provisioned operator trust at `/usr/share/animemo/stage0-trust/v1`. Anonymous acquisition, signature policy and exact Release/asset binding are specified in `tokenless-stage0-contract.md`. The earlier named gh verification commands and account handoff are retired. Historical authorization records remain readable; no new online path invokes them.
 
-The online carrier may explicitly acquire only
-`installer-materials.tar` from the fixed Official Mirror origin
-`https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/<EXACT_TAG>/`.
-It must verify the GitHub Immutable Release before that download, reject every
-redirect and query, verify the mirror bytes with `gh release verify-asset`, copy
-them into a root-owned candidate, and reverify both that candidate and its fixed
-final path before extraction. Any verification failure removes paths created by
-that invocation and leaves zero persistent AniMemo mutation. The receipt is a
-transport completeness marker only and cannot satisfy either GitHub gate. This
-flow is selected only by `--source official-mirror`; no automatic or error-driven
-cross-source fallback exists. The exact command contract is frozen in
-`docs/distribution-transports-v1.1.md`.
+Offline Stage-0 still requires independently provisioned operator trust. Bundle self-authorization is forbidden. The new online implementation does not provision its first trust from the archive: missing independent trust fails closed before authority commit. Clean-host distribution remains blocked and requires a separate reviewed integration; local component tests do not close it.
+
+Official Mirror remains an explicitly selected byte transport with fixed origin, no redirects/query or automatic fallback. It cannot supply Release authority. Safe protected-copy verification, source-byte gates and cleanup remain mandatory before extraction or execution. The public command entry is closed while first-trust delivery is unresolved.
 
 ## 2. Verified bootstrap state machine
 

@@ -461,7 +461,8 @@ class CandidateProfileRunnerTests(unittest.TestCase):
                 runner.ProfileRunnerError
             ):
                 runner._production_execution_observation(
-                    loaded=_loaded(Path("unused")),
+                    expected_material_identity="sha256:" + "6" * 64,
+                    expected_images={role: DIGEST for role in ('api', 'web', 'postgres', 'redis')},
                     parsed_plan=parsed_plan,
                     installer_result=output["installerResult"],
                     value=observation,
@@ -491,7 +492,8 @@ class CandidateProfileRunnerTests(unittest.TestCase):
             "CANDIDATE_PROFILE_NETWORK_OBSERVATION_INVALID",
         ):
             runner._production_execution_observation(
-                loaded=_loaded(Path("unused")),
+                expected_material_identity="sha256:" + "6" * 64,
+                expected_images={role: DIGEST for role in ('api', 'web', 'postgres', 'redis')},
                 parsed_plan=SimpleNamespace(
                     plan_digest="sha256:" + "7" * 64,
                     mode=SimpleNamespace(value="ONLINE_FRESH"),
@@ -533,7 +535,8 @@ class CandidateProfileRunnerTests(unittest.TestCase):
             "CANDIDATE_PROFILE_NETWORK_OBSERVATION_INVALID",
         ):
             runner._production_execution_observation(
-                loaded=_loaded(Path("unused")),
+                expected_material_identity="sha256:" + "6" * 64,
+                expected_images={role: DIGEST for role in ('api', 'web', 'postgres', 'redis')},
                 parsed_plan=SimpleNamespace(
                     plan_digest="sha256:" + "7" * 64,
                     mode=SimpleNamespace(value="ONLINE_FRESH"),
@@ -576,7 +579,8 @@ class CandidateProfileRunnerTests(unittest.TestCase):
         network["retryableNetworkCommandDigests"] = [install_digest]
 
         result = runner._production_execution_observation(
-            loaded=_loaded(Path("unused")),
+            expected_material_identity="sha256:" + "6" * 64,
+            expected_images={role: DIGEST for role in ('api', 'web', 'postgres', 'redis')},
             parsed_plan=SimpleNamespace(
                 plan_digest="sha256:" + "7" * 64,
                 mode=SimpleNamespace(value="ONLINE_FRESH"),

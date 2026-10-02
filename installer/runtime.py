@@ -867,6 +867,7 @@ class Installer:
         restore: RestoreRuntimePort,
         bootstrap_privilege_gate: BootstrapPrivilegeGatePort,
         namespace: InstanceNamespace | None = None,
+        development_execution_gate=None,
     ) -> None:
         self._releases = releases
         self._target = target
@@ -878,6 +879,28 @@ class Installer:
         self._restore = restore
         self._bootstrap_privilege_gate = bootstrap_privilege_gate
         self._namespace = namespace or instance_namespace()
+        development_source = getattr(fresh, '_development_service_source', None)
+        self._development_gate_required = bool(getattr(development_source, 'runtime_offline_only', False))
+        if development_execution_gate is not None:
+            from .development_boundary import DevelopmentExecutionGate
+            if type(development_execution_gate) is not DevelopmentExecutionGate:
+                raise InstallerError('INSTALL_DEVELOPMENT_GATE_REQUIRED',
+                    outcome=InstallOutcome.VALIDATION_FAILED)
+        self._development_execution_gate = development_execution_gate
+        self._require_development_gate()
+
+    def _require_development_gate(self):
+        if self._development_gate_required:
+            from .development_boundary import DevelopmentExecutionGate
+            from .development_trust import DevelopmentBootstrapPrivilegeGate
+            gate = self._development_execution_gate
+            bootstrap = self._bootstrap_privilege_gate
+            if (type(gate) is not DevelopmentExecutionGate
+                    or type(bootstrap) is not DevelopmentBootstrapPrivilegeGate
+                    or bootstrap.authority._gate is not gate):
+                raise InstallerError('INSTALL_DEVELOPMENT_GATE_REQUIRED',
+                    outcome=InstallOutcome.VALIDATION_FAILED)
+            gate.require_bound_trust(bootstrap.authority)
 
     def plan(self, request: InstallRequest) -> InstallPlan:
         """Build a read-only, exact, secret-free operation plan."""
@@ -1037,6 +1060,9 @@ class Installer:
         """Reverify the accepted plan and execute its fixed action."""
 
         self._validate_plan(plan, accepted_plan_digest)
+        self._require_development_gate()
+        if self._development_execution_gate is not None:
+            self._development_execution_gate.consume(plan)
         self._revalidate(plan)
         if plan.action is InstallAction.NO_CHANGE:
             return self._result(
@@ -1053,6 +1079,8 @@ class Installer:
                 reason_code="INSTALL_USE_UPDATER",
             )
         try:
+            if self._development_execution_gate is not None:
+                self._development_execution_gate.check_execute()
             self._bootstrap_privilege_gate.consume(
                 version=plan.release.version,
                 release_commit=plan.release.commit,
@@ -1092,9 +1120,13 @@ class Installer:
         phase = InstallPhase.PREFLIGHT_VERIFIED
         mutation_occurred = False
         irreversible = False
+        if self._development_execution_gate is not None:
+            self._development_execution_gate.check_execute()
         with self._operations.acquire_lock(plan.operation_id):
             self._revalidate(plan)
             try:
+                if self._development_execution_gate is not None:
+                    self._development_execution_gate.check_execute()
                 self._operations.begin(plan)
                 self._operations.phase(
                     phase,
@@ -1164,6 +1196,8 @@ class Installer:
                     ),
                 )
                 for phase, step, operation, crosses_irreversible in schedule:
+                    if self._development_execution_gate is not None:
+                        self._development_execution_gate.check_execute()
                     if crosses_irreversible and not irreversible:
                         irreversible = True
                     self._operations.phase(

@@ -8,6 +8,7 @@ Windows console APIs cannot establish that no external recorder exists.
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import threading
 
@@ -77,7 +78,6 @@ class _ConsoleAPI:
                 (self.kernel32.GetConsoleProcessList, [LPDWORD, DWORD], DWORD),
                 (self.kernel32.GetCurrentProcessId, [], DWORD),
                 (self.user32.IsWindowVisible, [HANDLE], BOOL),
-                (self.user32.MessageBoxW, [HANDLE, ctypes.c_wchar_p, ctypes.c_wchar_p, DWORD], ctypes.c_int),
                 (self.kernel32.FlushConsoleInputBuffer, [HANDLE], BOOL),
                 (self.kernel32.ReadConsoleW, [HANDLE, LPWCHAR, DWORD, LPDWORD, ctypes.c_void_p], BOOL),
                 (self.kernel32.CancelIoEx, [HANDLE, ctypes.c_void_p], BOOL),
@@ -96,6 +96,13 @@ class _ConsoleAPI:
             raise
         except Exception:
             raise ConsoleCaptureError("CREDENTIAL_CHANNEL_UNAVAILABLE") from None
+
+    def confirm_public(self, window, summary, *, timeout_seconds, cancelled):
+        from scripts.native_batch_confirmation import confirm_public_scope
+        try:
+            return confirm_public_scope(window, summary, timeout_seconds=timeout_seconds, cancelled=cancelled)
+        except Exception:
+            raise ConsoleCaptureError("BATCH_CONFIRMATION_DISPLAY_UNAVAILABLE") from None
 
 
 class WindowsConsoleCapture:
@@ -146,18 +153,25 @@ class WindowsConsoleCapture:
         except Exception:
             raise ConsoleCaptureError("CREDENTIAL_CHANNEL_UNAVAILABLE") from None
 
-    def confirm_batch(self, public_summary: str) -> None:
+    def confirm_batch(self, public_summary: str, *, timeout_seconds=None, cancelled=None) -> None:
         """Confirm the frozen public batch locally; this never reads a secret."""
+        self._confirm_batch(public_summary, timeout_seconds=timeout_seconds, cancelled=cancelled)
+
+    def _confirm_batch(self, public_summary, *, timeout_seconds, cancelled):
         if type(public_summary) is not str or not 1 <= len(public_summary) <= 12000:
             raise ConsoleCaptureError("BATCH_CONFIRMATION_INVALID")
+        if timeout_seconds is not None and (type(timeout_seconds) not in (int, float)
+                or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60):
+            raise ConsoleCaptureError("BATCH_CONFIRMATION_INVALID")
+        if cancelled is not None and (timeout_seconds is None or cancelled.is_set()):
+            raise ConsoleCaptureError("BATCH_CONFIRMATION_CANCELLED")
         before = self._snapshot()
-        # YES/NO, default NO. Only the human in the exclusive native Console
-        # can confirm; stdin, a JSON file, and a process id are not consent.
-        answer = self._api.user32.MessageBoxW(
-            before[2], public_summary,
-            "AniMemo: confirm this isolated batch (no password here)", 0x00000124,
-        )
-        if self._snapshot() != before or answer != 6:
+        # A bounded native dialog keeps the entire public scope readable and
+        # defaults to Cancel. The exclusive Console identity still owns consent.
+        answer = self._api.confirm_public(before[2], public_summary,
+            timeout_seconds=timeout_seconds, cancelled=cancelled)
+        if (self._snapshot() != before or answer != 6
+                or cancelled is not None and cancelled.is_set()):
             raise ConsoleCaptureError("BATCH_CONFIRMATION_CANCELLED")
 
     def _write_public(self, stdout, text: str) -> None:

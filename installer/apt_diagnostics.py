@@ -139,9 +139,17 @@ def capture_process(argv, *, timeout, environment):
             capture.finish()
 
     try:
+        launch = {}
+        # A verified private kit can have a path longer than MAX_PATH. With
+        # lpApplicationName=NULL, Windows limits the first command-line token
+        # even when argv already has an extended path prefix. Bind the same
+        # local executable explicitly; do not introduce a second selection.
+        if (os.name == 'nt' and argv and isinstance(argv[0], str) and len(argv[0]) >= 260
+                and re.match(r'^[A-Za-z]:[\\/]', argv[0])):
+            launch['executable'] = '\\\\?\\' + os.path.normpath(argv[0])
         process = subprocess.Popen(list(argv), cwd='/', env=dict(environment),
             shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, start_new_session=os.name == 'posix')
+            stderr=subprocess.PIPE, start_new_session=os.name == 'posix', **launch)
         for stream, capture in zip((process.stdout, process.stderr), captures):
             worker = threading.Thread(target=drain, args=(stream, capture), daemon=True)
             worker.start()

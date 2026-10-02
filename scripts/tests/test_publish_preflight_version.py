@@ -22,6 +22,10 @@ class PublishPreflightVersionTests(unittest.TestCase):
     def test_actual_qualify_shell_branch_writes_major_rc_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "outputs.txt"
+            reservations = Path(temporary) / "publication-reservations.json"
+            fixture = json.loads((ROOT / "release/publication-reservations.json").read_bytes())
+            fixture["reservations"] = [record for record in fixture["reservations"] if "kind" not in record]
+            reservations.write_text(json.dumps(fixture), encoding="utf-8")
             env = {
                 **os.environ,
                 "OPERATION": "qualify",
@@ -30,12 +34,24 @@ class PublishPreflightVersionTests(unittest.TestCase):
                 "RUNNER_TEMP": Path(temporary).as_posix(),
                 "GITHUB_OUTPUT": output.as_posix(),
                 "PYTHONUTF8": "1",
+                "ANIMEMO_TEST_RESERVATIONS": reservations.as_posix(),
             }
             env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env["PATH"]
-            # Only the read-only tag inventory is a fixture; execute the entire
-            # actual YAML branch, canonical CLI, reservation ledger and outputs.
+            # Keep the actual YAML branch and CLI. Only tag and reservation
+            # inputs are local fixtures; production journal verification stays
+            # unchanged and must never be contacted by this unit test.
             script = (
                 'git() { [[ "$1" == tag && "$2" == --list ]] || return 97; printf "%s\\n" v1.0.0; }\n'
+                + 'python() {\n'
+                + '  local args=("$@"); local count=0; local i\n'
+                + '  for ((i=0; i<${#args[@]}; i++)); do\n'
+                + '    if [[ "${args[i]}" == --publication-reservations-file ]]; then\n'
+                + '      args[i+1]="$ANIMEMO_TEST_RESERVATIONS"; count=$((count+1))\n'
+                + '    fi\n'
+                + '  done\n'
+                + '  [[ "$count" == 1 ]] || return 98\n'
+                + '  command python "${args[@]}"\n'
+                + '}\n'
                 + self.step
             )
             result = subprocess.run(

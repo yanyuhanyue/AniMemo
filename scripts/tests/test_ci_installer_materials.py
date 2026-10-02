@@ -44,7 +44,7 @@ class LinuxInstallerSmokeTests(unittest.TestCase):
             root = Path(temporary) / "checkout"
             root.mkdir()
             subprocess.run(["git", "init", "-q", str(root)], check=True)
-            names = (*smoke._FIXED_DEPLOYMENT_FILES, *(name + "/__init__.py" for name in ("durability", "release", "updater", "installer")), smoke.PLATFORM_FIXTURE)
+            names = (*smoke._FIXED_DEPLOYMENT_FILES, *(name + "/__init__.py" for name in ("durability", "release", "updater", "installer", "bootstrap_kit")), smoke.PLATFORM_FIXTURE)
             for relative in names:
                 target = root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)

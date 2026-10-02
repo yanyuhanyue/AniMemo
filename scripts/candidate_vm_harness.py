@@ -185,15 +185,15 @@ EXPECTED_CANDIDATE_EXTERNAL_STATE = {
 }
 # Compatibility name retained for archived RC14 evidence readers and tests.
 EXPECTED_RC14_EXTERNAL_STATE = EXPECTED_CANDIDATE_EXTERNAL_STATE
-# Microsoft-signed Windows OpenSSH 9.5.6.2, admitted as exact bytes on 2026-09-12.
+# Microsoft catalog-signed Windows OpenSSH 9.5.6.3, verified offline on 2026-09-29.
 EXPECTED_SSH_SHA256 = (
-    "sha256:786ff14be7cd652b2b9770a57e9b1aa5e03a052ce3a3d641fb4760c0ff3fde05"
+    "sha256:0b8b5653141c6e02e8afc043d1703dcd6410f1606422ff3ba5eb52dc56a5cce9"
 )
 EXPECTED_SCP_SHA256 = (
-    "sha256:64e91e51b1e4b8143578da86512d6e33b6f90aef247a95f2587951c4ace0c466"
+    "sha256:76e0ad749b0d23cf4ed4c4ee7b220abbe66cf7e60f63a0cbab6d9e66100a585b"
 )
 EXPECTED_SSH_KEYGEN_SHA256 = (
-    "sha256:47f009c35523b6997aff0f0528dae84f1545465479d722292499941cd5cb83b5"
+    "sha256:4ff67d0fdb1eafc6e6e8d0d35ac9d8159a7a29878994db17734414f076d8406b"
 )
 EXPECTED_OPENSSH_LIBCRYPTO_SHA256 = (
     "sha256:7cea4ac14491dac72a0de0692276ec400da8c1952271a16935282dca31d88d99"
@@ -201,8 +201,9 @@ EXPECTED_OPENSSH_LIBCRYPTO_SHA256 = (
 EXPECTED_VMRUN_SHA256 = (
     "sha256:143caebfd00f46430c12bffb743dda1ef60a44082f6861cc89438b89bb1613c9"
 )
+# Microsoft catalog-signed robocopy 10.0.26100.8875, verified offline on 2026-09-29.
 EXPECTED_ROBOCOPY_SHA256 = (
-    "sha256:805d720d24ac5897955b63d3d9db903453c10bd59e7c12a833e42e4ea8d47240"
+    "sha256:84abbd32d074881164b8cf6b30593828e53f368c3854854aefe5b3cf06d3e356"
 )
 EXPECTED_OPENSSH_PE_MACHINE = 0x8664
 EXPECTED_VMRUN_PE_MACHINE = 0x014C
@@ -2801,6 +2802,13 @@ class ClosedVmwareProvider:
         guest_exchange: Any | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         self._require_active_execution_authority()
+        lifetime = getattr(self, '_runtime_lifetime', None)
+        if lifetime is not None:
+            operation = None if self._candidate_batch is None else self._candidate_batch._operation
+            if guest_exchange is not None and operation is not None and operation[0] == 'WORKLOAD':
+                timeout = lifetime.workload_timeout(timeout)
+            else:
+                timeout = lifetime.clip_timeout(timeout, cleanup=(operation is not None and operation[0] == 'CLEANUP'))
         if not argv:
             raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
         requested_path = Path(argv[0])
@@ -5096,6 +5104,9 @@ class ClosedVmwareProvider:
         self._inject_guestinfo_challenge(authority, plan)
         running_after_write = checked_running_vmx_paths()
         reject_running_clone(running_after_write, clone_identity)
+        if getattr(harness_plan, 'runtime_offline_only', False):
+            from scripts.runtime_development_boundary import start_runtime_lifetime
+            start_runtime_lifetime(self, harness_plan, plan)
         self._start_clone(clone_vmx)
         return preboot_disk_graph_digest, preboot_snapshot_identity
 
@@ -5303,7 +5314,11 @@ class ClosedVmwareProvider:
             clear_keys()
             if operation["cleanup_errors"]:
                 raise CandidateHarnessError("CANDIDATE_PROFILE_CLEANUP_FAILED")
-            if receipt.get("result") == "PASS":
+            if getattr(harness_plan, 'runtime_offline_only', False):
+                from scripts.runtime_development_retention import retain_stopped_clone
+                operation.update(retain_stopped_clone(self, harness_plan, plan,
+                    verified_connection, receipt))
+            elif receipt.get("result") == "PASS":
                 self._remove_clone(verified_connection)
                 operation["clone_disposition"] = "REMOVED"
             else:
@@ -5370,6 +5385,10 @@ class ClosedVmwareProvider:
                 self._candidate_batch.cleanup_finished()
                 if operation['cleanup_errors']:
                     self._candidate_batch.revoke('CANDIDATE_PROFILE_CLEANUP_FAILED')
+            lifetime = getattr(self, '_runtime_lifetime', None)
+            if lifetime is not None:
+                lifetime.close('PROFILE_CLOSED')
+                operation['runtime_lifetime'] = lifetime.record
             if operation["cleanup_errors"]:
                 operation["result"] = "ERROR"
                 # A lease-release failure happens after the continuation

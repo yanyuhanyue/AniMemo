@@ -151,7 +151,7 @@ class InitialTrustBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["contract"]["freezeStatus"],
-            "FROZEN_FOR_V1_1_P1_SECURITY_REPAIR",
+            "TOKENLESS_LOCAL_SUCCESSOR_PENDING_INDEPENDENT_TRUST",
         )
         self.assertEqual(contract["bootstrap"]["bundleSelfAuthorization"], "FORBIDDEN")
         self.assertEqual(len(contract["generationFiles"]), 6)
@@ -166,7 +166,7 @@ class InitialTrustBootstrapTests(unittest.TestCase):
         self.assertFalse(contract["trustUpdate"]["supersessionIsRevocation"])
         successor = Path(__file__).resolve().parents[2] / "docs" / "installer-contract-v2.md"
         successor_text = successor.read_text(encoding="utf-8")
-        self.assertIn("FROZEN FOR v1.1 P1 SECURITY REPAIR", successor_text)
+        self.assertIn("LOCAL TOKENLESS STAGE-0 SUCCESSOR / DEVELOPMENT_ONLY", successor_text)
         self.assertIn("PYTHONSAFEPATH=1", successor_text)
         self.assertIn("SUPERSEDED`, not automatically", successor_text)
 

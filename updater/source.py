@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -41,7 +44,9 @@ from .errors import CommandFailed, RequestRejected, StateError
 from .protocol import CHANNELS, RELEASE_VERSION
 from .state import _absolute, _ensure_private_directory
 from .transport import (
+    AnonymousGitHubTransportSource,
     ExplicitTransportPolicy,
+    GitHubAssetPlan,
     GitHubTransportSource,
     OfficialMirrorTransportSource,
     TransportObjectPlan,
@@ -75,6 +80,8 @@ class ReleaseAssetInventoryEntry:
     name: str
     state: str
     size: int
+    asset_id: int | None = None
+    digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,13 @@ class ReleaseAssetInventory:
     version: str
     prerelease: bool
     assets: tuple[ReleaseAssetInventoryEntry, ...]
+    release_id: int | None = None
+
+    @property
+    def github_asset_plans(self):
+        by_name = {item.name: item for item in self.assets}
+        return tuple(GitHubAssetPlan(name, by_name[name].asset_id, by_name[name].digest)
+                     for name in sorted(EXPECTED_RELEASE_ASSETS))
 
     @property
     def transport_object_plans(self) -> tuple[TransportObjectPlan, ...]:
@@ -103,6 +117,7 @@ def _validate_release_asset_inventory(
     *,
     max_object_bytes: int = MAX_RELEASE_ASSET_BYTES,
     max_total_bytes: int = MAX_RELEASE_TRANSPORT_BYTES,
+    require_identity: bool = False,
 ) -> ReleaseAssetInventory:
     if (
         type(metadata) is not dict
@@ -111,6 +126,9 @@ def _validate_release_asset_inventory(
         or type(metadata.get("prerelease")) is not bool
     ):
         raise RequestRejected("Exact GitHub release metadata is invalid")
+    if require_identity and (type(metadata.get("id")) is not int or metadata["id"] <= 0
+                             or metadata.get("immutable") is not True):
+        raise RequestRejected("Exact immutable public Release ID is required")
     parsed_version = Version(version.removeprefix("v"))
     if metadata["prerelease"] is not parsed_version.is_prerelease:
         raise RequestRejected("Exact GitHub release metadata channel is invalid")
@@ -128,11 +146,17 @@ def _validate_release_asset_inventory(
             or item["size"] > max_object_bytes
         ):
             raise RequestRejected("GitHub release assets differ from the release contract")
+        if require_identity and (type(item.get("id")) is not int or item["id"] <= 0
+                or type(item.get("digest")) is not str
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", item["digest"]) is None):
+            raise RequestRejected("Exact public asset ID and digest are required")
         entries.append(
             ReleaseAssetInventoryEntry(
                 name=item["name"],
                 state=item["state"],
                 size=item["size"],
+                asset_id=item.get("id"),
+                digest=item.get("digest"),
             )
         )
     names = [item.name for item in entries]
@@ -151,6 +175,7 @@ def _validate_release_asset_inventory(
         version=version,
         prerelease=metadata["prerelease"],
         assets=tuple(sorted(entries, key=lambda item: item.name)),
+        release_id=metadata.get("id"),
     )
 
 
@@ -320,6 +345,71 @@ class GitHubPublicRest:
                 ) from authenticated_error
 
 
+class AnonymousGitHubRest(GitHubPublicRest):
+    """Installer reads use the same credential-free, process-supervised transport."""
+    configured_token = None
+    acquisition_mode = 'ANONYMOUS_INSTALLER'
+
+    def __init__(self, *, http_client=None, private_root=None):
+        self._client = http_client
+        self._private_root = Path(private_root or tempfile.gettempdir())
+
+    def _supervised_read(self, selection):
+        from bootstrap_kit.http_protocol import HttpFailure
+        from bootstrap_kit.http_supervisor import SupervisedAnonymousHttp
+        client = self._client or SupervisedAnonymousHttp(private_root=self._private_root)
+        try:
+            with client.fetch(selection, deadline=time.monotonic() + 30) as result:
+                return result.read_bytes(maximum=MAX_GITHUB_JSON_BYTES), result.headers.get('content-type', '').partition(';')[0].strip().lower()
+        except HttpFailure as error:
+            failure = RequestRejected(error.code)
+            failure.code, failure.http_status = error.code, error.http_status
+            failure.secondary_errors = error.secondary_errors
+            raise failure from error
+
+    def get_json(self, path: str, *, label: str):
+        from bootstrap_kit.http_protocol import HttpSelection
+        raw, content_type = self._supervised_read(HttpSelection.github_json(path))
+        if content_type not in {'application/json', 'application/vnd.github+json'}:
+            raise RequestRejected('BOOTSTRAP_ANONYMOUS_CONTENT_TYPE_INVALID')
+        value = self._decode_json(raw, label=label)
+        if path.startswith(f'/repos/{REPOSITORY}/releases/tags/'):
+            from installer.anonymous_release_transport import _metadata
+
+            from .archive_handoff import ArchiveHandoffError
+            version = path.rsplit('/', 1)[-1]
+            metadata = _metadata(value, version)
+            # Repository identity comes from the actual response URL, not a run ledger.
+            expected_url = f'{GITHUB_API_ROOT}/repos/{REPOSITORY}/releases/{metadata["id"]}'
+            if value.get('url') != expected_url:
+                raise ArchiveHandoffError('SOURCE_MISMATCH')
+            self.release_observation = {'repository': value['url'].split('/repos/', 1)[1].rsplit('/releases/', 1)[0],
+                'owner': value['url'].split('/repos/', 1)[1].split('/', 1)[0],
+                'request_path': path, 'response_sha256': 'sha256:' + hashlib.sha256(raw).hexdigest(),
+                'response_size': len(raw), 'observed_at': datetime.now(timezone.utc).isoformat(),
+                'release': metadata}
+        return value
+
+    @staticmethod
+    def _decode_json(encoded: bytes, *, label: str):
+        try:
+            return json.loads(encoded, object_pairs_hook=reject_duplicate_json_keys,
+                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        except (UnicodeError, ValueError, RecursionError):
+            raise RequestRejected('BOOTSTRAP_ANONYMOUS_JSON_INVALID') from None
+
+    def _open_bytes(self, request: Request, *, label: str):
+        # Used only by the inherited, strictly closed Actions blob parser.
+        from bootstrap_kit.http_protocol import HttpSelection
+        parsed = urlsplit(request.full_url)
+        if (parsed.scheme != 'https' or parsed.netloc != ATTESTATION_BUNDLE_HOST or parsed.fragment
+            or request.get_method() != 'GET' or request.data is not None
+            or any(key.lower() in {'authorization', 'cookie', 'proxy-authorization'}
+                   for key, _ in request.header_items())):
+            raise RequestRejected('BOOTSTRAP_ANONYMOUS_BUNDLE_URL_INVALID')
+        return self._supervised_read(HttpSelection.actions_bundle(parsed.path, parsed.query))
+
+
 class GitHubReleaseSource:
     def __init__(
         self,
@@ -330,6 +420,7 @@ class GitHubReleaseSource:
         cache_seconds: int = 300,
         policy: ExplicitTransportPolicy | None = None,
         transports: dict[TransportSourceId, object] | None = None,
+        actions_verifier=None,
     ):
         self.cache_root = _absolute(cache_root)
         self.runner = runner or CommandRunner()
@@ -337,11 +428,13 @@ class GitHubReleaseSource:
         self.transport_policy = policy or ExplicitTransportPolicy.github()
         if type(self.transport_policy) is not ExplicitTransportPolicy:
             raise RequestRejected("Release transport policy is invalid")
+        self.anonymous_installation = getattr(self.rest, 'acquisition_mode', None) == 'ANONYMOUS_INSTALLER'
+        self._actions_verifier = actions_verifier
         available = transports or {
-            TransportSourceId.GITHUB: GitHubTransportSource(
-                runner=self.runner,
-                credential_provider=getattr(self.rest, "configured_token", None),
-            ),
+            TransportSourceId.GITHUB: (AnonymousGitHubTransportSource(
+                http_client=getattr(self.rest, '_client', None),
+                private_root=getattr(self.rest, '_private_root', None)) if self.anonymous_installation else GitHubTransportSource(
+                runner=self.runner, credential_provider=getattr(self.rest, "configured_token", None))),
             TransportSourceId.OFFICIAL_MIRROR: OfficialMirrorTransportSource(),
         }
         selected = available.get(self.transport_policy.source)
@@ -550,6 +643,30 @@ class GitHubReleaseSource:
             bundles.append(bundle)
         if not bundles:
             raise RequestRejected("Required artifact attestation is unavailable")
+        if self.anonymous_installation:
+            # This unsigned routing hint selects a proof domain only. The
+            # selected envelope still requires the fixed Actions verifier;
+            # platform Release evidence is verified separately.
+            candidates = []
+            for bundle in bundles:
+                try:
+                    encoded = bundle['dsseEnvelope']['payload']
+                    if type(encoded) is not str or len(encoded) > MAX_GITHUB_JSON_BYTES:
+                        raise ValueError('invalid bounded payload')
+                    statement = json.loads(base64.b64decode(encoded, validate=True),
+                        object_pairs_hook=reject_duplicate_json_keys)
+                    if type(statement) is not dict:
+                        raise ValueError('invalid statement')
+                    predicate = statement.get('predicateType')
+                    if predicate == 'https://slsa.dev/provenance/v1':
+                        candidates.append(bundle)
+                    elif predicate != 'https://in-toto.io/attestation/release/v0.2':
+                        raise ValueError('unsupported proof domain')
+                except (KeyError, TypeError, ValueError, RecursionError):
+                    raise RequestRejected('BOOTSTRAP_ANONYMOUS_ACTIONS_BUNDLE_INVALID') from None
+            if len(candidates) != 1:
+                raise RequestRejected('BOOTSTRAP_ANONYMOUS_ACTIONS_BUNDLE_AMBIGUOUS')
+            bundles = candidates
         try:
             path.write_text(
                 "".join(
@@ -563,6 +680,40 @@ class GitHubReleaseSource:
             raise RequestRejected(
                 "Artifact attestation bundle cannot be staged"
             ) from error
+
+    def _verify_anonymous_actions(self, bundle, *, evidence_name, expected_name,
+                                  digest, workflow, source_commit):
+        from installer.tokenless_stage0 import (
+            OPERATOR_TRUST_ROOT,
+            TokenlessActionsVerifier,
+            TokenlessStage0Error,
+            _production_host_allowed,
+            _safe_chain,
+        )
+        from updater.offline import PretrustedTrustMaterial
+        try:
+            verifier = self._actions_verifier
+            if verifier is None:
+                if not _production_host_allowed():
+                    raise TokenlessStage0Error('BOOTSTRAP_TOKENLESS_INDEPENDENT_TRUST_REQUIRED')
+                _safe_chain(OPERATOR_TRUST_ROOT, production=True)
+                verifier = TokenlessActionsVerifier(PretrustedTrustMaterial.load(OPERATOR_TRUST_ROOT))
+            if type(verifier) is not TokenlessActionsVerifier:
+                raise TokenlessStage0Error('BOOTSTRAP_TOKENLESS_TRUST_REQUIRED')
+            with bundle.open('rb') as stream:
+                raw = stream.read(MAX_GITHUB_JSON_BYTES + 1)
+            if len(raw) > MAX_GITHUB_JSON_BYTES:
+                raise TokenlessStage0Error('BOOTSTRAP_TOKENLESS_INPUT_INVALID')
+            claim = verifier.verify(bundle=raw, evidence_name=evidence_name, subject_name=expected_name,
+                subject_sha256=digest, workflow=workflow, source_commit=source_commit)
+            return claim.source_commit, claim.signer_digest
+        except TokenlessStage0Error as error:
+            failure = RequestRejected(error.code)
+            failure.code, failure.secondary_errors = error.code, error.secondary_errors
+            for name in ('cleanup_failed', 'cleanup_uncertain', '_owned_process'):
+                if hasattr(error, name):
+                    setattr(failure, name, getattr(error, name))
+            raise failure from None
 
     @staticmethod
     def _verify_attestation_result(
@@ -676,6 +827,29 @@ class GitHubReleaseSource:
             for identity in cached[1].verified.files:
                 cached[1].material(identity.path)
             return cached[1]
+        with self._verified_release_transaction(version, updater_version=updater_version) as verified:
+            pass
+        self._verified_cache[version] = (time.monotonic(), verified)
+        return verified
+
+    @contextmanager
+    def open_verified_release(self, version, *, updater_version=__version__, evidence_parent=None):
+        """Fresh anonymous acquisition with an original-archive lifetime owner.
+
+        The legacy cache contains extracted members only and is never used here.
+        """
+        if not self.anonymous_installation:
+            raise RequestRejected('BOOTSTRAP_ARCHIVE_ANONYMOUS_SOURCE_REQUIRED')
+        with self._verified_release_transaction(version, updater_version=updater_version,
+                raw_archive=True, evidence_parent=evidence_parent) as transaction:
+            yield transaction
+
+    @contextmanager
+    def _verified_release_transaction(self, version, *, updater_version,
+                                      raw_archive=False, evidence_parent=None):
+        from .archive_handoff import release_workspace
+        if not isinstance(version, str) or not RELEASE_VERSION.fullmatch(version):
+            raise RequestRejected('Invalid immutable release version')
         try:
             _ensure_private_directory(self.cache_root, self.cache_root)
         except StateError as error:
@@ -684,14 +858,14 @@ class GitHubReleaseSource:
             f"/repos/{REPOSITORY}/releases/tags/{version}",
             label="Exact GitHub release metadata",
         )
-        inventory = _validate_release_asset_inventory(metadata, version)
-        with tempfile.TemporaryDirectory(
-            prefix=f".{version}.", dir=self.cache_root
-        ) as temporary:
-            staging = Path(temporary)
+        inventory = _validate_release_asset_inventory(metadata, version, require_identity=self.anonymous_installation)
+        with release_workspace(self, self.cache_root) as transaction:
+            staging = transaction.root
             transport_request = TransportRequest.release_bundle(
                 version.removeprefix("v"),
                 object_plans=inventory.transport_object_plans,
+                github_release_id=inventory.release_id if self.anonymous_installation else None,
+                github_assets=inventory.github_asset_plans if self.anonymous_installation else (),
             )
             acquired = self.transport_source.acquire(transport_request, staging)
             if (
@@ -706,10 +880,16 @@ class GitHubReleaseSource:
                 )
             ):
                 raise RequestRejected("Release transport receipt and policy differ")
+            if raw_archive:
+                transaction._hold(acquired, transport_request, inventory,
+                    getattr(self.rest, 'release_observation', None))
+                if evidence_parent is not None:
+                    transaction.preserve(evidence_parent)
             destination = acquired.root
             for name in EXPECTED_RELEASE_ASSETS:
                 acquired.material(name)
-            environment = self._anonymous_gh_environment(staging / ".authority-runtime")
+            environment = (None if self.anonymous_installation else
+                self._anonymous_gh_environment(staging / ".authority-runtime"))
             self._verify_checksum(destination)
             assets = [
                 destination / name
@@ -832,48 +1012,58 @@ class GitHubReleaseSource:
             ) in enumerate(subjects):
                 bundle = destination / f"attestation-{index}.jsonl"
                 self._write_attestation_bundle(digest, bundle)
-                verification_command = [
-                        "/usr/bin/gh",
-                        "attestation",
-                        "verify",
-                        subject,
-                        "--bundle",
-                        str(bundle),
-                        "--repo",
-                        REPOSITORY,
-                        "--cert-identity",
-                        f"https://github.com/{REPOSITORY}/{workflow}@refs/heads/main",
-                        "--cert-oidc-issuer",
-                        "https://token.actions.githubusercontent.com",
-                        "--source-ref",
-                        "refs/heads/main",
-                        "--predicate-type",
-                        "https://slsa.dev/provenance/v1",
-                        "--format",
-                        "json",
-                    ]
-                if source_commit is not None:
-                    predicate_index = verification_command.index("--predicate-type")
-                    verification_command[predicate_index:predicate_index] = [
-                        "--source-digest",
-                        source_commit,
-                        "--signer-digest",
-                        source_commit,
-                    ]
-                result = self.runner.run(
-                    verification_command,
-                    env=environment,
-                    timeout=60,
-                )
-                observed_source_commit, observed_signer_digest = (
-                    self._verify_attestation_result(
-                        result.stdout,
-                        expected_name,
-                        digest,
-                        expected_workflow=workflow,
-                        expected_source_commit=source_commit,
+                if raw_archive and evidence_parent is not None:
+                    from bootstrap_kit.safe_files import exclusive_file, read_bounded
+                    with exclusive_file(transaction._evidence_root / f'actions-{index}.jsonl') as output:
+                        output.write(read_bounded(bundle, MAX_GITHUB_JSON_BYTES))
+                if self.anonymous_installation:
+                    observed_source_commit, observed_signer_digest = self._verify_anonymous_actions(
+                        bundle, evidence_name=('api-image', 'web-image', 'release-manifest',
+                            'deployment-contract', 'installer-materials')[index], expected_name=expected_name,
+                        digest=digest, workflow=workflow, source_commit=source_commit)
+                else:
+                    verification_command = [
+                            "/usr/bin/gh",
+                            "attestation",
+                            "verify",
+                            subject,
+                            "--bundle",
+                            str(bundle),
+                            "--repo",
+                            REPOSITORY,
+                            "--cert-identity",
+                            f"https://github.com/{REPOSITORY}/{workflow}@refs/heads/main",
+                            "--cert-oidc-issuer",
+                            "https://token.actions.githubusercontent.com",
+                            "--source-ref",
+                            "refs/heads/main",
+                            "--predicate-type",
+                            "https://slsa.dev/provenance/v1",
+                            "--format",
+                            "json",
+                        ]
+                    if source_commit is not None:
+                        predicate_index = verification_command.index("--predicate-type")
+                        verification_command[predicate_index:predicate_index] = [
+                            "--source-digest",
+                            source_commit,
+                            "--signer-digest",
+                            source_commit,
+                        ]
+                    result = self.runner.run(
+                        verification_command,
+                        env=environment,
+                        timeout=60,
                     )
-                )
+                    observed_source_commit, observed_signer_digest = (
+                        self._verify_attestation_result(
+                            result.stdout,
+                            expected_name,
+                            digest,
+                            expected_workflow=workflow,
+                            expected_source_commit=source_commit,
+                        )
+                    )
                 if (
                     source_commit is not None
                     and (
@@ -984,8 +1174,11 @@ class GitHubReleaseSource:
                 raise RequestRejected(
                     "Verified installer materials cannot be published"
                 ) from error
-        self._verified_cache[version] = (time.monotonic(), verified)
-        return verified
+            if raw_archive:
+                transaction._bind(verified)
+                yield transaction
+            else:
+                yield verified
 
     def fetch_verified(
         self,

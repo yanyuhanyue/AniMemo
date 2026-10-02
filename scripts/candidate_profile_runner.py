@@ -270,12 +270,17 @@ def _closed_mapping(
 
 def _production_execution_observation(
     *,
-    loaded,
+    expected_material_identity: str,
+    expected_images: Mapping[str, str],
     parsed_plan,
     installer_result: Mapping[str, Any],
     value: object,
 ) -> dict[str, Any]:
     code = "CANDIDATE_PROFILE_EXECUTION_OBSERVATION_INVALID"
+    if (type(expected_material_identity) is not str or not _DIGEST.fullmatch(expected_material_identity)
+            or set(expected_images) != {'api', 'web', 'postgres', 'redis'}
+            or any(type(item) is not str or not _DIGEST.fullmatch(item) for item in expected_images.values())):
+        raise ProfileRunnerError(code)
     observation = _closed_mapping(
         value,
         {
@@ -663,13 +668,12 @@ def _production_execution_observation(
         or type(image_receipt["transportPolicyIdentity"]) is not str
         or not _HEX_IDENTITY.fullmatch(image_receipt["transportPolicyIdentity"])
         or image_receipt["verifiedReleaseIdentity"]
-        != loaded.materials.identity_digest
+        != expected_material_identity
         or observation["imageAcquisitionReceiptDigest"]
         != sha256_bytes(canonical_identity_bytes(image_receipt))
     ):
         raise ProfileRunnerError("CANDIDATE_PROFILE_IMAGE_OBSERVATION_MISMATCH")
     observed_images = image_receipt["images"]
-    expected_images = {item.role: item.digest for item in loaded.images.images}
     if type(observed_images) is not list or len(observed_images) != len(expected_images):
         raise ProfileRunnerError("CANDIDATE_PROFILE_IMAGE_OBSERVATION_MISMATCH")
     observed_roles: set[str] = set()
@@ -760,15 +764,15 @@ def _production_execution_observation(
     }
 
 
-def build_profile_receipt(
+def validate_profile_execution(
     *,
-    loaded,
     profile: str,
     context: Mapping[str, Any],
     installer_output: Mapping[str, Any],
-    started_at: str,
-    completed_at: str,
-) -> dict[str, Any]:
+    expected_material_identity: str,
+    expected_images: Mapping[str, str],
+):
+    """Strict read-only checks shared by distinct receipt authorities."""
     platform_plan_value = installer_output.get("platformPlan")
     platform = installer_output.get("platformBootstrapReceipt")
     result = installer_output.get("installerResult")
@@ -799,8 +803,6 @@ def build_profile_receipt(
         or parsed_receipt.plan_digest != platform_plan
     ):
         raise ProfileRunnerError("CANDIDATE_INSTALLER_RESULT_INVALID")
-    succeeded = result.get("outcome") == "SUCCEEDED"
-    images = {item.role: item.digest for item in loaded.images.images}
     facts = parsed_plan.initial_capabilities
     expected_initial_state = {
         "docker_present": facts.docker_cli_present
@@ -813,11 +815,27 @@ def build_profile_receipt(
     if dict(context["initial_platform_state"]) != expected_initial_state:
         raise ProfileRunnerError("CANDIDATE_PROFILE_PLATFORM_STATE_MISMATCH")
     execution = _production_execution_observation(
-        loaded=loaded,
+        expected_material_identity=expected_material_identity,
+        expected_images=expected_images,
         parsed_plan=parsed_plan,
         installer_result=result,
         value=installer_output.get("productionExecutionObservation"),
     )
+    return parsed_plan, parsed_receipt, result, execution
+
+
+def build_profile_receipt(
+    *, loaded, profile: str, context: Mapping[str, Any],
+    installer_output: Mapping[str, Any], started_at: str, completed_at: str,
+) -> dict[str, Any]:
+    images = {item.role: item.digest for item in loaded.images.images}
+    parsed_plan, _parsed_receipt, result, execution = validate_profile_execution(
+        profile=profile, context=context, installer_output=installer_output,
+        expected_material_identity=loaded.materials.identity_digest, expected_images=images)
+    platform = installer_output['platformBootstrapReceipt']
+    platform_plan = parsed_plan.plan_digest
+    plan_digest = installer_output['installerPlanDigest']
+    succeeded = result.get('outcome') == 'SUCCEEDED'
     draft = {
         "schema": "animemo.prepublication-candidate-profile-receipt-draft/v1",
         "version": 1,

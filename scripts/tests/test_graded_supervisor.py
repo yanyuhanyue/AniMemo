@@ -126,7 +126,7 @@ class DiagnosticOwnerClosureTests(unittest.TestCase):
             item.update(delivery_attempts=1, delivery_completed=1, operation_result='PASS',
                 target_verified=True, lease_verified=True)
         batch.close()
-        report = dict(failure_policy=FAILURE_POLICY, credential_session=batch.record,
+        report = dict(plan=batch.plan.as_dict(), failure_policy=FAILURE_POLICY, credential_session=batch.record,
             source_preserved=True, cleanup_errors=[], private_material_root_released=True,
             private_execution_source_root_released=True,
             private_material_root=str(setup.root/'absent-material'),

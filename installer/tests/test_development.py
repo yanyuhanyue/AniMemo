@@ -59,6 +59,7 @@ class DevelopmentServiceTests(unittest.TestCase):
                 shutil.copytree(source_root / package, installed / package)
             with mock.patch.object(service, 'ASSETS', assets):
                 expected = service.expected_service_observation(source_root, 'sha256:' + '1' * 64)
+                self.assertIn('bootstrap_kit', expected['package_inventories'])
                 expected['installed_root'] = str(installed)
                 authority = object.__new__(service.DevelopmentServiceSource)
                 authority.inventory_digest = expected['execution_inventory_digest']
@@ -69,9 +70,13 @@ class DevelopmentServiceTests(unittest.TestCase):
                 with (mock.patch.object(service.DevelopmentServiceSource, 'verify_source'),
                       mock.patch.object(service, 'Path', side_effect=paths)):
                     self.assertEqual(authority.observe_installed(), expected)
-                    (installed / 'updater/__init__.py').write_bytes(b'old updater')
-                    with self.assertRaises(service.DevelopmentServiceError):
-                        authority.observe_installed()
+                    for package in ('updater', 'bootstrap_kit'):
+                        member = installed / package / '__init__.py'
+                        original = member.read_bytes()
+                        member.write_bytes(b'old installed package')
+                        with self.subTest(package=package), self.assertRaises(service.DevelopmentServiceError):
+                            authority.observe_installed()
+                        member.write_bytes(original)
 
 
 class DevelopmentInstallerEntryTests(unittest.TestCase):
@@ -88,7 +93,7 @@ class DevelopmentInstallerEntryTests(unittest.TestCase):
                 with (mock.patch.object(entry, 'inherited_writer', return_value=mock.Mock()),
                       mock.patch.object(entry, 'validate_binding', return_value={'verified_candidate_digest': fixtures.DIGEST}),
                       mock.patch.object(entry, 'acquire_development_service_source', return_value=source),
-                      mock.patch.object(entry, 'build_candidate_composition', return_value=composition) as build,
+                      mock.patch('installer.production.build_candidate_composition', return_value=composition) as build,
                       redirect_stdout(output)):
                     code = entry.main(['--binding', '{}', '--profile', 'ONLINE_FRESH',
                                        '--public-origin', 'https://candidate.invalid'])

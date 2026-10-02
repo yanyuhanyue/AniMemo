@@ -695,7 +695,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": receipt["result"]}, sort_keys=True))
         return 0
     except (FormalProfileRunnerError, FormalProducerError) as error:
-        print(json.dumps({"code": getattr(error, "code", str(error))}), file=sys.stderr)
+        from scripts.candidate_diagnostics import best_effort_fault
+        best_effort_fault(error)
+        print(json.dumps({"code": error.code}), file=sys.stderr)
         return 2
 
 

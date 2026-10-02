@@ -24,7 +24,8 @@ _STAGE0_MODEL = "GITHUB_IMMUTABLE_RELEASE_SIGSTORE_TUF_SINGLE_AUTHORITY"
 _ONLINE_CARRIER = "GH_2_97_0_EXACT_FROM_OFFICIAL_RELEASE_ASSETS_SHA256_BOUND"
 _LEGACY_ONLINE_CARRIER = "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
 _OFFLINE_CARRIER = "OPERATOR_PRETRUSTED_PINNED_LINUX_VERIFIER_AND_TWO_TUF_ROOTS"
-_WRITABLE_CARRIERS = frozenset({_ONLINE_CARRIER, _OFFLINE_CARRIER})
+_TOKENLESS_CARRIER = "INDEPENDENT_OPERATOR_PRETRUST_TOKENLESS_SIGSTORE_GO"
+_WRITABLE_CARRIERS = frozenset({_ONLINE_CARRIER, _OFFLINE_CARRIER, _TOKENLESS_CARRIER})
 _READABLE_CARRIERS = _WRITABLE_CARRIERS | {_LEGACY_ONLINE_CARRIER}
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -42,6 +43,13 @@ _PROTECTED_RUNTIME_DIRECTORY = "materials"
 _REQUIRED_RUNTIME_MODULES = frozenset(
     {
         "installer.bootstrap",
+        "installer.tokenless_stage0",
+        "installer.anonymous_release_transport",
+        "bootstrap_kit.http_protocol",
+        "bootstrap_kit.http_supervisor",
+        "bootstrap_kit.http_worker",
+        "bootstrap_kit.owned_process",
+        "bootstrap_kit.safe_files",
         "installer.cli",
         "installer.platform_bootstrap",
         "installer.apt_diagnostics",
@@ -54,10 +62,12 @@ _REQUIRED_RUNTIME_MODULES = frozenset(
 
 
 class BootstrapAuthorityError(RuntimeError):
-    def __init__(self, code: str, *, reason: str | None = None) -> None:
+    def __init__(self, code: str, *, reason: str | None = None,
+                 secondary_errors: tuple[str, ...] = ()) -> None:
         super().__init__(code)
         self.code = code
         self.reason = reason
+        self.secondary_errors = secondary_errors
 
 
 class GhVersionOutputError(ValueError):
@@ -279,6 +289,7 @@ def _archive_python_identities(archive_path: Path) -> dict[str, tuple[int, str]]
                     "installer",
                     "release",
                     "updater",
+                    "bootstrap_kit",
                 }:
                     continue
                 if (
@@ -801,17 +812,8 @@ def _run_stage0_gh(arguments: tuple[str, ...]) -> object:
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
     }
-    token = os.environ.get("GH_TOKEN")
-    if token is not None:
-        if (
-            not token
-            or len(token) > 4096
-            or any(
-                ord(character) < 0x21 or ord(character) > 0x7E for character in token
-            )
-        ):
-            _reject("BOOTSTRAP_STAGE0_GH_CREDENTIAL_INVALID")
-        environment["GH_TOKEN"] = token
+    if arguments != ("version",):
+        _reject("BOOTSTRAP_STAGE0_LEGACY_VERIFICATION_RETIRED")
     try:
         result = subprocess.run(
             [_GH_EXECUTABLE, *arguments],
@@ -840,15 +842,60 @@ def _run_stage0_gh(arguments: tuple[str, ...]) -> object:
         except GhVersionOutputError as error:
             _reject_gh_version(error.code)
         return {"version": parsed.semantic_version}
-    if result.returncode != 0 or len(result.stdout) > 1024 * 1024:
-        _reject("BOOTSTRAP_STAGE0_GH_VERIFICATION_FAILED")
-    try:
-        value = json.loads(result.stdout)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        _reject("BOOTSTRAP_STAGE0_GH_OUTPUT_INVALID")
-    if type(value) not in {dict, list} or not value:
-        _reject("BOOTSTRAP_STAGE0_GH_OUTPUT_INVALID")
-    return value
+
+
+def _consume_stage0_binding(*, before, after, verified, expected_type, tag, release_commit):
+    """Shared binding checks; callers select their exact, disjoint result class."""
+    if type(verified) is not expected_type:
+        _reject("BOOTSTRAP_TOKENLESS_CAPABILITY_REQUIRED")
+    if type(before) is not bytes or type(after) is not bytes or before != after:
+        verified.revoke()
+        _reject("BOOTSTRAP_PROTECTED_MATERIAL_RACE")
+    return verified.consume(version=tag, release_commit=release_commit,
+        archive_digest=_sha256_identity(after), archive_size=len(after))
+
+
+def authorize_online_stage0_test_only(*, tag, release_commit, verified_at,
+                                    archive, material, inputs, scratch_parent=None, on_phase=None):
+    """Real verification and shared consumption, with only an in-memory DEV commit.
+
+    This entry cannot write a bootstrap record, install trust, or execute any
+    product. It accepts local test paths explicitly; the production entry below
+    retains its fixed protected path, production verifier and commit function.
+    """
+    from installer.tokenless_stage0 import (
+        TestOnlyStage0Release,
+        _held_file,
+        verify_for_test_only,
+    )
+    if (type(tag) is not str or not _TAG.fullmatch(tag)
+            or type(release_commit) is not str or not _COMMIT.fullmatch(release_commit)
+            or type(verified_at) is not str or not _UTC.fullmatch(verified_at)):
+        _reject("BOOTSTRAP_RELEASE_BINDING_INVALID")
+    path = Path(archive).absolute()
+    if path.name != _MATERIALS_FILE:
+        _reject("BOOTSTRAP_PROTECTED_MATERIAL_PATH_INVALID")
+    def read_local():
+        with _held_file(path, 2 * 1024 * 1024 * 1024) as stream:
+            size = os.fstat(stream.fileno()).st_size
+            raw = stream.read(size + 1)
+            if len(raw) != size:
+                _reject("BOOTSTRAP_PROTECTED_MATERIAL_RACE")
+            return raw
+    before = read_local()
+    if on_phase is not None:
+        on_phase('PLATFORM_PROOF')
+    verified = verify_for_test_only(material=material, inputs=inputs, archive=path,
+        expected_commit=release_commit, scratch_parent=scratch_parent)
+    after = read_local()
+    if on_phase is not None:
+        on_phase('TEST_ONLY_CONSUMPTION')
+    proof = _consume_stage0_binding(before=before, after=after, verified=verified,
+        expected_type=TestOnlyStage0Release, tag=tag, release_commit=release_commit)
+    return {"schema": "animemo.test-only-bootstrap-commit/v1", "state": "TEST_ONLY",
+        "production_authority_granted": False, "tag": tag, "releaseCommit": release_commit,
+        "installerMaterials": {"sha256": _sha256_identity(after), "size": len(after)},
+        "verifiedAt": verified_at, "bootstrap_commit": "TEST_ONLY", "verification": proof}
 
 
 def authorize_online_stage0(
@@ -863,38 +910,26 @@ def authorize_online_stage0(
         _reject("BOOTSTRAP_VERIFICATION_TIME_INVALID")
     protected = _safe_root() / _MATERIALS_FILE
     before = _protected_material_bytes(protected)
-    _run_stage0_gh(("version",))
-    release_claim = _run_stage0_gh(
-        (
-            "release",
-            "verify",
-            tag,
-            "--repo",
-            _REPOSITORY,
-            "--format",
-            "json",
-        )
+    from installer.tokenless_stage0 import (
+        TokenlessStage0Error, VerifiedStage0Release, verify_for_production,
     )
-    asset_claim = _run_stage0_gh(
-        (
-            "release",
-            "verify-asset",
-            tag,
-            str(protected),
-            "--repo",
-            _REPOSITORY,
-            "--format",
-            "json",
-        )
-    )
-    after = _protected_material_bytes(protected)
-    if before != after:
-        _reject("BOOTSTRAP_PROTECTED_MATERIAL_RACE")
-    proof_identity = _sha256_identity(
-        _canonical_json_bytes(
-            {"assetVerification": asset_claim, "releaseVerification": release_claim}
-        )
-    )
+    from installer.anonymous_release_transport import AnonymousReleaseError
+    try:
+        verified = verify_for_production(version=tag, release_commit=release_commit,
+                                        archive=protected)
+        if type(verified) is not VerifiedStage0Release:
+            _reject("BOOTSTRAP_TOKENLESS_CAPABILITY_REQUIRED")
+        after = _protected_material_bytes(protected)
+        proof = _consume_stage0_binding(before=before, after=after, verified=verified,
+            expected_type=VerifiedStage0Release, tag=tag, release_commit=release_commit)
+    except (TokenlessStage0Error, AnonymousReleaseError) as error:
+        secondary = getattr(error, "secondary_errors", ())
+        if getattr(error, "cleanup_failed", False):
+            secondary = (*secondary, "BOOTSTRAP_TOKENLESS_TRANSPORT_CLEANUP_FAILED")
+        raise BootstrapAuthorityError(error.code, secondary_errors=tuple(secondary)[:4]) from error
+    except (OSError, ValueError, KeyError, TypeError):
+        _reject("BOOTSTRAP_TOKENLESS_INPUT_OR_IO_FAILURE")
+    proof_identity = proof["identity"]
     return commit_bootstrap_authorization(
         {
             "schemaVersion": 1,
@@ -910,8 +945,8 @@ def authorize_online_stage0(
             },
             "stage0": {
                 "model": _STAGE0_MODEL,
-                "carrier": _ONLINE_CARRIER,
-                "verifierIdentity": f"gh:{_GH_VERSION}",
+                "carrier": _TOKENLESS_CARRIER,
+                "verifierIdentity": proof["verifier_identity"],
             },
             "verifiedAt": verified_at,
         }

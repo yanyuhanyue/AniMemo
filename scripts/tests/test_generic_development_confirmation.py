@@ -130,9 +130,11 @@ class GenericDevelopmentConfirmationTests(TestCase):
         provider.bind_candidate_material_authority.return_value = nullcontext()
         material = SimpleNamespace(loaded=SimpleNamespace(root=self.root / 'material' / 'root'))
         source = SimpleNamespace(root=self.root / 'source' / 'root',
-            inventory_digest=self.plan.execution_inventory_digest)
+            inventory_digest=self.plan.execution_inventory_digest, published_subject_digest=None)
         base = self.plan.__dict__.copy()
-        for field in ('execution_source_sha', 'execution_source_tree', 'execution_inventory_digest', 'platform_diagnostic'):
+        for field in ('execution_source_sha', 'execution_source_tree', 'execution_inventory_digest',
+                      'platform_diagnostic', 'published_subject_digest', 'userspace_probe_digest', 'runtime_offline_only',
+                      'runtime_authorization_deadline', 'runtime_trust_selection_digest', 'runtime_retention_policy'):
             base.pop(field)
         base['candidate_version'] = 'v2.0.0-rc.2'
         base_plan = entry.h.CandidateHarnessPlan(**base)

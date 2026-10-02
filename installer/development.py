@@ -11,7 +11,7 @@ from pathlib import Path
 from scripts.closed_runtime_inventory import closed_runtime_inventory_digest
 
 SCHEMA = 'animemo.local-development-installed-service-source/v1'
-PACKAGES = ('durability', 'installer', 'release', 'updater')
+PACKAGES = ('durability', 'installer', 'release', 'updater', 'bootstrap_kit')
 ASSETS = {
     'deploy/updater/animemo-updater': '/opt/animemo-updater/launcher',
     'deploy/updater/animemo': '/opt/animemo-updater/animemo-launcher',
@@ -45,7 +45,7 @@ def expected_service_observation(root, inventory_digest):
 
 
 class DevelopmentServiceSource:
-    __slots__ = ('root', 'inventory_digest', 'verified_candidate_digest', '_expected')
+    __slots__ = ('root', 'inventory_digest', 'verified_candidate_digest', '_expected', 'runtime_offline_only')
 
     def __init__(self, *_args, **_kwargs):
         raise TypeError('Development service source must be acquired from a sealed execution tree')
@@ -94,6 +94,7 @@ def acquire_development_service_source(binding):
     value.root = Path('/var/lib/animemo/local-development') / digest.removeprefix('sha256:')
     value.inventory_digest = digest
     value.verified_candidate_digest = binding['verified_candidate_digest']
+    value.runtime_offline_only = binding.get('runtime_offline_only') is True
     if Path(__file__).resolve().parents[1] != value.root:
         raise DevelopmentServiceError()
     value.verify_source()

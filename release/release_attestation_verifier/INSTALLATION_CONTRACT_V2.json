@@ -2,7 +2,7 @@
   "authorityModel": "GITHUB_IMMUTABLE_RELEASE_SIGSTORE_TUF_SINGLE_AUTHORITY",
   "contract": {
     "document": "docs/installer-contract-v2.md",
-    "freezeStatus": "FROZEN_FOR_V1_1_P1_SECURITY_REPAIR",
+    "freezeStatus": "TOKENLESS_LOCAL_SUCCESSOR_PENDING_INDEPENDENT_TRUST",
     "predecessorBlob": "a6307b42928423cea3a2cf04db7836887fc818a0",
     "predecessorDocument": "docs/installer-contract-v1.md",
     "relationship": "INHERIT_FULL_V1_REPLACE_BOOTSTRAP_AND_TRUST_LIFECYCLE_ONLY"

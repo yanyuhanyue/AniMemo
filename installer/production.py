@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import platform as host_platform
+import re
 import secrets
 import shutil
 import socket
@@ -278,6 +279,16 @@ class CandidatePlatformCommandObserver:
         timeout: int,
         environment: Mapping[str, str],
     ):
+        gate = getattr(self, '_development_gate', None)
+        if gate is not None:
+            gate.check_live('PLATFORM_COMMAND')
+            if self._classification(argv) in {'APT_NETWORK', 'UNKNOWN_NETWORK_CAPABILITY'}:
+                raise ValueError('DEVELOPMENT_PLATFORM_COMMAND_OUT_OF_SCOPE')
+            if argv[:1] == ('/usr/bin/systemctl',) and argv[1:] not in {
+                    ('--version',), ('is-active', '--quiet', 'docker'),
+                    ('show', '--property=MainPID', '--property=ExecMainStartTimestampMonotonic', '--value', 'docker')}:
+                raise ValueError('DEVELOPMENT_PLATFORM_COMMAND_OUT_OF_SCOPE')
+            timeout = gate.lifetime.clip_timeout(timeout)
         result = self._delegate.run(
             argv, timeout=timeout, environment=environment
         )
@@ -313,8 +324,10 @@ class CandidatePlatformCommandObserver:
 class LocalDockerCommandRunner(CommandRunner):
     """Force every production Docker/Compose subprocess onto the local socket."""
 
-    def __init__(self, delegate: CommandRunner | None = None) -> None:
+    def __init__(self, delegate: CommandRunner | None = None, *, development_gate=None) -> None:
         self._delegate = delegate or CommandRunner()
+        self._development_gate = development_gate
+        self._development_cleanup = False
         self._completed_commands: list[dict[str, object]] = []
         self._completed_external_pulls: list[dict[str, object]] = []
 
@@ -427,6 +440,80 @@ class LocalDockerCommandRunner(CommandRunner):
         )
         return closed_argv, closed_env
 
+    def _require_development_command(self, argv):
+        gate = self._development_gate
+        scope = gate.boundary['resources']
+        def reject():
+            raise ValueError('DEVELOPMENT_RUNTIME_COMMAND_OUT_OF_SCOPE')
+        if argv[0] == '/usr/bin/systemctl':
+            args = argv[1:]
+            if args == ['--version']:
+                return
+            if args == ['daemon-reload'] and gate.execution_started and not self._development_cleanup:
+                return
+            if args == ['enable', '--now', scope['service']] and gate.execution_started and not self._development_cleanup:
+                return
+            if args == ['stop', scope['service']] and self._development_cleanup:
+                return
+            if args == ['is-active', scope['service']]:
+                return
+            if len(args) >= 3 and args[:2] == ['show', scope['service']] and args[-1] == '--value':
+                properties = args[2:-1]
+                allowed = {'LoadState', 'RestrictAddressFamilies', 'Id', 'FragmentPath', 'ActiveState', 'MainPID'}
+                if properties == ['--property', 'RestrictAddressFamilies'] or (properties
+                        and all(item.startswith('--property=') and item[11:] in allowed for item in properties)):
+                    return
+            reject()
+        elif argv[0] == '/usr/bin/docker':
+            if argv[1:3] != ['--host', scope['docker_socket']]:
+                reject()
+            args = argv[3:]
+            if (not args or any(item in {'--host', '-H', '--context'} or item.startswith(('--host=', '--context=', '-H'))
+                    for item in args)):
+                reject()
+            if args in (['compose', 'version'], ['compose', 'up', '--help']):
+                return
+            if args[0] in {'prune', 'rm', 'rmi', 'kill', 'restart', 'start'}:
+                reject()
+            if args[0] in {'container', 'volume', 'network'}:
+                if len(args) < 2 or args[1] not in {'ls', 'inspect'}:
+                    reject()
+                if args[1] == 'ls' and ('--filter' not in args
+                        or args[args.index('--filter') + 1:] != ['label=com.docker.compose.project=' + scope['compose_project']]):
+                    reject()
+                if (args[1] == 'inspect' and args[-1] != scope['compose_project'] + '_animemo'
+                        and not (args[0] == 'network' and re.fullmatch('[0-9a-f]{64}', args[-1]))):
+                    reject()
+            elif args[0] == 'compose' and args[1:] not in (['version'], ['up', '--help']):
+                if args[1:3] != ['--project-name', scope['compose_project']]:
+                    reject()
+                roots = [Path(item) for item in scope['roots']]
+                roots.append(Path('/var/lib/animemo/local-development') / gate.binding['execution_inventory_digest'][7:])
+                for index, item in enumerate(args):
+                    if item in {'-f', '--env-file'}:
+                        if index + 1 == len(args):
+                            reject()
+                        path = Path(args[index + 1])
+                        if '..' in path.parts or not any(path.is_relative_to(root) for root in roots):
+                            reject()
+                if any(item in {'down', 'rm', 'kill', 'prune', '--project-directory', '-p'} for item in args[3:]):
+                    reject()
+            elif args[0] == 'stop':
+                if (not self._development_cleanup or len(args) != 4 or args[1:3] != ['--time', '20']
+                        or args[3] not in getattr(self, '_development_stop_ids', ())):
+                    reject()
+            elif (args[0] == 'image' and (len(args) < 2 or args[1] not in {'load', 'inspect'})
+                    or args[0] not in {'--version', 'version', 'info', 'ps', 'inspect', 'logs', 'exec', 'run', 'image'}):
+                reject()
+            if ((args[0] in {'run', 'exec'} or args[:2] == ['image', 'load']
+                    or args[0] == 'compose' and any(item in {'up', 'run', 'exec'} for item in args[3:]))
+                    and (not gate.execution_started or self._development_cleanup)):
+                reject()
+        elif argv[0].endswith('/deploy/install-updater.sh'):
+            expected = '/var/lib/animemo/local-development/' + gate.binding['execution_inventory_digest'][7:] + '/deploy/install-updater.sh'
+            if argv != [expected, '--instance', scope['instance']] or not gate.execution_started:
+                reject()
+
     def run(
         self,
         argv: list[str],
@@ -436,6 +523,19 @@ class LocalDockerCommandRunner(CommandRunner):
         timeout: int = 300,
     ):
         closed_argv, closed_env = self._closed_command(argv, env)
+        gate = self._development_gate
+        if gate is not None:
+            self._require_development_command(closed_argv)
+            if self._development_cleanup:
+                gate.require_cleanup(gate.approved_plan)
+            else:
+                gate.check_live('RUNTIME_COMMAND')
+                observation = self._command_observation(closed_argv, return_code=0)
+                if (observation['classification'] == 'UNKNOWN_NETWORK_CAPABILITY'
+                        or observation['externalPullDisposition'] == 'FORBIDDEN_DETECTED'
+                        or 'prune' in closed_argv):
+                    raise ValueError('DEVELOPMENT_RUNTIME_COMMAND_OUT_OF_SCOPE')
+            timeout = gate.lifetime.clip_timeout(timeout, cleanup=self._development_cleanup)
         result = self._delegate.run(
             closed_argv,
             cwd=cwd,
@@ -593,7 +693,9 @@ class ProductionReleasePort:
                         "INSTALL_LOCAL_BUNDLE_INPUT_FORBIDDEN",
                         outcome=InstallOutcome.VALIDATION_FAILED,
                     )
-                source = ReleaseResolver(cache_root, policy=selected_policy)
+                from updater.source import AnonymousGitHubRest
+                source = ReleaseResolver(cache_root / 'anonymous-installer' / selected_policy.source.value,
+                    policy=selected_policy, rest=AnonymousGitHubRest())
         elif transport_source is InstallTransportSource.LOCAL_BUNDLE:
             if not isinstance(source, LocalBundleReleaseSource):
                 raise InstallerError(
@@ -1143,7 +1245,7 @@ def _command_available(runner: CommandRunner, argv: list[str]) -> bool:
     return True
 
 
-def _filesystem_capabilities() -> dict[str, bool]:
+def _filesystem_capabilities(*, probe_root: Path | None = None) -> dict[str, bool]:
     result = {
         "directory_fsync": False,
         "file_fsync": False,
@@ -1154,7 +1256,7 @@ def _filesystem_capabilities() -> dict[str, bool]:
         "unix_socket_permissions": hasattr(socket, "AF_UNIX"),
     }
     try:
-        with tempfile.TemporaryDirectory(prefix="animemo-platform-") as directory:
+        with tempfile.TemporaryDirectory(prefix="animemo-platform-", dir=probe_root) as directory:
             root = Path(directory)
             first = root / "first"
             second = root / "second"
@@ -1182,11 +1284,22 @@ def collect_host_capabilities(
     qualification: PlatformQualification,
     *,
     runner: CommandRunner | None = None,
+    _development_gate=None,
 ) -> HostCapabilityEvidence:
     runner = runner or LocalDockerCommandRunner()
     machine = host_platform.machine().lower()
     architecture = "amd64" if machine in {"x86_64", "amd64"} else machine
-    filesystem = _filesystem_capabilities()
+    if _development_gate is not None:
+        from .development_boundary import DevelopmentExecutionGate
+        if type(_development_gate) is not DevelopmentExecutionGate:
+            raise ValueError('DEVELOPMENT_PREPARATION_GATE_REQUIRED')
+        binding = _development_gate.binding
+        probe_root = (Path('/var/lib/animemo/local-development/runtime-cache')
+            / binding['runtime_trust_selection_digest'][7:] / binding['session_id'])
+        _development_gate.require_preparation((probe_root.as_posix(),))
+        filesystem = _filesystem_capabilities(probe_root=probe_root)
+    else:
+        filesystem = _filesystem_capabilities()
     compose_version = _command_available(
         runner,
         [
@@ -1217,6 +1330,11 @@ def collect_host_capabilities(
     psql = _command_available(runner, ["/usr/bin/psql", "--version"])
     loopback = False
     try:
+        if _development_gate is not None:
+            _development_gate.check_live('LOOPBACK_READINESS_PROBE')
+            if _development_gate.boundary['resources'].get('preparation_loopback_probe') != {
+                    'host': '127.0.0.1', 'port': 0, 'purpose': 'CAPABILITY_READINESS_ONLY'}:
+                raise ValueError('DEVELOPMENT_LOOPBACK_PROBE_OUT_OF_SCOPE')
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind(("127.0.0.1", 0))
         loopback = True
@@ -2495,6 +2613,7 @@ class ProductionFreshInstallPort:
         self._created: set[Path] = set()
         self._ownership: dict[str, OwnershipReceipt] = {}
         self._candidate_edge_binding: dict[str, str] | None = None
+        self._development_updater_start_attempted = False
 
     def _manifest(self, plan: InstallPlan) -> dict[str, object]:
         return self.releases.materials_for(plan.release).manifest
@@ -3022,6 +3141,7 @@ class ProductionFreshInstallPort:
                     ["/usr/bin/systemctl", "daemon-reload"],
                     timeout=120,
                 )
+            self._development_updater_start_attempted = True
             self.runner.run(
                 [
                     "/usr/bin/systemctl",
@@ -3059,6 +3179,10 @@ class ProductionFreshInstallPort:
     def cleanup_owned_staging(self, plan: InstallPlan) -> None:
         del plan
         self.close_candidate_listener()
+        if getattr(getattr(self, '_development_service_source', None), 'runtime_offline_only', False):
+            # The same workload's finally block stops exact owned resources.
+            # Preserve the failed installation and its data for this plan only.
+            return
         application_root = Path(str(self.namespace.app_root))
         for path in sorted(
             self._created, key=lambda item: len(item.parts), reverse=True
@@ -3112,6 +3236,7 @@ class ProductionInstallerComposition:
     candidate_command_runner: LocalDockerCommandRunner | None = None
     candidate_fresh: ProductionFreshInstallPort | None = None
     formal_trust_temporary: tempfile.TemporaryDirectory[str] | None = None
+    runtime_development_gate: object | None = None
 
     def close_formal_authority(self) -> None:
         temporary = self.formal_trust_temporary
@@ -3122,6 +3247,15 @@ class ProductionInstallerComposition:
         if self.candidate_fresh is not None:
             self.candidate_fresh.close_candidate_listener()
 
+    def stop_development_runtime(self, installer_plan):
+        from .development_boundary import DevelopmentExecutionGate
+        from .development_lifecycle import stop_runtime_instance
+        if (type(self.runtime_development_gate) is not DevelopmentExecutionGate
+                or self.candidate_fresh is None):
+            raise ValueError('DEVELOPMENT_INSTANCE_STOP_AUTHORITY_REQUIRED')
+        return stop_runtime_instance(self.candidate_fresh, installer_plan,
+            self.runtime_development_gate)
+
     def candidate_profile_execution_observation(
         self,
         *,
@@ -3131,7 +3265,10 @@ class ProductionInstallerComposition:
         installer_result,
     ) -> dict[str, object]:
         if (
-            type(self.releases) is not CandidateReleasePort
+            (type(self.releases) is not CandidateReleasePort
+                and not (type(self.releases) is ProductionReleasePort
+                    and self.runtime_development_gate is not None
+                    and self.releases.transport_source is InstallTransportSource.LOCAL_BUNDLE))
             or self.candidate_doctor is None
             or self.candidate_platform_observer is None
             or self.candidate_command_runner is None
@@ -3830,6 +3967,8 @@ def build_candidate_composition(
         if (type(_development_service_source) is not DevelopmentServiceSource
                 or _development_service_source.verified_candidate_digest != loaded.verified_digest):
             raise ValueError('DEVELOPMENT_SERVICE_MATERIAL_MISMATCH')
+        if _development_service_source.runtime_offline_only:
+            raise ValueError('DEVELOPMENT_RUNTIME_CONDITIONAL_COMPOSITION_REQUIRED')
     from .platform_bootstrap import SubprocessPlatformCommandRunner
 
     namespace = instance_namespace(instance_name)
@@ -3847,12 +3986,54 @@ def build_candidate_composition(
         transport_source=transport_source,
         image_acquirer=ImageAcquirer(runner=runner),
     )
+    gate = CandidateBootstrapPrivilegeGate(
+        verified_prepublication_candidate_capability(verified_candidate_digest),
+        _development_source=_development_service_source,
+    )
+    return _compose_isolated_runtime(releases=releases, namespace=namespace, runner=runner,
+        platform_observer=platform_observer, gate=gate,
+        development_source=_development_service_source)
+
+
+def build_runtime_development_composition(*, _development_service_source,
+        runtime_development_gate, runtime_development_materials):
+    """One source-bound DEV LocalBundle path; original Candidate stays separate."""
+    from .development import DevelopmentServiceSource
+    from .development_boundary import DevelopmentExecutionGate
+    from .development_trust import (
+        DevelopmentBootstrapPrivilegeGate,
+        DevelopmentLocalBundleAuthority,
+    )
+    from .platform_bootstrap import SubprocessPlatformCommandRunner
+    if (type(_development_service_source) is not DevelopmentServiceSource
+            or _development_service_source.runtime_offline_only is not True
+            or type(runtime_development_gate) is not DevelopmentExecutionGate
+            or type(runtime_development_materials) is not DevelopmentLocalBundleAuthority
+            or runtime_development_materials._service_source is not _development_service_source):
+        raise ValueError('DEVELOPMENT_RUNTIME_CONDITIONAL_AUTHORITY_REQUIRED')
+    runtime_development_gate.require_bound_trust(runtime_development_materials)
+    _development_service_source.verify_source()
+    runner = LocalDockerCommandRunner(development_gate=runtime_development_gate)
+    observer = CandidatePlatformCommandObserver(SubprocessPlatformCommandRunner())
+    observer._development_gate = runtime_development_gate
+    releases = ProductionReleasePort(source=runtime_development_materials.source,
+        transport_source=InstallTransportSource.LOCAL_BUNDLE,
+        image_acquirer=ImageAcquirer(runner=runner))
+    return _compose_isolated_runtime(releases=releases, namespace=instance_namespace('default'),
+        runner=runner, platform_observer=observer,
+        gate=DevelopmentBootstrapPrivilegeGate(runtime_development_materials),
+        development_source=_development_service_source,
+        development_gate=runtime_development_gate)
+
+
+def _compose_isolated_runtime(*, releases, namespace, runner, platform_observer, gate,
+        development_source, development_gate=None):
     configuration = ProductionManagedConfigurationPort(namespace=namespace)
     compatibility = ProductionCompatibilityPort(releases)
     platform = ProductionPlatformPort(
         releases,
         collector=lambda qualification: collect_host_capabilities(
-            qualification, runner=runner
+            qualification, runner=runner, _development_gate=development_gate
         ),
     )
     doctor = ProductionDoctorAcceptance(
@@ -3868,11 +4049,7 @@ def build_candidate_composition(
         runner=runner,
         namespace=namespace,
         candidate_network_isolation=True,
-        _development_service_source=_development_service_source,
-    )
-    gate = CandidateBootstrapPrivilegeGate(
-        verified_prepublication_candidate_capability(verified_candidate_digest),
-        _development_source=_development_service_source,
+        _development_service_source=development_source,
     )
     runtime = Installer(
         releases=releases,
@@ -3895,6 +4072,7 @@ def build_candidate_composition(
         ),
         bootstrap_privilege_gate=gate,
         namespace=namespace,
+        development_execution_gate=development_gate,
     )
     return ProductionInstallerComposition(
         runtime=runtime,
@@ -3905,6 +4083,7 @@ def build_candidate_composition(
         candidate_platform_observer=platform_observer,
         candidate_command_runner=runner,
         candidate_fresh=fresh,
+        runtime_development_gate=development_gate,
     )
 
 

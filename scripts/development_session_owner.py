@@ -66,7 +66,7 @@ class DevelopmentSessionOwner:
     @property
     def record(self):
         with self._lock:
-            return {'schema': SCHEMA, 'owner_id': self._id, 'state': self._state,
+            value = {'schema': SCHEMA, 'owner_id': self._id, 'state': self._state,
                 'failure_policy': FAILURE_POLICY,
                 'capture_attempts': self._attempts, 'capture_completed': self._completed,
                 'last_reserved_round': self._index,
@@ -74,6 +74,9 @@ class DevelopmentSessionOwner:
                 'round_limit': self._limit,
                 'material_identity': dict(self._material), 'expires_utc_seconds': self._expires_utc,
                 'secret_cleanup': self._cleanup, 'close_reason': self._reason}
+            if getattr(self, '_runtime_round_verified', None) is not None:
+                value['runtime_round_verified'] = dict(self._runtime_round_verified)
+            return value
 
     @property
     def closed(self):
@@ -157,6 +160,13 @@ class DevelopmentSessionOwner:
             self._sessions.add(batch.plan.session_id)
             self._clones.update(profile.clone_identity for profile in batch.plan.profiles)
             self._deadline = min(self._deadline, reservation.deadline)
+            if getattr(batch.plan, 'runtime_offline_only', False):
+                from scripts.runtime_development_boundary import (
+                    require_runtime_lifetime,
+                )
+                lifetime = require_runtime_lifetime(batch.provider, batch.plan, batch.plan.profiles[0])
+                lifetime.check('OWNER_BEFORE_CAPTURE')
+                self._deadline = min(self._deadline, lifetime.monotonic_deadline)
             self._batch = batch
             self._preparing_batch = None
             self._state = 'CAPTURING' if self._secret is None else 'ROUND_ACTIVE'
@@ -216,6 +226,8 @@ class DevelopmentSessionOwner:
                 self.close('DEVELOPMENT_PREPARATION_ENDED_BEFORE_VERIFIED_GUEST')
             if self._batch is batch:
                 self._pending = batch.plan.session_id
+                self._pending_plan = json.loads(json.dumps(batch.plan.as_dict()))
+                self._pending_record = batch.record
                 self._batch = None
                 if self._state != 'CLOSED':
                     self._state = 'CLEANUP_PENDING'
@@ -223,6 +235,9 @@ class DevelopmentSessionOwner:
     def finish_round(self, report):
         """Only a fully cleaned, authenticated workload failure permits reuse."""
         if self._state == 'CLOSED':
+            if (report.get('plan', {}).get('runtimeOfflineOnly') is True
+                    and report.get('status') == 'PASS'):
+                raise DevelopmentOwnerError('DEVELOPMENT_OWNER_CLOSED_BEFORE_RUNTIME_VALIDATION')
             return
         with self._lock:
             self._live()
@@ -230,6 +245,7 @@ class DevelopmentSessionOwner:
         try:
             session = report.get('credential_session')
             _require(type(session) is dict and self._pending == session['binding']['session_id']
+                and session == self._pending_record and report.get('plan') == self._pending_plan
                 and session.get('development_owner_id') == self._id
                 and session.get('development_capture_index') == self._index
                 and self._state == 'CLEANUP_PENDING'
@@ -243,11 +259,12 @@ class DevelopmentSessionOwner:
             profiles = ('FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE')
             authorization = getattr(self, '_authorization', None)
             if authorization is not None:
+                from scripts.development_plan import confirmed_profile_names
                 initial = authorization.body['initial_plan']
                 _require(initial.get('failurePolicy') == FAILURE_POLICY)
                 selected = tuple(item['profile'] for item in initial['profiles'])
-                diagnostic = initial.get('developmentMode') == 'PLATFORM_DIAGNOSTIC'
-                _require(selected == (('FRESH_BASE',) if diagnostic else profiles))
+                diagnostic = initial.get('developmentMode') in {'PLATFORM_DIAGNOSTIC', 'PUBLISHED_PLATFORM_PLAN'}
+                _require(selected == confirmed_profile_names(initial))
                 profiles = selected
             _require(type(operations) is dict and bool(operations)
                 and type(results) is dict and set(results) == set(profiles)
@@ -267,9 +284,21 @@ class DevelopmentSessionOwner:
                 roles = session['profiles'][profile]
                 passed = roles['CANDIDATE_WORKLOAD']['operation_result'] == 'PASS'
                 _require(passed == (results[profile]['status'] == 'PASS'))
+                retained = passed and self._pending_plan.get('runtimeOfflineOnly') is True
+                if retained:
+                    from scripts.runtime_development_retention import (
+                        validate_retained_operation,
+                    )
+                    _require(authorization is not None
+                        and initial.get('runtimeRetentionPolicy') == 'STOP_AND_RETAIN')
+                    try:
+                        validate_retained_operation(operation, self._pending_plan)
+                    except Exception:  # noqa: BLE001 - fail closed with a bounded owner error.
+                        raise DevelopmentOwnerError('DEVELOPMENT_RETAINED_CLONE_INVALID') from None
                 _require(operation.get('power_state') == 'STOPPED'
-                    and operation.get('clone_disposition') == ('REMOVED' if passed else 'QUARANTINED')
-                    and (not passed or not Path(operation['clone_vmx']).exists())
+                    and operation.get('clone_disposition') == (
+                        'RETAINED_STOPPED' if retained else 'REMOVED' if passed else 'QUARANTINED')
+                    and (retained or not passed or not Path(operation['clone_vmx']).exists())
                     and operation.get('cleanup_errors') == []
                     and all(operation.get(key) is True for key in ('session_keys_removed', 'known_hosts_removed', 'lease_released')))
                 for role in roles.values():
@@ -291,6 +320,10 @@ class DevelopmentSessionOwner:
                     _require(set(operations) == set(profiles)
                         and all(role['operation_result'] == 'PASS' for profile in session['profiles'].values()
                             for role in profile.values()))
+                    if self._pending_plan.get('runtimeOfflineOnly') is True:
+                        self._runtime_round_verified = {'session_id': self._pending_plan['sessionId'],
+                            'plan_digest': self._pending_plan['planDigest'],
+                            'retention_receipt_digest': operations['RUNTIME_BASE_OFFLINE']['retention_receipt']['receiptDigest']}
                     self.close('DEVELOPMENT_PLATFORM_DIAGNOSTIC_COMPLETED'
                         if authorization is not None and diagnostic else 'DEVELOPMENT_PREACCEPTANCE_PASSED')
                 elif self._index >= self._limit:

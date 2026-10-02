@@ -95,21 +95,15 @@ test("闭合 schema 对缺字段、额外字段、draft 与非 immutable Release
   assert.throws(() => validateReleaseState(unboundReceipt), /not bound/);
 });
 
-test("GitHub 与已资格镜像 acquisition 确实不同但验证命令和 authority 完全相同", () => {
-  const state = verifiedReleaseState();
-  const github = createTransportPlan(state, "github");
-  const mirror = createTransportPlan(state, "official-mirror");
-  assert.equal(github.available, true);
-  assert.equal(mirror.available, true);
-  assert.notEqual(github.acquisitionCommand, mirror.acquisitionCommand);
-  assert.match(github.acquisitionCommand, /^install -d -m 0700 .* && gh release download /);
-  assert.match(mirror.acquisitionCommand, /^install -d -m 0700 .* && curl --fail --location /);
-  assert.deepEqual(github.verificationCommands, mirror.verificationCommands);
-  assert.match(github.verificationCommands.at(-1), /sha256sum --check --strict -/);
-  assert.doesNotMatch(github.verificationCommands.at(-1), /checksums\.txt/);
-  assert.equal(github.authority, RELEASE_AUTHORITY);
-  assert.equal(mirror.authority, RELEASE_AUTHORITY);
-  assert.equal(mirror.authority, "GITHUB_IMMUTABLE_RELEASE");
+test("独立首信任未闭合时在线入口不生成账户依赖或执行命令", () => {
+  for (const transport of ["github", "official-mirror"]) {
+    const plan = createTransportPlan(verifiedReleaseState(), transport);
+    assert.equal(plan.available, false);
+    assert.equal(plan.acquisitionCommand, null);
+    assert.deepEqual(plan.verificationCommands, []);
+    assert.equal(plan.authority, RELEASE_AUTHORITY);
+    assert.match(plan.reason, /独立首信任/);
+  }
 });
 
 test("未资格镜像与 Local Bundle 不会获得在线 Release Authority fallback", () => {

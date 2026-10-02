@@ -106,6 +106,7 @@ from .publication_input import (
     PublicationInputError,
     build_publish_candidate_plan,
 )
+from .publication_transaction import PublicationTransactionError
 from .r2_prestate import (
     R2_AUTH_METHOD_ARGUMENT,
     sanitize_r2_diagnostic,
@@ -1606,6 +1607,18 @@ def main(argv: list[str] | None = None) -> int:
     except PublicationInputError as error:
         print(
             json.dumps({"code": error.code, "detail": str(error)}),
+            file=sys.stderr,
+        )
+        return 2
+    except PublicationTransactionError as error:
+        print(
+            json.dumps(
+                sanitize_r2_diagnostic(
+                    {"code": error.code, "detail": str(error)},
+                    environment=os.environ,
+                ),
+                ensure_ascii=False,
+            ),
             file=sys.stderr,
         )
         return 2

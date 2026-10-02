@@ -540,29 +540,8 @@ def _close_claim(
     return closed
 
 
-def build_initial_trust_kit(
-    *,
-    verifier: Path,
-    output: Path,
-    fetcher: Callable[[str, int], bytes] = _production_fetch,
-    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
-) -> dict[str, object]:
-    """取得并验证两套官方 TUF 元数据，生成不可自授权的初始 pretrust kit。"""
-
-    verifier = Path(verifier)
-    output = Path(output)
-    if output.exists() or output.is_symlink():
-        raise TrustBootstrapError("初始 pretrust 输出必须不存在")
-    verifier_bytes = _read_verifier(verifier)
-    with _verified_verifier_copy(verifier_bytes, output.parent) as verifier_copy:
-        version_output = _run_verifier(runner, (str(verifier_copy), "--version"))
-    if version_output != (_VERIFIER_VERSION + "\n").encode("ascii"):
-        raise TrustBootstrapError("离线验证器版本不合格")
-
-    tracks = {
-        role: _acquire_track(role, fetcher=fetcher)
-        for role in ("github", "sigstore")
-    }
+def _bootstrap_verification_inputs(tracks):
+    """Pure original TUF request/package construction; no trust is issued here."""
     bootstrap_identity = _digest(
         _canonical_json_bytes(
             {
@@ -612,6 +591,86 @@ def build_initial_trust_kit(
         "sigstore": request_track("sigstore"),
     }
 
+    return bootstrap_identity, package, request
+
+
+def _bootstrap_material_files(*, tracks, claims, verifier_bytes):
+    """Pure six-file/profile construction after the original Go claim closes."""
+    github_final_root = tracks["github"][1][-1] if tracks["github"][1] else tracks["github"][0]
+    sigstore_final_root = tracks["sigstore"][1][-1] if tracks["sigstore"][1] else tracks["sigstore"][0]
+    revocation_snapshot = _digest(
+        _canonical_json_bytes(
+            {
+                "revokedMaterialIdentities": [],
+                "schemaVersion": 1,
+                "sequence": 1,
+                "source": "OFFICIAL_TUF_BOOTSTRAP",
+            }
+        )
+    )
+    profile = TrustProfile(
+        profile_version=1,
+        parent_profile_identity=None,
+        repository=_REPOSITORY,
+        repository_id=REPOSITORY_ID,
+        owner_id=OWNER_ID,
+        github_release_certificate_identity=GITHUB_RELEASE_CERTIFICATE_IDENTITY,
+        github_trusted_root_sha256=claims["github"]["trustedRootSha256"],  # type: ignore[arg-type]
+        sigstore_trusted_root_sha256=claims["sigstore"]["trustedRootSha256"],  # type: ignore[arg-type]
+        github_tuf_root_sha256=claims["github"]["tufRootSha256"],  # type: ignore[arg-type]
+        github_tuf_root_version=claims["github"]["tufRootVersion"],  # type: ignore[arg-type]
+        github_tuf_timestamp_version=claims["github"]["timestampVersion"],  # type: ignore[arg-type]
+        github_tuf_snapshot_version=claims["github"]["snapshotVersion"],  # type: ignore[arg-type]
+        github_tuf_targets_version=claims["github"]["targetsVersion"],  # type: ignore[arg-type]
+        sigstore_tuf_root_sha256=claims["sigstore"]["tufRootSha256"],  # type: ignore[arg-type]
+        sigstore_tuf_root_version=claims["sigstore"]["tufRootVersion"],  # type: ignore[arg-type]
+        sigstore_tuf_timestamp_version=claims["sigstore"]["timestampVersion"],  # type: ignore[arg-type]
+        sigstore_tuf_snapshot_version=claims["sigstore"]["snapshotVersion"],  # type: ignore[arg-type]
+        sigstore_tuf_targets_version=claims["sigstore"]["targetsVersion"],  # type: ignore[arg-type]
+        verifier_id="github-sigstore-offline",
+        minimum_verifier_version=_MINIMUM_VERIFIER_VERSION,
+        revocation_epoch=1,
+        revocation_snapshot_sha256=revocation_snapshot,
+        verifier_identity=_digest(verifier_bytes),
+        policy_identity=OFFLINE_POLICY_IDENTITY,
+        activation_sequence=1,
+    )
+    files = {
+        "github-trusted-root.jsonl": tracks["github"][5],
+        "github-tuf-root.json": github_final_root,
+        "offline-release-verifier": verifier_bytes,
+        "sigstore-trusted-root.jsonl": tracks["sigstore"][5],
+        "sigstore-tuf-root.json": sigstore_final_root,
+        "trust-profile.json": _canonical_json_bytes(profile.as_bootstrap_record()),
+    }
+    return profile, files
+
+
+def build_initial_trust_kit(
+    *,
+    verifier: Path,
+    output: Path,
+    fetcher: Callable[[str, int], bytes] = _production_fetch,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> dict[str, object]:
+    """取得并验证两套官方 TUF 元数据，生成不可自授权的初始 pretrust kit。"""
+
+    verifier = Path(verifier)
+    output = Path(output)
+    if output.exists() or output.is_symlink():
+        raise TrustBootstrapError("初始 pretrust 输出必须不存在")
+    verifier_bytes = _read_verifier(verifier)
+    with _verified_verifier_copy(verifier_bytes, output.parent) as verifier_copy:
+        version_output = _run_verifier(runner, (str(verifier_copy), "--version"))
+    if version_output != (_VERIFIER_VERSION + "\n").encode("ascii"):
+        raise TrustBootstrapError("离线验证器版本不合格")
+
+    tracks = {
+        role: _acquire_track(role, fetcher=fetcher)
+        for role in ("github", "sigstore")
+    }
+    bootstrap_identity, package, request = _bootstrap_verification_inputs(tracks)
+
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".pretrust-v2-", dir=output.parent))
     try:
@@ -653,53 +712,8 @@ def build_initial_trust_kit(
             tracks=tracks,
         )
 
-        github_final_root = tracks["github"][1][-1] if tracks["github"][1] else tracks["github"][0]
-        sigstore_final_root = tracks["sigstore"][1][-1] if tracks["sigstore"][1] else tracks["sigstore"][0]
-        revocation_snapshot = _digest(
-            _canonical_json_bytes(
-                {
-                    "revokedMaterialIdentities": [],
-                    "schemaVersion": 1,
-                    "sequence": 1,
-                    "source": "OFFICIAL_TUF_BOOTSTRAP",
-                }
-            )
-        )
-        profile = TrustProfile(
-            profile_version=1,
-            parent_profile_identity=None,
-            repository=_REPOSITORY,
-            repository_id=REPOSITORY_ID,
-            owner_id=OWNER_ID,
-            github_release_certificate_identity=GITHUB_RELEASE_CERTIFICATE_IDENTITY,
-            github_trusted_root_sha256=claims["github"]["trustedRootSha256"],  # type: ignore[arg-type]
-            sigstore_trusted_root_sha256=claims["sigstore"]["trustedRootSha256"],  # type: ignore[arg-type]
-            github_tuf_root_sha256=claims["github"]["tufRootSha256"],  # type: ignore[arg-type]
-            github_tuf_root_version=claims["github"]["tufRootVersion"],  # type: ignore[arg-type]
-            github_tuf_timestamp_version=claims["github"]["timestampVersion"],  # type: ignore[arg-type]
-            github_tuf_snapshot_version=claims["github"]["snapshotVersion"],  # type: ignore[arg-type]
-            github_tuf_targets_version=claims["github"]["targetsVersion"],  # type: ignore[arg-type]
-            sigstore_tuf_root_sha256=claims["sigstore"]["tufRootSha256"],  # type: ignore[arg-type]
-            sigstore_tuf_root_version=claims["sigstore"]["tufRootVersion"],  # type: ignore[arg-type]
-            sigstore_tuf_timestamp_version=claims["sigstore"]["timestampVersion"],  # type: ignore[arg-type]
-            sigstore_tuf_snapshot_version=claims["sigstore"]["snapshotVersion"],  # type: ignore[arg-type]
-            sigstore_tuf_targets_version=claims["sigstore"]["targetsVersion"],  # type: ignore[arg-type]
-            verifier_id="github-sigstore-offline",
-            minimum_verifier_version=_MINIMUM_VERIFIER_VERSION,
-            revocation_epoch=1,
-            revocation_snapshot_sha256=revocation_snapshot,
-            verifier_identity=_digest(verifier_bytes),
-            policy_identity=OFFLINE_POLICY_IDENTITY,
-            activation_sequence=1,
-        )
-        files = {
-            "github-trusted-root.jsonl": tracks["github"][5],
-            "github-tuf-root.json": github_final_root,
-            "offline-release-verifier": verifier_bytes,
-            "sigstore-trusted-root.jsonl": tracks["sigstore"][5],
-            "sigstore-tuf-root.json": sigstore_final_root,
-            "trust-profile.json": _canonical_json_bytes(profile.as_bootstrap_record()),
-        }
+        profile, files = _bootstrap_material_files(
+            tracks=tracks, claims=claims, verifier_bytes=verifier_bytes)
         manifest = {
             "authorityRole": "PRODUCTION_PRETRUST_ONLY",
             "files": [

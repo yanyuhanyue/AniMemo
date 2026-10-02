@@ -80,6 +80,7 @@ cp -R "$SCRIPT_ROOT/updater" "$STAGING/updater"
 cp -R "$SCRIPT_ROOT/release" "$STAGING/release"
 cp -R "$SCRIPT_ROOT/durability" "$STAGING/durability"
 cp -R "$SCRIPT_ROOT/installer" "$STAGING/installer"
+cp -R "$SCRIPT_ROOT/bootstrap_kit" "$STAGING/bootstrap_kit"
 cp -R "$SCRIPT_ROOT/wheelhouse" "$STAGING/wheelhouse"
 find "$STAGING" -type d -name __pycache__ -prune -exec rm -rf {} +
 PYTHONPATH="$STAGING" PYTHONSAFEPATH=1 \

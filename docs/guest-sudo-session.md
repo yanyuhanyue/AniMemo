@@ -97,4 +97,13 @@ Installer 失败同时记录通用失败和受限的真实 Adapter 错误码，�
 
 开发回归按风险分为 batch 生命周期与额度、Guest authority/真实 Windows holds、受限协议/本机子进程、POSIX root/runtime/receipt、现行 canonical 消费者。测试输入仅 synthetic sentinel；`scripts/tests/native_candidate_console_probe.py` 在独占可见 conhost 自动输入公开文本，验证捕获、退格和取消，不接触真实账本或 Guest。真实发行材料的隔离开发探针须记录源码/材料差异，并明确没有 Candidate authority。
 
+本地 DEV 入口 `scripts.local_candidate_development` 默认仍选择三个 Profile。
+显式 `--runtime-offline-only` 只选择原计划中的 `RUNTIME_BASE_OFFLINE`，保留其
+snapshot、clone、session、材料及执行源码绑定，并把选择纳入 plan digest。
+它不能与平台诊断、已发布产品规划或用户态探针模式混用。计划模式不确认、不采集、不执行；
+执行须使用独立确认的单轮 DEV owner，最多一次密码采集、三个既有固定角色交付。
+旧账本和三 Profile 的确认不能借用为单 Runtime 授权。第三次交付释放当前轮能力，
+收尾报告须逐项匹配实际批次计划、凭据记录及清理结果，失败时销毁 owner 密码。
+此选项仅用于 DEV；`OFFLINE_VALIDATE_ONLY` 仍要求能力已存在且禁止 APT 和外部取源。
+
 最终三 Profile 验收只使用审查合并后的 exact main、同源 Q 和新 Clone。成功 Q、开发测试或单 Profile PASS 均不能替代三 Profile、Aggregate、Origin 前后态和资源收尾的实际结果。

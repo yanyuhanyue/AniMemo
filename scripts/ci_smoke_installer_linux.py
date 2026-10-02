@@ -81,7 +81,7 @@ def go_build_command(root: Path, output: Path, authority: dict) -> list[str]:
 
 def stage_source(root: Path, destination: Path) -> None:
     tracked = subprocess.check_output(
-        ["git", "ls-files", "-z", "--", "durability", "release", "updater", "installer"],
+        ["git", "ls-files", "-z", "--", "durability", "release", "updater", "installer", "bootstrap_kit"],
         cwd=root,
     ).decode("utf-8").split("\0")
     for relative in sorted({*filter(None, tracked), *_FIXED_DEPLOYMENT_FILES}):
