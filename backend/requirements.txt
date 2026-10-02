@@ -84,7 +84,7 @@ psycopg-binary==3.3.4
     # via psycopg
 pycparser==3.0
     # via cffi
-pyjwt==2.13.0
+pyjwt==2.15.0
     # via djangorestframework-simplejwt
 python-dateutil==2.9.0.post0
     # via botocore
@@ -119,10 +119,6 @@ typing-extensions==4.16.0
     #   dj-database-url
     #   psycopg
     #   referencing
-tzdata==2026.3 ; sys_platform == "win32"
-    # via
-    #   django
-    #   psycopg
 uritemplate==4.2.0
     # via drf-spectacular
 urllib3==2.7.0
