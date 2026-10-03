@@ -175,6 +175,45 @@ class RuntimeBaselineTests(unittest.TestCase):
         value['uid'] = 1001
         self.assertNotEqual(result['baseline_digest'], self.validate(value)['baseline_digest'])
 
+    def test_minor_and_build_numbers_cannot_satisfy_required_tool_major(self):
+        cases = (
+            ('pg_dump', 'pg_dump (PostgreSQL) 15.16', 15),
+            ('psql', 'psql (PostgreSQL) 15.16', 15),
+            ('pg_dump', 'pg_dump (PostgreSQL) 15.9 (Ubuntu 16.4)', 15),
+            ('compose', 'Docker Compose version v1.2.0', 1),
+            ('compose', 'Docker Compose version v3.2.0', 3),
+            ('compose', 'Docker Compose version v1.29.2-build.2.0', 1),
+            ('psql', 'unexpected wrapper 16.4', None),
+            ('compose', 'unexpected wrapper v2.24.6', None),
+        )
+        for name, text, major in cases:
+            with self.subTest(name=name, text=text):
+                value = baseline_fixture()
+                value['versions'][name] = text
+                with self.assertRaisesRegex(boundary.RuntimeBoundaryError, 'HARD_PREREQUISITE_MISSING'):
+                    self.validate(value)
+                diagnostic = boundary.runtime_baseline_failure_diagnostic(value)['versions'][name]
+                self.assertEqual(diagnostic['major'], major)
+                self.assertFalse(diagnostic['required_major_matches'])
+
+    def test_common_tool_version_formats_keep_the_actual_major(self):
+        cases = (
+            ('pg_dump', 'pg_dump (PostgreSQL) 16.4', 16),
+            ('psql', 'psql (PostgreSQL) 16.4 (Ubuntu 16.4-0ubuntu0.24.04.2)', 16),
+            ('pg_dump', 'pg_dump (PostgreSQL) 16.15 (Debian 16.15-1.pgdg120+1)', 16),
+            ('compose', 'Docker Compose version v2.24.6', 2),
+            ('compose', 'Docker Compose version 2.24.6+ds1-0ubuntu2', 2),
+            ('compose', 'Docker Compose version v2.29.2-desktop.2', 2),
+        )
+        for name, text, major in cases:
+            with self.subTest(name=name, text=text):
+                value = baseline_fixture()
+                value['versions'][name] = text
+                self.validate(value)
+                diagnostic = boundary.runtime_baseline_failure_diagnostic(value)['versions'][name]
+                self.assertEqual(diagnostic['major'], major)
+                self.assertTrue(diagnostic['required_major_matches'])
+
     def test_missing_stale_cross_session_boot_tools_and_hard_prerequisites_reject(self):
         mutations = [lambda value: value.pop('tools'),
             lambda value: value.update(observed_utc_seconds=1_999_999_939.0),
@@ -212,6 +251,63 @@ class RuntimeBaselineTests(unittest.TestCase):
         exec(compile(definitions, '<synthetic-construction-only>', 'exec'), scope)  # noqa: S102 - fixed definitions only
         self.assertEqual(scope['capture_scope']['STREAM_LIMIT'], 65536)
         self.assertTrue(callable(scope['_collect_guest_baseline']))
+        for name, text, major in (
+                ('pg_dump', 'pg_dump (PostgreSQL) 15.16', 15),
+                ('psql', 'psql (PostgreSQL) 16.4 (Ubuntu 16.4-0ubuntu0.24.04.2)', 16),
+                ('compose', 'Docker Compose version v1.2.0', 1),
+                ('compose', 'Docker Compose version 2.24.6+ds1-0ubuntu2', 2)):
+            with self.subTest(name=name, text=text):
+                self.assertEqual(scope['runtime_tool_version_major'](name, text), major)
+        # Exercise the transported collector with fixed, in-memory tool replies.
+        # All Guest observations and process calls are replaced before invocation.
+        import io
+        import sys
+        from contextlib import redirect_stdout
+        fixture = baseline_fixture()
+        fixture['tools']['python']['resolved_path'] = str(Path(sys.executable).resolve())
+        files = {'/etc/os-release': 'ID=ubuntu\nVERSION_ID="24.04"\n',
+                 '/etc/machine-id': binding()['machine_id'],
+                 '/proc/sys/kernel/random/boot_id': binding()['boot_id']}
+        for wrong_major in (False, True):
+            versions = dict(fixture['versions'])
+            if wrong_major:
+                versions.update(pg_dump='pg_dump (PostgreSQL) 15.16',
+                                psql='psql (PostgreSQL) 15.16',
+                                compose='Docker Compose version v1.2.0')
+            def capture(argv, **kwargs):
+                if argv[0] == '/usr/bin/dpkg-query':
+                    output = f'ii \t{argv[-1]}\t16.4\tamd64\n'
+                elif argv[0] == '/usr/bin/dpkg':
+                    output = 'amd64\n'
+                elif argv[1] == 'is-active':
+                    output = ''
+                elif argv[1] == 'show':
+                    output = '123\n456\n'
+                else:
+                    name = 'compose' if argv[-1] == 'version' else Path(argv[0]).name
+                    output = versions[name] + '\n'
+                return SimpleNamespace(outcome='EXITED', secondary_errors=[], returncode=0,
+                    stdout=output.encode(), stderr=b'', started_at='2033-05-18T03:33:19Z',
+                    ended_at='2033-05-18T03:33:20Z', stdout_summary={'truncated': False, 'missing': False},
+                    stderr_summary={'truncated': False, 'missing': False})
+            output = io.StringIO()
+            with self.subTest(wrong_major=wrong_major), redirect_stdout(output), \
+                    mock.patch.dict(scope, observe_runtime_tools=lambda: fixture['tools'],
+                                    observe_runtime_socket=lambda: fixture['docker_socket']), \
+                    mock.patch.object(Path, 'read_text', autospec=True, side_effect=lambda path, **kwargs: files[path.as_posix()]), \
+                    mock.patch('os.getuid', return_value=1000, create=True), \
+                    mock.patch('os.geteuid', return_value=1000, create=True), mock.patch('sys.platform', 'linux'), \
+                    mock.patch('platform.machine', return_value='x86_64'), \
+                    mock.patch('time.time', return_value=2_000_000_000.0):
+                scope['_collect_guest_baseline'](binding(), capture)
+            observed = json.loads(output.getvalue())
+            if wrong_major:
+                self.assertEqual(observed['hard_missing'], ['COMPOSE_MAJOR_MISMATCH',
+                    'POSTGRES_CLIENT_MAJOR_MISMATCH:pg_dump', 'POSTGRES_CLIENT_MAJOR_MISMATCH:psql'])
+                with self.assertRaisesRegex(boundary.RuntimeBoundaryError, 'HARD_PREREQUISITE_MISSING'):
+                    self.validate(observed)
+            else:
+                self.assertEqual(observed['hard_missing'], [])
 
     def test_runtime_capture_order_and_missing_baseline_never_capture(self):
         from scripts import candidate_guest_session as guests

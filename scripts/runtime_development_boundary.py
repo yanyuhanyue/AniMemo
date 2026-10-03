@@ -340,6 +340,17 @@ def runtime_daemon_identity(stdout):
     return 'sha256:' + hashlib.sha256(raw).hexdigest()
 
 
+def runtime_tool_version_major(name, text):
+    """Read the tool's version token, never a minor or distro/build number."""
+    import re
+    if type(text) is not str or not 0 < len(text) <= 512:
+        return None
+    prefix = r'Docker Compose version v?' if name == 'compose' else (
+        re.escape(name) + r' \(PostgreSQL\) ' if name in ('pg_dump', 'psql') else None)
+    match = re.match(prefix + r'([0-9]{1,4})\.[0-9]+', text) if prefix else None
+    return int(match[1]) if match else None
+
+
 def _collect_guest_baseline(binding, capture_process):
     # Fixed read-only observation after authentication. Socket queries are
     # attempted only if ordinary user permissions allow this local socket.
@@ -347,7 +358,6 @@ def _collect_guest_baseline(binding, capture_process):
     import json
     import os
     import platform
-    import re
     import sys
     import time
     from pathlib import Path
@@ -423,9 +433,9 @@ def _collect_guest_baseline(binding, capture_process):
             missing.append('RUNTIME_TOOL_VERSION_UNAVAILABLE:' + name)
         else:
             versions[name] = text
-            if name in ('pg_dump', 'psql') and not re.search(r'\b16(?:\.|\b)', text):
+            if name in ('pg_dump', 'psql') and runtime_tool_version_major(name, text) != 16:
                 missing.append('POSTGRES_CLIENT_MAJOR_MISMATCH:' + name)
-            if name == 'compose' and not re.search(r'\bv?2\.', text):
+            if name == 'compose' and runtime_tool_version_major(name, text) != 2:
                 missing.append('COMPOSE_MAJOR_MISMATCH')
     daemon_identity = None
     if tools['systemctl'] is not None:
@@ -505,7 +515,8 @@ def fixed_baseline_command(binding):
     capture = (Path(__file__).resolve().parents[1] / 'installer' / 'apt_diagnostics.py').read_text(encoding='utf-8')
     source = '\n'.join(inspect.getsource(function) for function in (
         observe_runtime_tool, observe_runtime_tools, observe_runtime_socket,
-        runtime_daemon_identity, runtime_transport_codec_ready, _collect_guest_baseline))
+        runtime_daemon_identity, runtime_transport_codec_ready, runtime_tool_version_major,
+        _collect_guest_baseline))
     program = ('capture_scope={"__name__":"__main__"}\nexec(compile(' + repr(capture)
         + ',"<fixed-runtime-capture>","exec"),capture_scope)\ncapture_scope["STREAM_LIMIT"]=65536\n'
         + source + '\n_collect_guest_baseline(' + repr(binding) + ',capture_scope["capture_process"])\n')
@@ -642,10 +653,10 @@ def runtime_baseline_failure_diagnostic(value):
     def version(text, name=None):
         valid = type(text) is str and 0 < len(text) <= 512
         match = re.search(r'\b(?:v)?([0-9]{1,4})(?=\.|\b)', text) if valid else None
-        expected = r'\b16(?:\.|\b)' if name in ('pg_dump', 'psql') else r'\bv?2\.'
-        return {'text_valid': valid, 'major': int(match[1]) if match else None,
-                'required_major_matches': bool(valid and re.search(expected, text))
-                if name in ('pg_dump', 'psql', 'compose') else None}
+        required = 16 if name in ('pg_dump', 'psql') else 2 if name == 'compose' else None
+        major = runtime_tool_version_major(name, text) if required else int(match[1]) if match else None
+        return {'text_valid': valid, 'major': major,
+                'required_major_matches': major == required if required else None}
 
     missing = value.get('hard_missing')
     limited_missing = missing[:32] if type(missing) is list else []
@@ -755,8 +766,9 @@ def validate_runtime_baseline(value, *, expected_binding, now):
              and value['docker_daemon'].get('state') in ('OBSERVED', 'PERMISSION_UNKNOWN'),
              'RUNTIME_BASELINE_HARD_PREREQUISITE_MISSING')
     _require(all(type(text) is str and 0 < len(text) <= 512 for text in value['versions'].values())
-             and all(re.search(r'\b16(?:\.|\b)', value['versions'][name]) for name in ('pg_dump', 'psql'))
-             and re.search(r'\bv?2\.', value['versions']['compose']), 'RUNTIME_BASELINE_HARD_PREREQUISITE_MISSING')
+             and all(runtime_tool_version_major(name, value['versions'][name]) == 16 for name in ('pg_dump', 'psql'))
+             and runtime_tool_version_major('compose', value['versions']['compose']) == 2,
+             'RUNTIME_BASELINE_HARD_PREREQUISITE_MISSING')
     commands = {('/usr/bin/systemctl', 'is-active', '--quiet', 'docker'),
         ('/usr/bin/dpkg', '--print-architecture'), ('/usr/bin/docker', '--version'),
         ('/usr/bin/systemctl', '--version'),

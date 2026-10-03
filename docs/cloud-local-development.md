@@ -59,6 +59,34 @@ Windows 可使用该 venv 的 `Scripts/python.exe`。解释器补丁版本须实
 
 Ruff 使用单独工具 venv，按 `scripts/requirements-tools.lock` 安装，版本为 0.16.2。定向规则为 `E9,F63,F7,F82`；检查本任务改动的 Python 文件，并执行 `git diff --check`。前端工作才需要 Node 20 与 `npm ci`，安装或构建前先确认资源窗口。
 
+### 先定向反馈，再做阶段全验
+
+通用开发确认或 plan fixture 改动先跑两处实际拥有者，不重复执行未受影响的 Runtime 全组：
+
+```sh
+python -B -m unittest scripts.tests.test_generic_development_confirmation scripts.tests.test_local_candidate_development.DevelopmentPlanTests -v
+```
+
+共享 fixture 用模块引用；直接把其他模块的 `TestCase` 导入当前模块会被 `unittest` 再次发现。当前定向路线保留原有 10 个独立行为检查，另有 1 个发现去重回归；生产路径的授权、源码身份和清理检查均不裁剪。
+
+依赖改动先执行已有的无安装许可证预检，避免在完整 scripts 测试及 Producer 构建之后才发现证据已过期：
+
+```sh
+python -B scripts/check_license_docs.py
+```
+
+失败时先检查变动依赖对应的清单、许可证说明和证据；不要只刷新预期哈希来制造通过。Python 的 `requirements.txt` 与 CI 实际安装的同目录 `requirements.lock` 必须共同审查并同步验证，只改 `.txt` 时旧 `.lock` 的测试通过不能证明新版本兼容。不要为检查而运行会更新依赖的无参数 `update_dependencies.py`。
+
+backend/release 声明与安装锁的版本一致性可先单独运行：
+
+```sh
+python -B -m unittest scripts.tests.test_dependency_security.DependencySecurityContractTests.test_declared_dependency_versions_match_hashed_install_locks -v
+```
+
+该检查复用现有测试的 pip-compile 格式读取器与 `packaging`，无安装、解析器联网或子进程。它按当前解释器的环境 marker 检查活跃声明和锁定项，接受合法版本范围及 extras 名称；只证明声明的基础包版本满足约束，不证明 extras/传递依赖完整、其他平台一致或下载哈希有效。直接 URL、非精确锁和冲突的活跃锁项会明确报错，不当作版本一致。现有哈希完整性测试和 `pip --require-hashes` 仍须保留。
+
+这些命令提供开发过程中的快速反馈，不替代现有 CI 的选择器、完整 scripts 回归、平台专属测试或发布前全验；本次没有改变任何 workflow 或门禁选择。涉及真正 Provider/VM 的验证仍按独立授权执行。
+
 ## 2026-10-02 集成来源与验收边界
 
 - 远端基线：`94f64e7fba10f4a013281d599e695c3d6da36208`，保留其 Git 历史。
