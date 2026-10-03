@@ -476,10 +476,37 @@ class RuntimeBaselineTests(unittest.TestCase):
         )
         for code, mutate in cases:
             with self.subTest(code=code):
-                events, diagnostic = self._run_baseline_capture(baseline_mutation=mutate,
+                def fail_before_prerequisites(value):
+                    mutate(value)
+                    value.update(distribution={'ID': 'ubuntu', 'VERSION_ID': '22.04'},
+                                 hard_missing=['RUNTIME_DISTRIBUTION_MISMATCH'])
+                events, diagnostic = self._run_baseline_capture(baseline_mutation=fail_before_prerequisites,
                     expected_failure='RUNTIME_BASELINE_' + code)
                 self.assertEqual(events, ['fixed-observer'])
                 self.assertIsNone(diagnostic)
+
+    def test_environment_mismatch_keeps_safe_diagnostics_in_both_runtime_modes(self):
+        cases = (
+            ('platform', 'win32'),
+            ('architecture', 'aarch64'),
+            ('distribution', {'ID': 'ubuntu', 'VERSION_ID': '22.04'}),
+            ('distribution', None),
+        )
+        for name, value in cases:
+            for baseline_only in (False, True):
+                with self.subTest(name=name, value=value, baseline_only=baseline_only):
+                    def mutate(observed):
+                        observed[name] = value
+                        if name == 'distribution':
+                            observed['hard_missing'] = ['RUNTIME_DISTRIBUTION_MISMATCH']
+                    events, diagnostic = self._run_baseline_capture(
+                        baseline_only=baseline_only, baseline_mutation=mutate,
+                        expected_failure='RUNTIME_BASELINE_HARD_PREREQUISITE_MISSING')
+                    self.assertEqual(events, ['fixed-observer'])
+                    self.assertEqual(diagnostic['environment_matches'], {
+                        field: field != name for field in ('platform', 'architecture', 'distribution')})
+                    if name == 'distribution':
+                        self.assertEqual(diagnostic['hard_missing'], ['RUNTIME_DISTRIBUTION_MISMATCH'])
 
     def test_real_baseline_consumer_and_native_fixture_must_finish_before_capture(self):
         self.assertEqual(self._run_baseline_capture(),
@@ -526,6 +553,8 @@ class RuntimeBaselineFailureDiagnosticTests(unittest.TestCase):
         value = baseline_fixture()
         value['hard_missing'] = ['DOCKER_SERVICE_INACTIVE', marker] * 40
         value['environment'] = {'TOKEN': marker}
+        value.update(platform=marker, architecture=marker,
+                     distribution={'ID': marker, 'VERSION_ID': marker})
         value['binding'] = {'private_path': marker}
         for tool in value['tools'].values():
             tool.update(path=marker, resolved_path=marker, sha256=marker)
@@ -547,6 +576,8 @@ class RuntimeBaselineFailureDiagnosticTests(unittest.TestCase):
         self.assertNotIn('binding', diagnostic)
         self.assertNotIn('baseline_digest', diagnostic)
         self.assertFalse(diagnostic['versions']['docker']['text_valid'])
+        self.assertEqual(diagnostic['environment_matches'], {
+            name: False for name in ('platform', 'architecture', 'distribution')})
 
     def test_malformed_fields_and_returncodes_cannot_replace_the_primary_failure(self):
         for value in (None, [], {'hard_missing': 'private'}, {
