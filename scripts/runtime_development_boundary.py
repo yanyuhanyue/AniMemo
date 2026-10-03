@@ -625,6 +625,12 @@ def observe_runtime_baseline_facts(*, expected, runner, timeout):
                                                     'docker_daemon': daemon})
 
 
+def _runtime_baseline_environment_matches(value):
+    return {'platform': value.get('platform') == 'linux',
+            'architecture': value.get('architecture') in ('x86_64', 'amd64'),
+            'distribution': value.get('distribution') == {'ID': 'ubuntu', 'VERSION_ID': '24.04'}}
+
+
 def runtime_baseline_failure_diagnostic(value):
     """Bounded, rejected observations only; no paths, raw output or authority."""
     value = value if type(value) is dict else {}
@@ -692,6 +698,7 @@ def runtime_baseline_failure_diagnostic(value):
         'schema': 'animemo.runtime-baseline-failure/v1',
         'failure_code': 'RUNTIME_BASELINE_HARD_PREREQUISITE_MISSING',
         'observation_accepted': False,
+        'environment_matches': _runtime_baseline_environment_matches(value),
         'hard_missing': [item for item in limited_missing if type(item) is str and item in codes],
         'hard_missing_unrecognized_or_limited': type(missing) is not list or len(missing) > 32
             or any(type(item) is not str or item not in codes for item in limited_missing),
@@ -733,11 +740,10 @@ def validate_runtime_baseline(value, *, expected_binding, now):
              and -5 <= now - value['observed_utc_seconds'] <= BASELINE_MAX_AGE_SECONDS,
              'RUNTIME_BASELINE_STALE')
     _require(type(value['uid']) is int and type(value['euid']) is int
-             and value['uid'] > 0 and value['euid'] > 0
-             and value['platform'] == 'linux' and value['architecture'] in ('x86_64', 'amd64')
-             and value['distribution'] == {'ID': 'ubuntu', 'VERSION_ID': '24.04'},
+             and value['uid'] > 0 and value['euid'] > 0,
              'RUNTIME_BASELINE_UNPRIVILEGED_REQUIRED')
-    _require(value['hard_missing'] == [] and value['docker_service_active'] is True,
+    _require(all(_runtime_baseline_environment_matches(value).values())
+             and value['hard_missing'] == [] and value['docker_service_active'] is True,
              'RUNTIME_BASELINE_HARD_PREREQUISITE_MISSING')
     tools = value['tools']
     _require(type(tools) is dict and set(tools) == {'python', 'docker', 'systemctl', 'compose',
