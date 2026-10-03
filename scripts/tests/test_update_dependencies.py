@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from packaging.markers import default_environment
+
 from scripts import update_dependencies
 
 
@@ -79,3 +81,52 @@ class DependencyLockTests(unittest.TestCase):
             marked.write_text('tzdata==2026.3 ; python_version >= "3"\n', encoding="utf-8")
             unmarked.write_text("tzdata==2026.3\n", encoding="utf-8")
             self.assertEqual(update_dependencies.normalized_lock(marked), update_dependencies.normalized_lock(unmarked))
+
+    def test_platform_markers_are_filtered_before_pin_deduplication(self):
+        lines = ['demo==1 ; sys_platform == "linux"\n', 'demo==2 ; sys_platform == "win32"\n']
+        with tempfile.TemporaryDirectory() as directory:
+            locked = Path(directory) / 'requirements.txt'
+            for platform, version in (('linux', '1'), ('win32', '2')):
+                environment = {**default_environment(), 'sys_platform': platform}
+                for ordered in (lines, list(reversed(lines))):
+                    with self.subTest(platform=platform, ordered=ordered), \
+                            patch('packaging.markers.default_environment', return_value=environment):
+                        locked.write_text(''.join(ordered), encoding='utf-8')
+                        self.assertEqual(update_dependencies.locked_versions(locked), {'demo': version})
+                        self.assertEqual(update_dependencies.normalized_lock(locked), f'demo demo=={version}\n')
+
+    def test_direct_constraints_ignore_only_inactive_platform_requirements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, locked = Path(directory) / 'requirements.in', Path(directory) / 'requirements.txt'
+            source.write_text('missing==1 ; sys_platform == "win32"\n', encoding='utf-8')
+            locked.write_text('other==1\n', encoding='utf-8')
+            for platform in ('linux', 'win32'):
+                with self.subTest(platform=platform), patch('packaging.markers.default_environment',
+                        return_value={**default_environment(), 'sys_platform': platform}):
+                    self.assertEqual(bool(update_dependencies.validate_direct_constraints(source, locked)),
+                                     platform == 'win32')
+
+    def test_conflicting_active_pins_fail_before_resolver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, locked = Path(directory) / 'requirements.in', Path(directory) / 'requirements.txt'
+            source.write_text('demo-pkg>=1\n', encoding='utf-8')
+            for platform in ('linux', 'win32'):
+                environment = {**default_environment(), 'sys_platform': platform}
+                lines = ['Demo_Pkg==1\n', f'demo.pkg==2 ; sys_platform == "{platform}"\n']
+                for ordered in (lines, list(reversed(lines))):
+                    with self.subTest(platform=platform, ordered=ordered), \
+                            patch('packaging.markers.default_environment', return_value=environment), \
+                            patch.object(update_dependencies, 'compile_lock') as compile_lock:
+                        locked.write_text(''.join(ordered), encoding='utf-8')
+                        with self.assertRaisesRegex(ValueError, 'conflicting active'):
+                            update_dependencies.normalized_lock(locked)
+                        self.assertEqual(update_dependencies.check(source, locked), 1)
+                        compile_lock.assert_not_called()
+
+    def test_equivalent_active_pins_and_normalized_names_remain_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, locked = Path(directory) / 'requirements.in', Path(directory) / 'requirements.txt'
+            source.write_text('demo.pkg>=1\n', encoding='utf-8')
+            locked.write_text('Demo_Pkg==1\ndemo-pkg==1 ; python_version >= "3"\n', encoding='utf-8')
+            self.assertEqual(update_dependencies.validate_direct_constraints(source, locked), [])
+            self.assertEqual(update_dependencies.normalized_lock(locked), 'demo-pkg demo-pkg==1\n')

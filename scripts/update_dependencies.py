@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 
@@ -28,7 +29,13 @@ def pinned_names(path: Path) -> dict[str, str]:
             continue
         match = _requirement.match(line)
         if match:
-            result[match.group(1).lower().replace("_", "-")] = line
+            requirement = Requirement(line)
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                continue
+            name = canonicalize_name(requirement.name)
+            if name in result and Requirement(result[name]).specifier != requirement.specifier:
+                raise ValueError(f"conflicting active dependency pins: {name}")
+            result[name] = line
     return result
 
 
@@ -54,8 +61,6 @@ def normalized_lock(path: Path) -> str:
     entries = {}
     for name, line in pinned_names(path).items():
         requirement = Requirement(line)
-        if requirement.marker is not None and not requirement.marker.evaluate():
-            continue
         entries[name] = f"{name}{requirement.specifier}"
     return "\n".join(
         f"{name} {line}"
@@ -80,7 +85,9 @@ def validate_direct_constraints(input_path: Path, lock_path: Path) -> list[str]:
         if not line or line.startswith("#"):
             continue
         requirement = Requirement(line)
-        locked = versions.get(requirement.name.lower().replace("_", "-"))
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            continue
+        locked = versions.get(canonicalize_name(requirement.name))
         if locked is None or not requirement.specifier.contains(Version(locked), prereleases=True):
             failures.append(f"{requirement.name} ({locked or '未锁定'}) 不满足 {requirement.specifier or '无版本约束'}")
     return failures
@@ -90,12 +97,12 @@ def check(input_path: Path = INPUT, lock_path: Path = LOCK) -> int:
     if not lock_path.exists():
         print(f"锁文件不存在：{lock_path}", file=sys.stderr)
         return 1
-    constraint_failures = validate_direct_constraints(input_path, lock_path)
-    if constraint_failures:
-        print("直接依赖约束与锁定版本不一致：")
-        print("\n".join(f"- {failure}" for failure in constraint_failures))
-        return 1
     try:
+        constraint_failures = validate_direct_constraints(input_path, lock_path)
+        if constraint_failures:
+            print("直接依赖约束与锁定版本不一致：")
+            print("\n".join(f"- {failure}" for failure in constraint_failures))
+            return 1
         with tempfile.TemporaryDirectory(prefix="animemo-lock-") as temporary:
             generated = Path(temporary) / lock_path.name
             generated.write_text(lock_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -115,7 +122,7 @@ def check(input_path: Path = INPUT, lock_path: Path = LOCK) -> int:
                         print(f"- 条目不一致：{expected_entries[name]} != {actual_entries[name]}")
                 print("请运行：python scripts/update_dependencies.py")
                 return 1
-    except (OSError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"依赖锁文件校验失败：{error}", file=sys.stderr)
         return 1
     print("依赖锁文件重新解析并比对通过。")
