@@ -3,11 +3,13 @@ from __future__ import annotations
 import base64
 import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,7 +33,97 @@ def _hashed_requirements(path: Path) -> list[str]:
     return logical
 
 
+def _lock_constraint_failures(declarations: Path, lock: Path, *, environment=None) -> list[str]:
+    """Check declared versions, not extra/transitive completeness or artifact hashes."""
+    def active(path):
+        for line in _hashed_requirements(path):
+            requirement = Requirement(re.sub(r"(?:\s+--hash=sha256:[0-9a-f]{64})+\s*$", "", line))
+            if requirement.marker and not requirement.marker.evaluate(environment):
+                continue
+            if requirement.url:
+                raise ValueError("version precheck does not support direct references")
+            yield requirement
+
+    pins = {}
+    for requirement in active(lock):
+        specs = tuple(requirement.specifier)
+        if len(specs) != 1 or specs[0].operator != "==" or "*" in specs[0].version:
+            raise ValueError("version precheck requires exact lock pins")
+        name = canonicalize_name(requirement.name)
+        version = Version(specs[0].version)
+        if name in pins and pins[name] != version:
+            raise ValueError("version precheck found conflicting active lock pins")
+        pins[name] = version
+    failures = []
+    for requirement in active(declarations):
+        version = pins.get(canonicalize_name(requirement.name))
+        if version is None or version not in requirement.specifier:
+            failures.append(f"{requirement.name}{requirement.specifier} -> locked {version}")
+    return failures
+
+
+class LockConstraintPrecheckTests(unittest.TestCase):
+    def test_dependency_pr_version_drift_is_rejected(self):
+        # Reproduce the declared/installed version pairs from PRs 264 and 265.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, declared, pinned in (('pyjwt', '2.15.0', '2.13.0'),
+                                           ('urllib3', '2.8.0', '2.7.0')):
+                with self.subTest(package=name):
+                    (root / 'requirements.txt').write_text(f'{name}=={declared}\n', encoding='utf-8')
+                    (root / 'requirements.lock').write_text(
+                        f'{name}=={pinned} \\\n    --hash=sha256:{"0" * 64}\n    # synthetic hash, not installable evidence\n', encoding='utf-8')
+                    self.assertEqual(_lock_constraint_failures(root / 'requirements.txt', root / 'requirements.lock'),
+                                     [f'{name}=={declared} -> locked {pinned}'])
+
+    def test_ranges_markers_extras_and_normalized_names(self):
+        cases = (
+            ('Demo_Pkg[feature]>=1,<2', 'demo.pkg==1.5', 'linux', False),
+            ('demo>=1,!=1.5,<2', 'demo==1.5', 'linux', True),
+            ('demo==1.*', 'demo==1.5', 'linux', False),
+            ('demo==1.0rc1', 'demo==1.0rc1', 'linux', False),
+            ('demo==1 ; sys_platform == "linux --hash=sha256:' + '0' * 64 + '"',
+             'demo==1', 'linux --hash=sha256:' + '0' * 64, False),
+            ('missing==1 ; sys_platform == "win32"', 'other==1', 'linux', False),
+            ('demo==1', 'demo==1 ; sys_platform == "win32"', 'linux', True),
+            ('demo==1 ; sys_platform == "linux"\ndemo==2 ; sys_platform == "win32"',
+             'demo==2 ; sys_platform == "win32"\ndemo==1 ; sys_platform == "linux"', 'linux', False),
+            ('demo==1 ; sys_platform == "linux"\ndemo==2 ; sys_platform == "win32"',
+             'demo==2 ; sys_platform == "win32"\ndemo==1 ; sys_platform == "linux"', 'win32', False),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for declared, pinned, platform, mismatch in cases:
+                with self.subTest(declared=declared, platform=platform):
+                    (root / 'requirements.txt').write_text(declared + '\n', encoding='utf-8')
+                    (root / 'requirements.lock').write_text(pinned + '\n', encoding='utf-8')
+                    failures = _lock_constraint_failures(root / 'requirements.txt', root / 'requirements.lock',
+                                                         environment={'sys_platform': platform})
+                    self.assertEqual(bool(failures), mismatch)
+
+    def test_unsupported_inputs_do_not_claim_version_agreement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for declared, pinned in (
+                ('demo @ https://example.test/demo.whl', 'demo==1'),
+                ('demo==1', 'demo>=1'),
+                ('demo==1', 'demo==1.*'),
+                ('demo>=1', 'demo==1\ndemo==2'),
+            ):
+                with self.subTest(declared=declared, pinned=pinned):
+                    (root / 'requirements.txt').write_text(declared, encoding='utf-8')
+                    (root / 'requirements.lock').write_text(pinned, encoding='utf-8')
+                    with self.assertRaises(ValueError):
+                        _lock_constraint_failures(root / 'requirements.txt', root / 'requirements.lock')
+
+
 class DependencySecurityContractTests(unittest.TestCase):
+    def test_declared_dependency_versions_match_hashed_install_locks(self) -> None:
+        for component in ('backend', 'release'):
+            with self.subTest(component=component):
+                self.assertEqual(_lock_constraint_failures(
+                    ROOT / component / 'requirements.txt', ROOT / component / 'requirements.lock'), [])
+
     def test_sqlparse_pin_excludes_known_vulnerable_release_line(self) -> None:
         requirements = (ROOT / "backend" / "requirements.txt").read_text(encoding="utf-8")
         pins = {
