@@ -14,4 +14,6 @@ $env:TEMP = Join-Path $localRoot 'tmp'
 $env:TMP = $env:TEMP
 $env:TMPDIR = $env:TEMP
 $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $localRoot 'cache/browsers'
-$env:DOCKER_CONFIG = Join-Path $localRoot 'cache/docker'
+# Preserve the host's Docker credentials and proxy defaults.
+$localGo = Join-Path $localRoot 'tools/go/bin'
+if (Test-Path (Join-Path $localGo 'go.exe')) { $env:PATH = "$localGo;$env:PATH" }

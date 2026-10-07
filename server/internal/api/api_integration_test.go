@@ -27,6 +27,15 @@ import (
 
 func isolatedDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	pool := isolatedSchema(t)
+	if err := database.Migrate(context.Background(), pool); err != nil {
+		t.Fatal(err)
+	}
+	return pool
+}
+
+func isolatedSchema(t *testing.T) *pgxpool.Pool {
+	t.Helper()
 	connection := os.Getenv("TEST_DATABASE_URL")
 	if connection == "" {
 		t.Fatal("TEST_DATABASE_URL is required for integration tests; run npm run test:api")
@@ -58,9 +67,6 @@ func isolatedDatabase(t *testing.T) *pgxpool.Pool {
 			t.Errorf("clean test schema: %v", err)
 		}
 	})
-	if err = database.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	return pool
 }
 

@@ -1,0 +1,9 @@
+# Optional build-time trust for a managed HTTPS proxy. Never copied into the image.
+services:
+  app:
+    build:
+      secrets:
+        - build_ca
+secrets:
+  build_ca:
+    file: ${ANIMEMO_BUILD_CA:?Set ANIMEMO_BUILD_CA to the proxy CA certificate or bundle}

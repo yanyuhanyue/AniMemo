@@ -1,0 +1,11 @@
+# Dedicated disposable database; no development bind mounts or fixed DB port.
+services:
+  db:
+    ports: !override []
+    volumes: !override
+      - smoke-data:/var/lib/postgresql/data
+  app:
+    ports: !override
+      - "127.0.0.1:${ANIMEMO_SMOKE_PORT:?Smoke runner assigns a free loopback port}:18081"
+volumes:
+  smoke-data:

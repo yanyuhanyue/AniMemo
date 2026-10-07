@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -10,6 +11,9 @@ import (
 )
 
 type Entry struct {
+	Source          *Source   `json:"source"`
+	Visibility      string    `json:"visibility"`
+	ShareSlug       string    `json:"share_slug"`
 	ID              string    `json:"id"`
 	Title           string    `json:"title"`
 	OriginalTitle   string    `json:"original_title"`
@@ -17,22 +21,26 @@ type Entry struct {
 	Status          string    `json:"status"`
 	TotalEpisodes   int       `json:"total_episodes"`
 	WatchedEpisodes int       `json:"watched_episodes"`
-	Score           *int      `json:"score"`
+	Score           *float64  `json:"score"`
 	Notes           string    `json:"notes"`
 	Tags            []string  `json:"tags"`
 	Accent          string    `json:"accent"`
+	Details         Details   `json:"details"`
+	CoverRevision   *string   `json:"cover_revision"`
 	Version         int       `json:"version"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type Create struct {
+	Visibility    string   `json:"visibility"`
+	Details       Details  `json:"details"`
 	Title         string   `json:"title"`
 	OriginalTitle string   `json:"original_title"`
 	Format        string   `json:"format"`
 	Status        string   `json:"status"`
 	TotalEpisodes int      `json:"total_episodes"`
-	Score         *int     `json:"score"`
+	Score         *float64 `json:"score"`
 	Notes         string   `json:"notes"`
 	Tags          []string `json:"tags"`
 	Accent        string   `json:"accent"`
@@ -41,19 +49,23 @@ type Create struct {
 // A patch always carries the version that was shown to the user.
 // Score=0 clears a score; absence leaves it unchanged.
 type Patch struct {
+	Visibility    *string   `json:"visibility"`
+	Details       *Details  `json:"details"`
 	Version       int       `json:"version"`
 	Title         *string   `json:"title"`
 	OriginalTitle *string   `json:"original_title"`
 	Format        *string   `json:"format"`
 	Status        *string   `json:"status"`
 	TotalEpisodes *int      `json:"total_episodes"`
-	Score         *int      `json:"score"`
+	Score         *float64  `json:"score"`
 	Notes         *string   `json:"notes"`
 	Tags          *[]string `json:"tags"`
 	Accent        *string   `json:"accent"`
 }
 
 type Record struct {
+	Rewatch     int       `json:"rewatch"`
+	Version     int       `json:"version"`
 	ID          string    `json:"id"`
 	EntryID     string    `json:"entry_id"`
 	EntryTitle  string    `json:"entry_title"`
@@ -67,6 +79,7 @@ type Record struct {
 }
 
 type RecordInput struct {
+	Rewatch     int    `json:"rewatch"`
 	WatchedOn   string `json:"watched_on"`
 	EpisodeFrom int    `json:"episode_from"`
 	EpisodeTo   int    `json:"episode_to"`
@@ -102,6 +115,17 @@ func ValidStatus(s string) bool {
 }
 
 func (e *Entry) Validate() error {
+	if e.Visibility == "" {
+		e.Visibility = "private"
+	}
+	if e.Visibility != "private" && e.Visibility != "unlisted" && e.Visibility != "public" {
+		return fault.Field("visibility", "可见性无效。")
+	}
+	for _, value := range append([]string{e.Title, e.OriginalTitle, e.Notes, e.Details.Studio, e.Details.AiringPeriod, e.Details.Description, e.Details.ReferenceURL}, e.Tags...) {
+		if strings.ContainsRune(value, 0) {
+			return fault.New("validation_error", "文字中不能包含空字节。")
+		}
+	}
 	e.Title, e.OriginalTitle = strings.TrimSpace(e.Title), strings.TrimSpace(e.OriginalTitle)
 	if n := utf8.RuneCountInString(e.Title); n < 1 || n > 160 {
 		return fault.Field("title", "番剧名称需要 1–160 个字。")
@@ -121,8 +145,8 @@ func (e *Entry) Validate() error {
 	if e.TotalEpisodes > 0 && e.WatchedEpisodes > e.TotalEpisodes {
 		return fault.Field("total_episodes", "总话数不能少于已经记录的观看进度。")
 	}
-	if e.Score != nil && (*e.Score < 1 || *e.Score > 10) {
-		return fault.Field("score", "评分需要在 1–10 之间。")
+	if e.Score != nil && (math.IsNaN(*e.Score) || math.IsInf(*e.Score, 0) || *e.Score < 1 || *e.Score > 10 || math.Abs(*e.Score*10-math.Round(*e.Score*10)) > 0.00001) {
+		return fault.Field("score", "评分需要在 1–10 之间，最多一位小数。")
 	}
 	if utf8.RuneCountInString(e.Notes) > 4000 {
 		return fault.Field("notes", "短评不能超过 4000 个字。")
@@ -149,10 +173,19 @@ func (e *Entry) Validate() error {
 		return fault.Field("tags", "每部番剧最多添加 8 个标签。")
 	}
 	e.Tags = tags
-	return nil
+	return e.Details.Validate()
 }
 
 func (r *RecordInput) Validate() error {
+	if strings.ContainsRune(r.Note, 0) {
+		return fault.Field("note", "观看笔记中不能包含空字节。")
+	}
+	if r.Rewatch == 0 {
+		r.Rewatch = 1
+	}
+	if r.Rewatch < 1 || r.Rewatch > 1000 {
+		return fault.Field("rewatch", "重看次数需要在 1–1000 之间。")
+	}
 	date, err := time.Parse("2006-01-02", r.WatchedOn)
 	if err != nil || date.Year() < 1900 || date.Year() > 2100 {
 		return fault.Field("watched_on", "请输入有效的观看日期。")

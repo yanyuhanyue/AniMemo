@@ -12,7 +12,10 @@ for (const file of files('server')) {
   if (!file.endsWith('.go')) continue;
   const source = readFileSync(file, 'utf8');
   if (/(?:animemo\.local\/server\/(?:tooling|release|deploy)|exec\.Command.*(?:docker|git|npm))/.test(source)) violations.push(`${file}: application runtime depends on delivery tooling`);
-  if (file.includes(`${path.sep}journal${path.sep}`) && /"animemo\.local\/server\/internal\/(accounts|api)"/.test(source)) violations.push(`${file}: journal imports a transport or authentication module`);
+  if (file.includes(`${path.sep}journal${path.sep}`) && /"animemo\.local\/server\/internal\/(accounts|api|plugins)"/.test(source)) violations.push(`${file}: journal imports a transport or authentication module`);
+}
+for (const file of [...files('server/pkg/pluginproto'), ...files('server/examples')]) {
+  if (file.endsWith('.go') && /"animemo\.local\/server\/internal\//.test(readFileSync(file, 'utf8'))) violations.push(`${file}: plugin SDK/consumer imports host internals`);
 }
 for (const file of files('web/src')) {
   if (/\.(exe|zip|log|png)$/.test(file)) violations.push(`${file}: generated artifact in source tree`);

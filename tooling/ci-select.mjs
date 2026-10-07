@@ -8,6 +8,7 @@ export function selectChecks(paths) {
   for (const path of paths) {
     if (/^(docs\/|README\.md$|LICENSE$|NOTICE$)/.test(path)) continue;
     if (/^(web\/|package(-lock)?\.json$|tsconfig\.json$|\.npmrc$)/.test(path)) web = true;
+    else if (path.startsWith('server/internal/apicontract/')) { web = true; api = true; }
     else if (path.startsWith('server/')) api = true;
     else { web = true; api = true; }
   }

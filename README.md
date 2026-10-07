@@ -1,16 +1,16 @@
 # AniMemo
 
-一个以 Go、TypeScript 和 PostgreSQL 构建的私人番剧手账。
+使用 Go、TypeScript 和 PostgreSQL 构建的番剧手账。按全新项目开发，不要求兼容旧版数据和接口。
 
-当前完成第一阶段：账号注册 / 登录 / 登出、番剧新增 / 编辑 / 删除、标签与评分、搜索筛选与排序、观看记录、进度统计、个人 JSON 导出，以及桌面和移动端界面。
+当前已实现个人手账、观看与重看记录、资料与小数评分、批量管理、标签颜色和筛选、账号偏好与两步验证、持久导入任务、含图片备份、公开分享、专栏及审核、管理后台和独立实例运维。新增受限插件文件转换、TXT 观看记录导入及管理员本地包管理。原项目对照、验收口径及未完成项见 [功能清单](docs/feature-parity.md)，不要把这份功能概览当作所有外部集成均已完成。
 
-项目源码沿用 [PolyForm Noncommercial 1.0.0](LICENSE)，适用范围见 [NOTICE](NOTICE)。
+源码沿用 [PolyForm Noncommercial 1.0.0](LICENSE)，适用范围见 [NOTICE](NOTICE)。
+
+本地接手已补齐 Bangumi 资料搜索 / 绑定 / 刷新、邮件验证与找回、OAuth 收藏同步、R2 图片迁移及媒体备份。Bangumi 公共 API 已真实验证；邮件、OAuth、R2 已通过受控协议和页面测试，正式联调还缺服务凭据。配置与验证边界见 [外部服务接入](docs/local-network-handoff.md)。
 
 ## 开发环境
 
-推荐 Linux + Docker Engine。需要 Node.js 24.12+、Go 1.26.6+ 和 npm。
-
-在项目根目录运行：
+推荐 Linux + Docker Engine。需要 Node.js 24.12+、Go 1.26.6+ 和 npm；容器验收需要 Docker Compose 2.24.4+。
 
 ```sh
 . ./tooling/env.sh
@@ -19,85 +19,70 @@ npm run db:start
 npm run dev
 ```
 
-- 页面：`http://127.0.0.1:5177`
-- API：`http://127.0.0.1:18081`
-- PostgreSQL：`127.0.0.1:55432`
+- Vite 页面：`http://127.0.0.1:5177`
+- Go API：`http://127.0.0.1:18081`
+- 开发 PostgreSQL：`127.0.0.1:55432`
 
-在页面创建自己的账号。应用不会生成默认用户或自动插入示例番剧。停止前后端用 `Ctrl+C`；停止本项目的开发数据库用 `npm run db:stop`。停止数据库保留数据。
+`Ctrl+C` 停止前后端；`npm run db:stop` 停止开发数据库并保留数据。`db:start` 自动生成随机开发数据库密码，保存在忽略的 `.local/config.json`，数据在 `.local/data/compose-postgres`。使用 `DATABASE_URL` 时请指向专用开发数据库；应用启动会应用自身迁移。
 
-`db:start` 使用 `deploy/compose.yaml` 启动 PostgreSQL，随机生成开发数据库密码并保存在忽略的 `.local/config.json` 中。数据绑定到 `.local/data/compose-postgres`。如果已有开发数据库，可通过 `DATABASE_URL` 指定；项目不会创建或重置外部数据库，但应用启动会应用自身迁移，因此请使用专用开发数据库。
+工具自动识别 `.local/tools/go/bin/go`（Windows 为 `go.exe`），也可设置 `ANIMEMO_GO`。Windows PowerShell 先执行 `. ./tooling/env.ps1`；推荐 Docker Desktop 的 Linux 容器或 WSL，避免原生 PostgreSQL 在非 ASCII 路径下的初始化限制。
 
-支持通过 `ANIMEMO_GO` 指向已有 Go 可执行文件。Windows 中可先执行 `. ./tooling/env.ps1`，使手动命令的临时文件和包缓存也落在项目内。可选的本地 PostgreSQL 工具路径为 `.local/tools/pgsql/bin` 或 `ANIMEMO_PG_BIN`；Windows 原生 PostgreSQL 的非 ASCII 安装路径存在初始化限制，优先使用 Linux / Docker。
-
-## 常用检查
-
-```sh
-npm run check:web    # 生成式 API 类型一致性 + TypeScript
-npm run check:api    # Go vet + 依赖方向检查
-npm test            # Go 业务规则 + 前端账号切换 + CI 选择测试
-npm run test:api     # 真实 PostgreSQL HTTP、隔离、并发与迁移测试
-npm run build       # 前端产物与 Go 可执行文件
-```
-
-`npm run check` 同时执行前后端静态检查。数据库集成测试只在指定开发数据库中创建随机 `test_*` schema，结束时删除该 schema；不会清空开发账号和番剧。
-
-独立测试单个模块：
-
-```sh
-go -C server test ./internal/journal
-node --test web/tests/session.test.mjs
-```
-
-改 API 后运行 `npm run contracts`。完整 HTTP 合同在 `contracts/openapi.json`；生成的前端类型位于 `web/src/api/schema.d.ts`。
-
-## 容器运行
-
-先执行 `npm run db:start` 创建本地开发配置，再执行：
+## 容器与首次管理初始化
 
 ```sh
 npm run containers
 ```
 
-页面和 API 同源运行在 `http://127.0.0.1:18081`。默认端口只绑定回环地址。设置 `PUBLIC_ORIGIN` 可以指定外部访问的 HTTPS 来源；非回环 HTTP 来源会被拒绝。容器中的应用使用非 root 用户、只读根文件系统、无额外 Linux capabilities。
+开发容器页面和 API 同源为 `http://127.0.0.1:18081`。默认仅绑定回环地址；设置 `PUBLIC_ORIGIN` 时使用准确的 HTTPS 来源，不带路径。非回环 HTTP 会被拒绝。应用使用非 root 用户、只读根文件系统和无额外 capabilities。
 
-容器镜像和完整 Linux 启动仍需在有 Docker Engine 的环境中实际验收；本地编译、真实数据库测试或 `docker compose config` 不代表镜像已经构建成功。
+开发脚本自动生成并持久保留 `.local/config.json` 中的 `setupToken` 和 `secretKey`，分别用于首次管理员初始化和两步验证密钥加密。在本地查看初始化口令，打开 `/setup` 创建管理员；不要把配置内容发到聊天或提交 Git。普通注册不会自动获得管理员权限。正式或多个独立实例使用以下运维入口：
 
-## 文件分类
-
-```text
-server/       Go 应用、业务模块、数据库迁移与测试
-web/          React / TypeScript 界面、生成式 API 类型与前端测试
-contracts/    OpenAPI 源合同
-tooling/      开发命令、CI 选择与目录检查
-deploy/       Dockerfile 和 Compose
-docs/         架构、开发说明和阶段验收记录
-.github/      CI 工作流
-.local/       全部本地产物（不提交、不进入源码交接包）
-  bin/        编译后的程序
-  cache/      npm / Go / Vite / 浏览器缓存
-  data/       本地数据库
-  tools/      本工作区使用的辅助工具
-  logs/       运行日志
-  output/     构建产物、测试结果、截图、交接包
-  tmp/        临时文件
+```sh
+npm run instance -- install --name home --image animemo-next-app --port 18082
+npm run instance -- setup-code --name home
+npm run instance -- status --name home
 ```
 
-`node_modules/` 是 npm 管理的依赖目录，已忽略。源码包不包含本地配置、数据库、浏览器会话或下载的工具链。
+备份、迁移、更新和回滚的完整步骤见 [实例运维](docs/instance-operations.md)。镜像使用本地不可变 ID，更新在数据库副本上执行迁移，失败自动恢复旧应用；显式回滚前保存更新后数据的 rescue 备份。
 
-## 当前产品规则
+## 直接在开发中验收
 
-- 番剧和观看记录仅属于当前账号，不存在匿名公开入口。
-- 登录使用 HttpOnly、SameSite=Lax Cookie；HTTPS 来源启用 Secure。写操作校验 Origin。
-- 编辑提交已读取的版本号。记录被其他请求修改后返回 409，用户重新打开后再编辑。
-- 观看记录以请求 ID 防重复提交；同一 ID 携带不同内容会被拒绝。
-- 观看进度为已经记录的最远话数，重看不会倒退。总话数为 0 表示未知；标记看完且总话数已知时，进度更新到总话数。
-- 观看日期保留用户选择的日历日期，创建和修改时间另存 UTC 时间戳。
-- 最近观看界面最多显示 100 条；JSON 导出包含该账号的完整记录，上限为 5000 部番剧 / 20000 条观看记录。
+```sh
+npm run check:web        # 合同生成一致性 + TypeScript
+npm run check:api        # Go vet + 模块依赖检查
+npm test                # Go 单元与 Node 回归
+npm run test:api         # 真实 PostgreSQL 集成，使用隔离 schema
+npm run verify          # 静态检查 + Node + Go 单元/集成 -race
+npm run test:containers # 隔离镜像/容器业务、持久任务与重建留存
+npm run test:instance   # 隔离实例安装、备份还原、更新回滚与故障恢复
+npm run build           # Web 与 Go 构建产物
+npm run plugin:example  # 构建 TXT 示例 WASI 插件包
+npm run test:plugins    # 真实沙箱、权限、插件导入与兼容回归
+```
 
-## 后续阶段
+日常只运行受影响检查；集成或部署改动补真实容器验收，不必等提交后才在 GitHub CI 定位问题。`verify` 已合并 Go 单元和集成测试，不必再重复跑所有 Go 测试。Go race 需要兼容的 C 编译器。可传入目标用例，例如 `npm run test:api -- -run TestPublicSharing -race`。
 
-下一阶段是媒体、外部资料、导入和真实长任务。独立 Worker 在第一个长任务接入时实现。实例备份恢复、Go Agent、插件隔离和发行验收属于后续独立交付。
+数据库测试创建随机 `test_*` schema 并清理；容器和实例验收用独立随机项目、端口和数据卷，结束时清理自己的资源。实际结果见 [验收记录](docs/verification.md)。没有执行远程 GitHub CI 的情况下，不把本地结果表述为远程通过。
 
-当前账号功能尚不包含邮箱验证、找回密码或管理后台；个人 JSON 导出不是实例备份。此阶段供开发和功能验证使用。
+修改 API 后执行 `npm run contracts`，同时生成 Web 类型和服务端内嵌合同。运行中的合同为 `/api/v1/openapi.json`；认证、错误、分页、导入和公开规则见 [API 约定](docs/api.md)。
 
-云端交接见 [docs/cloud-development.md](docs/cloud-development.md)，模块设计见 [docs/architecture.md](docs/architecture.md)。
+## 产品规则
+
+- 新条目默认私密。可改为持链接可见或公开，并在账号设置显式启用分享。公开手账需管理员审核；关闭分享会使条目链接及媒体读取立即失效。私人观看日期和逐次观看笔记不进入公开投影。
+- 修改和删除携带版本；并发修改冲突返回 409。批量状态、标签、可见性变更整体提交，任一条目失败则整体回滚。
+- 观看 POST 使用 request_id 防重复；支持重看、记录修改 / 删除、日期筛选和分页。进度按最远已记录话数计算，修改历史后重新计算。日期保留用户的日历日期，时间戳为 UTC。
+- 手账封面每张最多 2 MiB，最长边 8192、总像素 1200 万，每账号合计最多 100 MiB；专栏封面另限 20 MiB，头像最多 2 MiB。原图保存在 PostgreSQL，可能包含上传文件自带的元数据。旧图片修订地址失效，公开读取同样检查当前权限。
+- CSV / 新项目 JSON / ZIP 先校验预览，确认后原子导入；按规范化名称跳过重复，不覆盖旧条目。任务可跨刷新和进程重启恢复，预览 24 小时有效，导入结果统一私密。
+- JSON 导出不含图片；个人 ZIP 包含番剧、观看记录与封面，但不包含账号设置、专栏或实例凭据。整个实例备份使用独立运维命令。
+- 专栏以纯文本保留分段，支持关联番剧和封面。修改公开文章会变为草稿，投稿后审核公开；撤回立即停止公开。管理员回收站恢复的条目先变私密，文章先变草稿。
+- 启用两步验证后，登录需要 TOTP 或一次性恢复码。密码、两步验证或角色变更会撤销相关会话。实例加密密钥必须与数据库一起备份。
+
+## 文件与环境
+
+源码位于 `server/`、`web/`、`contracts/`、`tooling/`、`deploy/` 和 `docs/`。缓存、数据库、编译结果、日志、截图、备份及临时文件均在 `.local/`；`node_modules/` 由 npm 管理并忽略。
+
+Docker 沿用宿主代理与认证配置。托管云端识别 `CODEX_PROXY_CERT`；也可设置 `ANIMEMO_BUILD_CA`。构建通过临时 secret 挂载 CA，保留 TLS 校验，最终镜像不包含会话 CA。不要替换全局 Docker 配置或存储驱动。
+
+邮箱验证 / 找回、Bangumi、外部授权与同步、R2 尚未完成，具体原因及 Windows 本地实施验收步骤见 [网络受限交接](docs/local-network-handoff.md)。插件第一阶段的使用与边界见 [插件说明](docs/plugins.md)；完整 SDK 扩展、独立 OS 隔离、市场 / 投稿审核和 Bridge 仍待开发。
+
+其他说明：[云端环境](docs/cloud-development.md) · [模块架构](docs/architecture.md) · [功能对照 JSON](docs/feature-parity.json) · [后续功能与架构顺序](docs/refactor-next-steps.md)。

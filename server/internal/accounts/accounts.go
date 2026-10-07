@@ -2,17 +2,21 @@ package accounts
 
 import (
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"net/mail"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"animemo.local/server/internal/fault"
 	"animemo.local/server/internal/id"
+	"animemo.local/server/internal/mailer"
+	"animemo.local/server/internal/mediastore"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,9 +27,22 @@ const SessionLifetime = 14 * 24 * time.Hour
 const passwordCost = 12
 
 type User struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	DisplayName string `json:"display_name"`
+	EmailVerified             bool    `json:"email_verified"`
+	EmailVerificationRequired bool    `json:"email_verification_required"`
+	OTPEnabled                bool    `json:"otp_enabled"`
+	ID                        string  `json:"id"`
+	Email                     string  `json:"email"`
+	DisplayName               string  `json:"display_name"`
+	Bio                       string  `json:"bio"`
+	Accent                    string  `json:"accent"`
+	DefaultView               string  `json:"default_view"`
+	Version                   int     `json:"version"`
+	IsAdmin                   bool    `json:"is_admin"`
+	AvatarRevision            *string `json:"avatar_revision"`
+	SharingEnabled            bool    `json:"sharing_enabled"`
+	PublicSlug                string  `json:"public_slug"`
+	PublicState               string  `json:"public_state"`
+	PublicReason              string  `json:"public_reason"`
 }
 
 type Registration struct {
@@ -35,6 +52,7 @@ type Registration struct {
 }
 
 type Credentials struct {
+	Code     string `json:"code,omitempty"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
@@ -46,17 +64,37 @@ type Session struct {
 }
 
 type Service struct {
-	pool      *pgxpool.Pool
-	dummyHash []byte
+	storage    *mediastore.Store
+	pool       *pgxpool.Pool
+	dummyHash  []byte
+	encryption cipher.AEAD
+	mailer     *mailer.Client
+	mailOrigin string
 }
 
-func New(pool *pgxpool.Pool) *Service {
-	// An unknown email follows the same expensive password check as an existing one.
+var sharedDummyHash = sync.OnceValue(func() []byte {
 	dummy, err := bcrypt.GenerateFromPassword([]byte(id.New()), passwordCost)
 	if err != nil {
 		panic(err)
 	}
-	return &Service{pool: pool, dummyHash: dummy}
+	return dummy
+})
+
+func New(pool *pgxpool.Pool) *Service {
+	return &Service{pool: pool, dummyHash: sharedDummyHash(), storage: mediastore.New(pool, nil)}
+}
+func (s *Service) ConfigureStorage(storage *mediastore.Store) { s.storage = storage }
+
+const userColumns = `users.id,users.email,users.display_name,users.bio,users.accent,users.default_view,users.version,users.is_admin,(SELECT revision FROM avatars WHERE user_id=users.id),users.sharing_enabled,users.public_slug,users.public_state,users.public_reason,(users.otp_secret IS NOT NULL),(users.email_verified_at IS NOT NULL),users.email_verification_required`
+
+func scanUser(row pgx.Row, extra ...any) (User, error) {
+	var u User
+	args := []any{&u.ID, &u.Email, &u.DisplayName, &u.Bio, &u.Accent, &u.DefaultView, &u.Version, &u.IsAdmin, &u.AvatarRevision, &u.SharingEnabled, &u.PublicSlug, &u.PublicState, &u.PublicReason, &u.OTPEnabled, &u.EmailVerified, &u.EmailVerificationRequired}
+	err := row.Scan(append(args, extra...)...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, fault.New("unauthorized", "登录已过期，请重新登录。")
+	}
+	return u, err
 }
 
 func (r *Registration) Validate() error {
@@ -66,7 +104,7 @@ func (r *Registration) Validate() error {
 	if err != nil || address.Address != r.Email || len(r.Email) > 254 {
 		return fault.Field("email", "请输入有效的邮箱地址。")
 	}
-	if n := utf8.RuneCountInString(r.DisplayName); n < 1 || n > 32 {
+	if n := utf8.RuneCountInString(r.DisplayName); n < 1 || n > 32 || strings.ContainsRune(r.DisplayName, 0) {
 		return fault.Field("display_name", "昵称需要 1–32 个字。")
 	}
 	if utf8.RuneCountInString(r.Password) < 12 || len(r.Password) > 72 {
@@ -76,6 +114,11 @@ func (r *Registration) Validate() error {
 }
 
 func (s *Service) Register(ctx context.Context, input Registration) (Session, error) {
+	// With verified registration, the mailbox owner chooses a password on the
+	// verification page. A pre-registration cannot reserve an attacker-known password.
+	if s.mailer != nil {
+		input.Password = id.New()
+	}
 	if err := input.Validate(); err != nil {
 		return Session{}, err
 	}
@@ -88,14 +131,30 @@ func (s *Service) Register(ctx context.Context, input Registration) (Session, er
 		return Session{}, err
 	}
 	defer tx.Rollback(context.Background())
+	var registrationOpen bool
+	if err = tx.QueryRow(ctx, `SELECT registration_open FROM site_settings FOR SHARE`).Scan(&registrationOpen); err != nil {
+		return Session{}, err
+	}
+	if !registrationOpen {
+		return Session{}, fault.New("forbidden", "本站暂时关闭注册。")
+	}
 	user := User{ID: id.New(), Email: input.Email, DisplayName: input.DisplayName}
-	_, err = tx.Exec(ctx, `INSERT INTO users (id,email,display_name,password_hash) VALUES ($1,$2,$3,$4)`, user.ID, user.Email, user.DisplayName, string(hash))
+	user, err = scanUser(tx.QueryRow(ctx, `INSERT INTO users (id,email,display_name,password_hash,email_verification_required) VALUES ($1,$2,$3,$4,$5) RETURNING `+userColumns, user.ID, user.Email, user.DisplayName, string(hash), s.mailer != nil))
 	var pgerr *pgconn.PgError
 	if errors.As(err, &pgerr) && pgerr.Code == "23505" {
+		if s.mailer != nil {
+			return Session{}, nil
+		}
 		return Session{}, fault.New("email_taken", "这个邮箱已经注册，请直接登录。")
 	}
 	if err != nil {
 		return Session{}, err
+	}
+	if s.mailer != nil {
+		if err = s.queueEmail(ctx, tx, user, "verify"); err != nil {
+			return Session{}, err
+		}
+		return Session{User: user}, tx.Commit(ctx)
 	}
 	session, err := createSession(ctx, tx, user)
 	if err != nil {
@@ -109,9 +168,8 @@ func (s *Service) Register(ctx context.Context, input Registration) (Session, er
 
 func (s *Service) Login(ctx context.Context, input Credentials) (Session, error) {
 	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
-	var user User
 	var hash string
-	err := s.pool.QueryRow(ctx, `SELECT id,email,display_name,password_hash FROM users WHERE email=$1`, input.Email).Scan(&user.ID, &user.Email, &user.DisplayName, &hash)
+	err := s.pool.QueryRow(ctx, `SELECT password_hash FROM users WHERE email=$1 AND NOT disabled`, input.Email).Scan(&hash)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, err
 	}
@@ -128,6 +186,22 @@ func (s *Service) Login(ctx context.Context, input Credentials) (Session, error)
 		return Session{}, err
 	}
 	defer tx.Rollback(context.Background())
+	// Recheck the verified credential under the same row lock used by password
+	// changes and account disabling, so a racing login cannot revive a revoked session.
+	var currentHash string
+	user, err := scanUser(tx.QueryRow(ctx, `SELECT `+userColumns+`,password_hash FROM users WHERE email=$1 AND NOT disabled FOR UPDATE`, input.Email), &currentHash)
+	if err != nil {
+		return Session{}, err
+	}
+	if currentHash != hash {
+		return Session{}, fault.New("invalid_credentials", "账号凭据已更新，请重新登录。")
+	}
+	if user.EmailVerificationRequired && !user.EmailVerified {
+		return Session{}, fault.New("email_verification_required", "请先通过验证邮件设置密码，再登录。")
+	}
+	if err = s.verifySecondFactor(ctx, tx, user.ID, input.Code); err != nil {
+		return Session{}, err
+	}
 	// Keep expired sessions from accumulating without a separate maintenance worker.
 	if _, err = tx.Exec(ctx, `DELETE FROM sessions WHERE user_id=$1 AND expires_at <= now()`, user.ID); err != nil {
 		return Session{}, err
@@ -162,8 +236,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (User, error) 
 		return User{}, fault.New("unauthorized", "请先登录。")
 	}
 	hash := sha256.Sum256([]byte(token))
-	var user User
-	err := s.pool.QueryRow(ctx, `SELECT u.id,u.email,u.display_name FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=$1 AND s.expires_at > now()`, hash[:]).Scan(&user.ID, &user.Email, &user.DisplayName)
+	user, err := scanUser(s.pool.QueryRow(ctx, `SELECT `+userColumns+` FROM users JOIN sessions s ON s.user_id=users.id WHERE s.token_hash=$1 AND s.expires_at > now() AND NOT users.disabled`, hash[:]))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, fault.New("unauthorized", "登录已过期，请重新登录。")
 	}

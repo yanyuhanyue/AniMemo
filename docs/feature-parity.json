@@ -1,0 +1,647 @@
+{
+  "baseline_commit": "94f64e7",
+  "target_percent": 80,
+  "counting": "Each end-to-end capability counts once; partial, blocked, backend-only and mock-only work count zero. Target is at least 50 of 62 capabilities. This measures functional breadth, not equal implementation effort or production certification.",
+  "features": [
+    {
+      "id": "F01",
+      "feature": "注册账号",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F02",
+      "feature": "登录与退出当前会话",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F03",
+      "feature": "注册邮箱验证",
+      "legacy": "backend/journal/urls.py",
+      "status": "implemented-awaiting-credentials",
+      "evidence": [
+        "docs/local-network-handoff.md",
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F04",
+      "feature": "忘记与重置密码",
+      "legacy": "backend/journal/urls.py",
+      "status": "implemented-awaiting-credentials",
+      "evidence": [
+        "docs/local-network-handoff.md",
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F05",
+      "feature": "修改密码",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F06",
+      "feature": "退出所有设备",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F07",
+      "feature": "注销账号",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F08",
+      "feature": "管理账号两步验证与恢复码",
+      "legacy": "backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/security_integration_test.go",
+        ".local/output/browser/security-report.json"
+      ]
+    },
+    {
+      "id": "F09",
+      "feature": "手账新增、编辑、删除",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F10",
+      "feature": "原名、简介、制作公司和播出资料",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F11",
+      "feature": "个人小数评分",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F12",
+      "feature": "观看状态与话数进度",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F13",
+      "feature": "自定义标签与颜色",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F14",
+      "feature": "搜索、筛选、排序与分页",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F15",
+      "feature": "保存快捷筛选",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F16",
+      "feature": "批量修改状态、标签和可见性",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F17",
+      "feature": "海报卡片、列表与移动布局",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F18",
+      "feature": "封面上传、替换和移除",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F19",
+      "feature": "记录观看与重看标记",
+      "legacy": "backend/journal/watch_history/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F20",
+      "feature": "编辑、删除观看记录",
+      "legacy": "backend/journal/watch_history/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F21",
+      "feature": "观看历史检索与日期范围",
+      "legacy": "backend/journal/watch_history/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F22",
+      "feature": "手账汇总统计",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F23",
+      "feature": "时间范围统计与月度分布",
+      "legacy": "backend/journal/analytics/services.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F24",
+      "feature": "个人昵称与简介",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F25",
+      "feature": "个人头像",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F26",
+      "feature": "默认视图与强调色偏好",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/foundation_integration_test.go",
+        ".local/output/browser/foundation-report.json"
+      ]
+    },
+    {
+      "id": "F27",
+      "feature": "私人、链接可见、公开记录",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F28",
+      "feature": "单条分享与撤销",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F29",
+      "feature": "个人公开手账",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F30",
+      "feature": "公开手账目录",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F31",
+      "feature": "公开目录搜索与筛选",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F32",
+      "feature": "专栏草稿编辑和删除",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F33",
+      "feature": "专栏关联番剧与封面",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F34",
+      "feature": "专栏投稿和撤稿",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F35",
+      "feature": "专栏审核、精选和下架",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F36",
+      "feature": "CSV 导入预览与去重",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F37",
+      "feature": "新项目 JSON 数据导入",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json",
+        ".local/output/browser/json-import-report.json"
+      ]
+    },
+    {
+      "id": "F38",
+      "feature": "个人 JSON 导出",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F39",
+      "feature": "大数据包校验、恢复与取消",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F40",
+      "feature": "包含媒体的数据备份恢复",
+      "legacy": "backend/journal/urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F41",
+      "feature": "外部资料搜索与详情",
+      "legacy": "backend/journal/external_media/urls.py; backend/journal/external_accounts/urls.py; backend/journal/external_sync/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/local-network-handoff.md",
+        "docs/verification.md",
+        "server/internal/api/live_source_integration_test.go"
+      ]
+    },
+    {
+      "id": "F42",
+      "feature": "外部条目标识绑定与刷新",
+      "legacy": "backend/journal/external_media/urls.py; backend/journal/external_accounts/urls.py; backend/journal/external_sync/urls.py",
+      "status": "complete",
+      "evidence": [
+        "docs/local-network-handoff.md",
+        "docs/verification.md",
+        "server/internal/api/live_source_integration_test.go"
+      ]
+    },
+    {
+      "id": "F43",
+      "feature": "外部账号授权、验证和断开",
+      "legacy": "backend/journal/external_media/urls.py; backend/journal/external_accounts/urls.py; backend/journal/external_sync/urls.py",
+      "status": "implemented-awaiting-credentials",
+      "evidence": [
+        "docs/local-network-handoff.md",
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F44",
+      "feature": "外部收藏预览与导入",
+      "legacy": "backend/journal/external_media/urls.py; backend/journal/external_accounts/urls.py; backend/journal/external_sync/urls.py",
+      "status": "implemented-awaiting-credentials",
+      "evidence": [
+        "docs/local-network-handoff.md",
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F45",
+      "feature": "外部收藏双向同步及冲突",
+      "legacy": "backend/journal/external_media/urls.py; backend/journal/external_accounts/urls.py; backend/journal/external_sync/urls.py",
+      "status": "implemented-awaiting-credentials",
+      "evidence": [
+        "docs/local-network-handoff.md",
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F46",
+      "feature": "首次管理员初始化",
+      "legacy": "backend/site_config/urls.py; backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F47",
+      "feature": "用户权限、停用与会话撤销",
+      "legacy": "backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F48",
+      "feature": "管理资源、回收站与恢复",
+      "legacy": "backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F49",
+      "feature": "管理标签预设",
+      "legacy": "backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/security_integration_test.go",
+        ".local/output/browser/security-report.json"
+      ]
+    },
+    {
+      "id": "F50",
+      "feature": "站点信息和服务配置",
+      "legacy": "backend/site_config/urls.py; backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        ".local/output/browser/security-report.json",
+        "tooling/instance.mjs",
+        "docs/instance-operations.md"
+      ],
+      "scope_note": "站点名称、简介、注册开关由管理 UI 配置；来源、端口、数据库、镜像及持久实例密钥由独立实例 CLI 管理。尚未实现的邮件、OAuth 与对象存储配置随 F03/F04/F43/F52 跟踪。"
+    },
+    {
+      "id": "F51",
+      "feature": "管理审计记录",
+      "legacy": "backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/publication_integration_test.go",
+        "server/internal/api/imports_integration_test.go",
+        ".local/output/browser/publication-report.json"
+      ]
+    },
+    {
+      "id": "F52",
+      "feature": "媒体容量监控与存储后端管理",
+      "legacy": "backend/journal/staff_urls.py",
+      "status": "implemented-awaiting-credentials",
+      "evidence": [
+        "docs/local-network-handoff.md",
+        "docs/verification.md"
+      ],
+      "scope_note": "PostgreSQL 媒体与容量监控已实现并验收；外部存储适配、后端切换与实联未完成。"
+    },
+    {
+      "id": "F53",
+      "feature": "系统健康与维护",
+      "legacy": "backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "server/internal/api/security_integration_test.go",
+        ".local/output/browser/security-report.json"
+      ]
+    },
+    {
+      "id": "F54",
+      "feature": "实例数据库备份恢复",
+      "legacy": "backend/journal/staff_urls.py",
+      "status": "complete",
+      "evidence": [
+        "tooling/instance-smoke.mjs",
+        ".local/output/instance-smoke.json"
+      ]
+    },
+    {
+      "id": "F55",
+      "feature": "新实例安装与迁移到新实例",
+      "legacy": "README.md; installer/; updater/",
+      "status": "complete",
+      "evidence": [
+        "tooling/instance-smoke.mjs",
+        ".local/output/instance-smoke.json"
+      ]
+    },
+    {
+      "id": "F56",
+      "feature": "版本更新和回滚",
+      "legacy": "README.md; installer/; updater/",
+      "status": "complete",
+      "evidence": [
+        "tooling/instance-smoke.mjs",
+        ".local/output/instance-smoke.json"
+      ]
+    },
+    {
+      "id": "F57",
+      "feature": "插件 SDK 与隔离运行",
+      "legacy": "backend/plugin_host/urls.py; plugins/README.md",
+      "status": "partial",
+      "evidence": [
+        "server/internal/plugins/runtime_test.go",
+        "server/internal/api/plugins_integration_test.go",
+        "docs/plugins.md"
+      ],
+      "scope_note": "已实现版本化 JSON/WASI 文件转换 SDK、执行限制、不可变包、管理员启停/切版、真实 TXT 消费者与升级预检查。不是独立 OS 沙箱；通用宿主能力、持久插件状态和前端扩展尚未实现，因此整项仍不计完成。"
+    },
+    {
+      "id": "F58",
+      "feature": "插件市场和个人安装管理",
+      "legacy": "backend/plugin_host/urls.py; plugins/README.md",
+      "status": "pending",
+      "evidence": [],
+      "scope_note": "已提供管理员本地包安装；在线市场、个人安装列表与长期授权管理尚未实现。"
+    },
+    {
+      "id": "F59",
+      "feature": "插件开发、预览、投稿审核",
+      "legacy": "backend/plugin_host/urls.py; plugins/README.md",
+      "status": "partial",
+      "evidence": [
+        "server/examples/watch-history-text/main.go",
+        "tooling/package-plugin.mjs",
+        "docs/plugins.md"
+      ],
+      "scope_note": "已有 Go WASI 示例、打包命令和管理员本地包审阅；开发预览、作者投稿与平台审核流程尚未实现，整项不计完成。"
+    },
+    {
+      "id": "F60",
+      "feature": "Bridge 配对、动作和事件",
+      "legacy": "backend/integrations/urls.py; bridges/",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "F61",
+      "feature": "Docker 部署与数据持久化",
+      "legacy": "deploy/; README.md",
+      "status": "complete",
+      "evidence": [
+        "docs/verification.md"
+      ]
+    },
+    {
+      "id": "F62",
+      "feature": "API 合同、文档与错误约定",
+      "legacy": "backend/config/urls.py; docs/api-errors.md",
+      "status": "complete",
+      "evidence": [
+        "docs/api.md",
+        "server/internal/api/static_test.go",
+        ".local/output/api-contract-report.json"
+      ]
+    }
+  ],
+  "scope": "User confirmed new project: parity refers to capabilities, not legacy data formats, APIs, plugin ABI, install layout or release compatibility.",
+  "verified_at": "2026-10-07",
+  "completed": 52,
+  "total": 62,
+  "percent": 83.9
+}

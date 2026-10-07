@@ -91,7 +91,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create account and session */
+        /** Create an account, or enqueue verified registration without revealing whether the mailbox exists */
         post: {
             parameters: {
                 query?: never;
@@ -112,6 +112,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["User"];
+                    };
+                };
+                /** @description Success */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Message"];
                     };
                 };
                 default: components["responses"]["Error"];
@@ -544,7 +553,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Consistent personal export, up to 5000 entries and 20000 records */
+        /**
+         * Consistent personal export, up to 5000 entries and 20000 records
+         * @description Exports journal text and cover revision metadata only, not image bytes. This JSON is not a complete media backup.
+         */
         get: {
             parameters: {
                 query?: never;
@@ -574,6 +586,3405 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/entries/{id}/cover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Upload or replace your private JPEG/PNG cover against the displayed entry version
+         * @description Raw image body, at most 2097152 bytes, 8192 pixels per side and 12000000 pixels total. Owner quota: 104857600 bytes. Validation failures preserve the previous cover. Version conflicts return 409; size/quota failures return 413; busy image processing returns 503 with Retry-After. Successful changes increment the entry version.
+         */
+        put: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "image/jpeg": string;
+                    "image/png": string;
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Entry"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /**
+         * Remove your cover against the displayed entry version
+         * @description Successful removal increments the entry version. Removing an absent cover is a no-op with a version check.
+         */
+        delete: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Entry"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/entries/{id}/cover/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                revision: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Read the current private cover using your session cookie
+         * @description Always authenticates the owner, with Cache-Control: private, no-store. Old revisions and covers belonging to another owner return 404.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    revision: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Original validated image bytes */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/jpeg": string;
+                        "image/png": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update profile and preferences against the displayed version */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["Settings"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Change password, revoke existing sessions and rotate this session */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PasswordChange"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/logout-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke all sessions */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/account": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Permanently delete your account after password confirmation */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PasswordConfirmation"];
+                };
+            };
+            responses: {
+                /** @description No content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/avatar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Upload a private JPEG or PNG avatar */
+        put: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "image/jpeg": string;
+                    "image/png": string;
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /** Remove your avatar */
+        delete: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/avatar/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                revision: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Read your private avatar
+         * @description Always authenticates the owner, with Cache-Control: private, no-store. Old revisions and covers belonging to another owner return 404.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    revision: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Original validated image bytes */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/jpeg": string;
+                        "image/png": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List your tags and colors */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Tags"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** Set the color for one of your tags */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["Tag"];
+                };
+            };
+            responses: {
+                /** @description No content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/filters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List saved filters */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Filters"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** Save a named filter */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SaveFilter"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["QuickFilter"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/filters/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete your saved filter */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/entries/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Atomically change selected entries with version checks */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["BulkInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["EntryItems"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/history/page": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read dated viewing history in pages of 50 */
+        get: {
+            parameters: {
+                query?: {
+                    entry_id?: string;
+                    from?: string;
+                    to?: string;
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["HistoryPage"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/entries/{id}/history/{record}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                record: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a watch record and recompute progress */
+        delete: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                    record: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Entry"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Correct a watch record and recompute progress */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    record: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RecordPatch"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Entry"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/v1/analytics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Viewing totals and monthly activity within inclusive dates; average score covers all entries */
+        get: {
+            parameters: {
+                query?: {
+                    from?: string;
+                    to?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Analytics"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List your latest import jobs */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ImportJobs"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Upload a journal file for durable validation and preview
+         * @description No entries are written until apply. CSV max 2 MiB / 500 entries; JSON max 64 MiB; ZIP max 160 MiB, with at most 5000 entries and 20000 watch records. One active import per account, expires after one day.
+         */
+        post: {
+            parameters: {
+                query: {
+                    format: "json" | "csv" | "zip";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            responses: {
+                /** @description Success */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ImportJob"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Read your task preview or result */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ImportJob"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Confirm or cancel your import
+         * @description Apply is idempotent. Any journal change after preview rejects the whole import. Entries, history, covers and completion receipt commit atomically. Completed tasks cannot be cancelled.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ImportAction"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ImportJob"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/backup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a consistent ZIP backup of your journal and cover images
+         * @description Includes journal.json, covers and a SHA-256 manifest; excludes account credentials, preferences and sessions.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description AniMemo backup ZIP */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/zip": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/settings/publication": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PublicationInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/entries/{id}/share/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["EntryVersion"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Entry"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/showcases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    search?: string;
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Directory"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    search?: string;
+                    page?: number;
+                    status?: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+                    sort?: "updated" | "title" | "score";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PublicPage"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/showcases/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    search?: string;
+                    page?: number;
+                    status?: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+                    sort?: "updated" | "title" | "score";
+                };
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PublicPage"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/shared/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PublicItem"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/shared/{slug}/cover/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                revision: string;
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                    revision: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Visible revision only; permission checked on every request */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                        "image/jpeg": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/showcases/{slug}/avatar/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                revision: string;
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                    revision: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Visible revision only; permission checked on every request */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                        "image/jpeg": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SetupStatus"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetupInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/site": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SiteSettings"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/site": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SiteSettings"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SiteSettings"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    search?: string;
+                    page?: number;
+                    state?: "" | "pending" | "published" | "disabled";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AdminUsers"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AdminAction"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AdminUser"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AuditPage"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/columns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ColumnPage"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ColumnInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Column"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/columns/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Column"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ColumnInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Column"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ColumnAction"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Column"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/columns/{id}/cover": {
+        parameters: {
+            query: {
+                version: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "image/png": string;
+                    "image/jpeg": string;
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Column"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Column"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/columns/{id}/cover/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                revision: string;
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    revision: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Visible image revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                        "image/jpeg": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/columns/{id}/cover/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                revision: string;
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    revision: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Visible image revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                        "image/jpeg": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/columns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    search?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PublicColumns"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/columns/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PublicColumn"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/resources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query: {
+                    page?: number;
+                    search?: string;
+                    kind: "entry" | "column";
+                    state?: "active" | "trash" | "pending" | "published";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Resources"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/resources/{kind}/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                kind: "entry" | "column";
+            };
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    kind: "entry" | "column";
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ResourceDetail"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    kind: "entry" | "column";
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ResourceAction"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/columns/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ModerationAction"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Column"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/two-factor/begin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TwoFactorBegin"];
+                };
+            };
+            responses: {
+                /** @description Success; never store secrets in logs or analytics */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TwoFactorEnrollment"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/two-factor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TwoFactorInput"];
+                };
+            };
+            responses: {
+                /** @description Success; never store secrets in logs or analytics */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TwoFactorResult"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Presets"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["Preset"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["Preset"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["InstanceStatus"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/maintenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["MaintenanceInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MaintenanceResult"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/openapi.json": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download the exact API contract embedded in this application image */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OpenAPI 3.1 document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List enabled import plugins; no package bytes or private data */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PluginReleases"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List installed immutable plugin versions */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PluginReleases"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** Install an administrator-reviewed JSON/base64 WASI package (max 12 MiB); never enables automatically */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PluginInstalled"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/plugins/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Enable or switch an installed version, or disable; compare revision and audit atomically */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PluginAction"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PluginUpdated"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/plugins/{slug}/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Convert a user-selected UTF-8 file into a durable import preview
+         * @description Max 2 MiB input; sandbox receives only filename and file text. No journal reads, network, files or database access. Creates a normal import job; user must separately confirm apply. Plugin disable/version change during execution discards output. Existing completed conversions remain ordinary user-owned import previews.
+         */
+        post: {
+            parameters: {
+                query: {
+                    filename: string;
+                };
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            responses: {
+                /** @description Success */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ImportJob"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/providers/bangumi/subjects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search Bangumi animation metadata */
+        get: {
+            parameters: {
+                query: {
+                    query: string;
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SubjectSearch"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/providers/bangumi/subjects/{subject}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                subject: number;
+            };
+            cookie?: never;
+        };
+        /** Read an animation metadata snapshot for explicit field selection */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    subject: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SubjectPreview"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/providers/bangumi/subjects/{subject}/cover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                subject: number;
+            };
+            cookie?: never;
+        };
+        /** Read a validated cover from the fixed Bangumi image origin */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    subject: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Validated JPEG or PNG */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/jpeg": string;
+                        "image/png": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/entries/from-bangumi": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a private entry from the confirmed metadata snapshot */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ApplySource"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Entry"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/entries/{id}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bind or refresh selected metadata fields against both entry and upstream versions */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ApplySource"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Entry"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** Remove the source binding while preserving the journal */
+        delete: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Entry"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Public availability of verified registration and password reset */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["EmailOptions"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/email/request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request verification or reset mail; unknown and throttled accounts receive the same response */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["EmailRequest"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Message"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/email/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify mailbox ownership and choose a password
+         * @description Single-use 30-minute token. An enrolled TOTP or recovery code is still required. Completion does not create a session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["EmailConfirmation"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Message"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/password/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset password and revoke all sessions atomically
+         * @description Single-use 30-minute token. An enrolled TOTP or recovery code is still required. Completion does not create a session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["EmailConfirmation"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Message"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/bangumi": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read connection status without exposing upstream credentials */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BangumiConnection"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /** Disconnect and cancel outstanding previews and unsent operations */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Message"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/bangumi/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start session-bound, single-use OAuth authorization */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: uri */
+                            url: string;
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/bangumi/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Verify connected identity and refresh expired authorization when possible */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BangumiConnection"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/bangumi/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Consume the session-bound OAuth state and redirect to the connection page */
+        get: {
+            parameters: {
+                query: {
+                    state: string;
+                    code?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Fixed local connection outcome page */
+                303: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/bangumi/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List your latest durable sync jobs */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["SyncJob"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** Fetch a resumable collection preview without modifying either journal */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SyncRequest"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SyncJob"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/bangumi/sync/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Read a sync preview and per-item outcomes */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SyncJob"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Confirm explicit per-item directions, or cancel further work
+         * @description All local and remote values are checked again before writes. No remote deletion is inferred. Progress syncing requires explicit opt-in and an unambiguous episode catalog.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SyncAction"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SyncJob"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/media/storage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Inspect private media storage, migration and cleanup status */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MediaStorage"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** Change media backend and persist a resumable migration manifest */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["MediaStorageChange"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MediaStorage"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/media/storage/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Explicitly upload, verify and remove one test image in the configured private bucket */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Message"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/media/migrations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Download revision and SHA256 migration inventory */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["MediaManifestItem"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -584,18 +3995,39 @@ export interface components {
             /** Format: email */
             email: string;
             display_name: string;
+            bio: string;
+            /** @enum {string} */
+            accent: "violet" | "coral" | "blue" | "green" | "amber";
+            /** @enum {string} */
+            default_view: "cards" | "list";
+            version: number;
+            is_admin: boolean;
+            /** Format: uuid */
+            avatar_revision: string | null;
+            sharing_enabled: boolean;
+            /** Format: uuid */
+            public_slug: string;
+            /** @enum {string} */
+            public_state: "private" | "pending" | "published" | "rejected";
+            public_reason: string;
+            otp_enabled: boolean;
+            email_verified: boolean;
+            email_verification_required: boolean;
         };
+        /** @description When email verification is enabled, a verified mailbox owner chooses their password on the verification page. Otherwise password is required at registration. */
         Registration: {
             /** Format: email */
             email: string;
             /** @description At least 12 characters and at most 72 UTF-8 bytes. */
-            password: string;
+            password?: string;
             display_name: string;
         };
         Credentials: {
             /** Format: email */
             email: string;
             password: string;
+            /** @description TOTP or one-time recovery code, required when enabled. */
+            code?: string;
         };
         Entry: {
             /** Format: uuid */
@@ -618,6 +4050,17 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * Format: uuid
+             * @description Private image revision; null when absent. Read via the authenticated cover endpoint. Image bytes are not included in JSON exports.
+             */
+            readonly cover_revision: string | null;
+            details: components["schemas"]["Details"];
+            /** @enum {string} */
+            visibility: "private" | "unlisted" | "public";
+            /** Format: uuid */
+            share_slug: string;
+            readonly source: components["schemas"]["EntrySource"] | null;
         };
         CreateEntry: {
             title: string;
@@ -632,6 +4075,9 @@ export interface components {
             tags?: string[];
             /** @enum {string} */
             accent?: "violet" | "coral" | "blue" | "green" | "amber";
+            details?: components["schemas"]["Details"];
+            /** @enum {string} */
+            visibility?: "private" | "unlisted" | "public";
         };
         PatchEntry: {
             title?: string;
@@ -648,6 +4094,9 @@ export interface components {
             /** @enum {string} */
             accent?: "violet" | "coral" | "blue" | "green" | "amber";
             version: number;
+            details?: components["schemas"]["Details"];
+            /** @enum {string} */
+            visibility?: "private" | "unlisted" | "public";
         };
         RecordInput: {
             /** Format: date */
@@ -660,6 +4109,8 @@ export interface components {
              * @description Stable for retries of this exact write. Reusing it with different content returns 409.
              */
             request_id: string;
+            /** @default 1 */
+            rewatch: number;
         };
         WatchRecord: {
             /** Format: uuid */
@@ -678,6 +4129,8 @@ export interface components {
             request_id: string;
             /** Format: date-time */
             created_at: string;
+            rewatch: number;
+            version: number;
         };
         RecordResult: {
             entry: components["schemas"]["Entry"];
@@ -718,6 +4171,643 @@ export interface components {
                     [key: string]: string;
                 };
             };
+        };
+        Details: {
+            studio?: string;
+            airing_period?: string;
+            description?: string;
+            reference_url?: string;
+        };
+        RecordPatch: {
+            /** Format: date */
+            watched_on: string;
+            episode_from: number;
+            episode_to: number;
+            note?: string;
+            /** @default 1 */
+            rewatch: number;
+            version: number;
+        };
+        Settings: {
+            display_name: string;
+            bio: string;
+            /** @enum {string} */
+            accent: "violet" | "coral" | "blue" | "green" | "amber";
+            /** @enum {string} */
+            default_view: "cards" | "list";
+            version: number;
+        };
+        PasswordChange: {
+            current_password: string;
+            new_password: string;
+        };
+        PasswordConfirmation: {
+            password: string;
+        };
+        Tag: {
+            name: string;
+            color: string;
+        };
+        Tags: {
+            items: components["schemas"]["Tag"][];
+        };
+        QuickFilter: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            search: string;
+            /** @enum {string} */
+            status: "" | "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            /** @enum {string} */
+            sort: "updated" | "title" | "score";
+        };
+        SaveFilter: {
+            name: string;
+            search: string;
+            /** @enum {string} */
+            status: "" | "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            /** @enum {string} */
+            sort: "updated" | "title" | "score";
+        };
+        Filters: {
+            items: components["schemas"]["QuickFilter"][];
+        };
+        BulkInput: {
+            entries: {
+                /** Format: uuid */
+                id: string;
+                version: number;
+            }[];
+            /** @enum {string} */
+            action: "status" | "tag-add" | "tag-remove" | "visibility";
+            value: string;
+        };
+        EntryItems: {
+            items: components["schemas"]["Entry"][];
+        };
+        HistoryPage: {
+            items: components["schemas"]["WatchRecord"][];
+            total: number;
+            page: number;
+            page_size: number;
+        };
+        MonthlyActivity: {
+            month: string;
+            records: number;
+            episodes: number;
+        };
+        Analytics: {
+            from: string;
+            to: string;
+            active_days: number;
+            records: number;
+            episodes: number;
+            average_score: number | null;
+            months: components["schemas"]["MonthlyActivity"][];
+        };
+        ImportPreview: {
+            total: number;
+            ready: number;
+            duplicates: number;
+            records: number;
+            covers: number;
+            warnings: string[];
+            titles: string[];
+            history: components["schemas"]["ImportRecordPreview"][];
+        };
+        ImportJob: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            format: "json" | "csv" | "zip";
+            /** @enum {string} */
+            state: "validating" | "ready" | "applying" | "done" | "failed" | "cancelled";
+            preview: components["schemas"]["ImportPreview"];
+            error: string;
+            created: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            expires_at: string;
+        };
+        ImportJobs: {
+            items: components["schemas"]["ImportJob"][];
+        };
+        ImportAction: {
+            /** @enum {string} */
+            action: "apply" | "cancel";
+        };
+        PublicationInput: {
+            /** @enum {string} */
+            action: "enable-sharing" | "disable-sharing" | "request-public" | "withdraw-public";
+            version: number;
+        };
+        EntryVersion: {
+            version: number;
+        };
+        PublicEntry: {
+            /** Format: uuid */
+            slug: string;
+            title: string;
+            original_title: string;
+            /** @enum {string} */
+            format: "tv" | "movie" | "ova" | "other";
+            /** @enum {string} */
+            status: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            total_episodes: number;
+            watched_episodes: number;
+            score: number | null;
+            notes: string;
+            tags: string[];
+            /** @enum {string} */
+            accent: "violet" | "coral" | "blue" | "green" | "amber";
+            details: components["schemas"]["Details"];
+            /**
+             * Format: uuid
+             * @description Private image revision; null when absent. Read via the authenticated cover endpoint. Image bytes are not included in JSON exports.
+             */
+            readonly cover_revision: string | null;
+        };
+        PublicOwner: {
+            /** Format: uuid */
+            slug: string;
+            name: string;
+            bio: string;
+            /** @enum {string} */
+            accent: "violet" | "coral" | "blue" | "green" | "amber";
+            /** Format: uuid */
+            avatar_revision: string | null;
+            entries: number;
+        };
+        PublicItem: {
+            entry: components["schemas"]["PublicEntry"];
+            owner: components["schemas"]["PublicOwner"];
+        };
+        PublicPage: {
+            owner: components["schemas"]["PublicOwner"] | null;
+            items: components["schemas"]["PublicItem"][];
+            total: number;
+            page: number;
+            page_size: number;
+        };
+        Directory: {
+            items: components["schemas"]["PublicOwner"][];
+            total: number;
+            page: number;
+        };
+        SetupStatus: {
+            available: boolean;
+        };
+        SetupInput: {
+            /** Format: email */
+            email: string;
+            password: string;
+            display_name: string;
+            token: string;
+        };
+        AdminUser: {
+            /** Format: uuid */
+            id: string;
+            /** Format: email */
+            email: string;
+            display_name: string;
+            bio: string;
+            /** @enum {string} */
+            accent: "violet" | "coral" | "blue" | "green" | "amber";
+            /** @enum {string} */
+            default_view: "cards" | "list";
+            version: number;
+            is_admin: boolean;
+            /** Format: uuid */
+            avatar_revision: string | null;
+            sharing_enabled: boolean;
+            /** Format: uuid */
+            public_slug: string;
+            /** @enum {string} */
+            public_state: "private" | "pending" | "published" | "rejected";
+            public_reason: string;
+            disabled: boolean;
+            otp_enabled: boolean;
+        };
+        AdminUsers: {
+            items: components["schemas"]["AdminUser"][];
+            total: number;
+            page: number;
+        };
+        AdminAction: {
+            /** @enum {string} */
+            action: "grant-admin" | "remove-admin" | "disable" | "enable" | "revoke-sessions" | "approve-public" | "reject-public" | "hide-public";
+            version: number;
+            reason: string;
+        };
+        SiteSettings: {
+            name: string;
+            description: string;
+            registration_open: boolean;
+            version: number;
+        };
+        AuditEvent: {
+            /** Format: uuid */
+            id: string;
+            actor: string | null;
+            action: string;
+            kind: string;
+            target: string;
+            detail: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+        };
+        AuditPage: {
+            items: components["schemas"]["AuditEvent"][];
+            total: number;
+            page: number;
+        };
+        ColumnInput: {
+            title: string;
+            summary: string;
+            body: string;
+            entry_ids: string[];
+            version: number;
+        };
+        Column: {
+            title: string;
+            summary: string;
+            body: string;
+            entry_ids: string[];
+            version: number;
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            state: "draft" | "pending" | "published" | "rejected" | "withdrawal_requested";
+            featured: boolean;
+            reason: string;
+            /** Format: uuid */
+            cover_revision: string | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ColumnPage: {
+            items: components["schemas"]["Column"][];
+            total: number;
+            page: number;
+        };
+        ColumnAction: {
+            /** @enum {string} */
+            action: "submit" | "withdraw" | "delete";
+            version: number;
+        };
+        ModerationAction: {
+            /** @enum {string} */
+            action: "approve" | "reject" | "hide" | "feature" | "unfeature";
+            version: number;
+            reason: string;
+        };
+        ResourceAction: {
+            /** @enum {string} */
+            action: "trash" | "restore" | "hide" | "unhide";
+            version: number;
+            reason: string;
+        };
+        Resource: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            kind: "entry" | "column";
+            title: string;
+            owner_name: string;
+            owner_email: string;
+            version: number;
+            state: string;
+            hidden: boolean;
+            /** Format: date-time */
+            deleted_at: string | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        Resources: {
+            items: components["schemas"]["Resource"][];
+            total: number;
+            page: number;
+        };
+        ResourceDetail: components["schemas"]["Entry"] | components["schemas"]["Column"];
+        PublicColumn: {
+            /** Format: uuid */
+            id: string;
+            title: string;
+            summary: string;
+            body: string;
+            featured: boolean;
+            /** Format: uuid */
+            cover_revision: string | null;
+            owner: components["schemas"]["PublicOwner"];
+            entries: components["schemas"]["PublicEntry"][];
+            /** Format: date-time */
+            updated_at: string;
+        };
+        PublicColumnSummary: {
+            /** Format: uuid */
+            id: string;
+            title: string;
+            summary: string;
+            featured: boolean;
+            /** Format: uuid */
+            cover_revision: string | null;
+            author: string;
+        };
+        PublicColumns: {
+            items: components["schemas"]["PublicColumnSummary"][];
+            total: number;
+            page: number;
+        };
+        TwoFactorBegin: {
+            password: string;
+        };
+        TwoFactorEnrollment: {
+            secret: string;
+            uri: string;
+            /** Format: date-time */
+            expires_at: string;
+        };
+        TwoFactorInput: {
+            /** @enum {string} */
+            action: "enable" | "disable" | "recovery";
+            password: string;
+            code: string;
+        };
+        TwoFactorResult: {
+            user: components["schemas"]["User"];
+            recovery_codes: string[];
+        };
+        Preset: {
+            name: string;
+            color: string;
+            version: number;
+        };
+        Presets: {
+            items: components["schemas"]["Preset"][];
+        };
+        StorageOwner: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            bytes: number;
+        };
+        InstanceStatus: {
+            database: string;
+            /** Format: date-time */
+            server_time: string;
+            users: number;
+            entries: number;
+            columns: number;
+            database_bytes: number;
+            media_bytes: number;
+            imports_active: number;
+            expired_sessions: number;
+            owners: components["schemas"]["StorageOwner"][];
+        };
+        MaintenanceInput: {
+            /** @enum {string} */
+            action: "clear-expired";
+        };
+        MaintenanceResult: {
+            sessions: number;
+            imports: number;
+            enrollments: number;
+        };
+        PluginManifest: {
+            schema: number;
+            slug: string;
+            name: string;
+            version: string;
+            description: string;
+            protocol: number;
+            host_api_min: number;
+            host_api_max: number;
+            capabilities: string[];
+            module_sha256: string;
+        };
+        PluginRelease: {
+            manifest: components["schemas"]["PluginManifest"];
+            digest: string;
+            active: boolean;
+            enabled: boolean;
+            revision: number;
+            /** Format: date-time */
+            installed_at: string;
+        };
+        PluginReleases: {
+            items: components["schemas"]["PluginRelease"][];
+        };
+        PluginAction: {
+            /** @enum {string} */
+            action: "activate" | "disable";
+            version: string;
+            revision: number;
+        };
+        PluginInstalled: {
+            installed: boolean;
+        };
+        PluginUpdated: {
+            updated: boolean;
+        };
+        ImportRecordPreview: {
+            title: string;
+            /** Format: date */
+            watched_on: string;
+            episode_from: number;
+            episode_to: number;
+            rewatch: number;
+            note: string;
+        };
+        EntrySource: {
+            /** @enum {string} */
+            provider: "bangumi";
+            subject_id: number;
+            /** Format: date-time */
+            refreshed_at: string;
+        };
+        SourceMetadata: {
+            subject_id: number;
+            title: string;
+            original_title: string;
+            /** @enum {string} */
+            format: "tv" | "movie" | "ova" | "other";
+            total_episodes: number;
+            details: components["schemas"]["Details"];
+        };
+        SubjectPreview: {
+            metadata: components["schemas"]["SourceMetadata"];
+            snapshot: string;
+            has_cover: boolean;
+        };
+        SubjectSearch: {
+            items: components["schemas"]["SubjectPreview"][];
+            total: number;
+            page: number;
+            page_size: number;
+        };
+        ApplySource: {
+            subject_id: number;
+            snapshot: string;
+            fields: ("title" | "original_title" | "format" | "total_episodes" | "studio" | "airing_period" | "description" | "reference_url")[];
+            cover: boolean;
+            version?: number;
+        };
+        Message: {
+            message: string;
+        };
+        EmailOptions: {
+            email_verification: boolean;
+            password_reset: boolean;
+        };
+        EmailRequest: {
+            /** Format: email */
+            email: string;
+            /** @enum {string} */
+            purpose: "verify" | "reset";
+        };
+        EmailConfirmation: {
+            token: string;
+            password: string;
+            code?: string;
+        };
+        BangumiConnection: {
+            configured: boolean;
+            /** @enum {string} */
+            state: "disconnected" | "authorizing" | "connected" | "reauthorize";
+            remote_user_id: number | null;
+            username: string;
+            nickname: string;
+            /** Format: date-time */
+            expires_at: string | null;
+        };
+        SyncValue: {
+            /** @enum {string} */
+            status: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            score: number;
+            notes: string;
+            tags: string[];
+            progress: number;
+        };
+        SourceRecord: {
+            /** Format: uuid */
+            entry_id: string;
+            version: number;
+            subject_id: number;
+            title: string;
+            total_episodes: number;
+            recorded_progress: number;
+            value: components["schemas"]["SyncValue"];
+            metadata: components["schemas"]["SourceMetadata"];
+        };
+        EpisodeState: {
+            id: number;
+            number: number;
+            state: number;
+        };
+        RemoteRecord: {
+            value: components["schemas"]["SyncValue"];
+            private: boolean;
+            episodes: components["schemas"]["EpisodeState"][];
+        };
+        SyncItem: {
+            /** Format: uuid */
+            id: string;
+            subject_id: number;
+            title: string;
+            metadata: components["schemas"]["SourceMetadata"];
+            local: components["schemas"]["SourceRecord"] | null;
+            remote: components["schemas"]["RemoteRecord"] | null;
+            catalog: components["schemas"]["EpisodeState"][];
+            pull_target: components["schemas"]["SyncValue"] | null;
+            push_target: components["schemas"]["RemoteRecord"] | null;
+            /** @enum {string} */
+            decision: "skip" | "none" | "pull" | "push" | "conflict";
+            reason: string;
+            allowed: ("pull" | "push" | "skip")[];
+            /** @enum {string} */
+            state: "pending" | "running" | "done" | "conflict" | "failed" | "skipped";
+            /** @enum {string} */
+            action: "pull" | "push" | "skip";
+            result: string;
+        };
+        SyncJob: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            mode: "pull" | "push" | "two_way";
+            include_progress: boolean;
+            /** @enum {string} */
+            state: "fetching" | "ready" | "applying" | "done" | "failed" | "cancelled";
+            cursor: number;
+            remote_total: number;
+            error: string;
+            items: components["schemas"]["SyncItem"][];
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            expires_at: string;
+        };
+        SyncRequest: {
+            /** @enum {string} */
+            mode: "pull" | "push" | "two_way";
+            include_progress: boolean;
+            /** Format: uuid */
+            request_id: string;
+        };
+        SyncAction: {
+            /** @enum {string} */
+            action: "apply" | "cancel";
+            choices?: {
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                action: "pull" | "push" | "skip";
+            }[];
+        };
+        MediaMigration: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            backend: "postgres" | "r2";
+            /** @enum {string} */
+            state: "running" | "done" | "superseded";
+            total: number;
+            copied: number;
+            /** Format: date-time */
+            created_at: string;
+        };
+        MediaStorage: {
+            /** @enum {string} */
+            backend: "postgres" | "r2";
+            version: number;
+            configured: boolean;
+            endpoint: string;
+            bucket: string;
+            postgres_images: number;
+            remote_images: number;
+            media_bytes: number;
+            pending: number;
+            cleanup_pending: number;
+            failures: number;
+            originals_bytes: number;
+            migrations: components["schemas"]["MediaMigration"][];
+        };
+        MediaManifestItem: {
+            /** Format: uuid */
+            revision: string;
+            kind: string;
+            bytes: number;
+            sha256: string;
+            state: string;
+            original_retained: boolean;
+        };
+        MediaStorageChange: {
+            /** @enum {string} */
+            backend: "postgres" | "r2";
+            version: number;
         };
     };
     responses: {

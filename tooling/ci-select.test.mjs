@@ -9,7 +9,7 @@ test('schema migrations select API integration', () => {
   assert.deepEqual(selectChecks(['server/internal/database/migrations/002.sql']), { web: false, api: true });
 });
 test('API contract and tooling changes check both consumers', () => {
-  for (const path of ['contracts/openapi.json', 'tooling/ci-select.mjs', '.github/workflows/ci.yml', 'deploy/Dockerfile', 'unexpected/new-file']) {
+  for (const path of ['contracts/openapi.json', 'server/internal/apicontract/contract.go', 'tooling/ci-select.mjs', '.github/workflows/ci.yml', 'deploy/Dockerfile', 'unexpected/new-file']) {
     assert.deepEqual(selectChecks([path]), { web: true, api: true }, path);
   }
 });

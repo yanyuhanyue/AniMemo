@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=24.12.0"
   },
   "scripts": {
     "dev": "node tooling/run.mjs dev",
@@ -13,11 +13,18 @@
     "check:api": "node tooling/run.mjs check-api",
     "test": "node tooling/run.mjs test",
     "test:api": "node tooling/run.mjs test-api",
+    "verify": "node tooling/run.mjs verify",
+    "test:containers": "node tooling/run.mjs test-containers",
     "build": "node tooling/run.mjs build",
     "contracts": "node tooling/run.mjs contracts",
     "db:start": "node tooling/run.mjs db-start",
     "db:stop": "node tooling/run.mjs db-stop",
-    "containers": "node tooling/run.mjs containers"
+    "containers": "node tooling/run.mjs containers",
+    "instance": "node tooling/instance.mjs",
+    "test:instance": "node tooling/instance-smoke.mjs",
+    "plugin:example": "node tooling/run.mjs plugin-example",
+    "test:plugins": "node tooling/run.mjs test-api -run \"TestPlugin|TestRealWASISandbox|TestPackageIdentityAndCompatibility|TestTextRecordsAndAmbiguity\"",
+    "test:plugin-instance": "node tooling/plugin-smoke.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.104.1",
