@@ -1,13 +1,6 @@
+.local
 node_modules
-dist
+.git
 .env
-.env.*
-!.env.example
-backend/db.sqlite3
-backend/media
-backend/staticfiles
-**/__pycache__
-*.pyc
-/qa-*.png
-*.zip
-.reference-captures
+docs
+**/*_test.go

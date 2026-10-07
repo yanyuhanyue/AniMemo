@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:17.11-bookworm
+    environment:
+      POSTGRES_USER: animemo
+      POSTGRES_DB: animemo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run npm run db:start or supply POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - ../.local/data/compose-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U animemo -d animemo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      DATABASE_URL: postgres://animemo:${POSTGRES_PASSWORD}@db:5432/animemo?sslmode=disable
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://127.0.0.1:18081}
+      LISTEN_ADDR: 0.0.0.0:18081
+      WEB_DIR: /app/web
+    ports:
+      - "127.0.0.1:18081:18081"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/animemo", "healthcheck"]
+      interval: 5s
+      timeout: 4s
+      start_period: 5s
+      retries: 12
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

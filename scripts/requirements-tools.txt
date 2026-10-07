@@ -1,5 +1,0 @@
-# Tooling used to regenerate and verify backend/requirements.txt.
-# pip-tools 7.6.1 restores compatibility with the pinned pip 26 toolchain.
-pip==26.2.1
-pip-tools==7.6.1
-ruff==0.16.2
