@@ -71,7 +71,7 @@ export function EntryDetail({ entry, userID, onClose, onEdit, onWatch, onDeleted
         {confirmCoverDelete && <div className="delete-confirm"><strong>移除当前封面？</strong><p>番剧和观看记录会保留。需要恢复封面时，请重新上传图片。</p><div><Button className="button quiet" disabled={cover.isPending} onClick={() => setConfirmCoverDelete(false)}>保留封面</Button><Button className="button danger" disabled={cover.isPending || remove.isPending} onClick={() => cover.mutate(null)}>确认移除</Button></div></div>}
       </section>
       {shown.original_title && <p className="detail-original">{shown.original_title}</p>}
-      <div className="detail-badges"><span>{formatLabels[shown.format]}</span><span>{statusLabels[shown.status]}</span>{shown.score !== null && <Rating score={shown.score} />}</div>
+      <div className="detail-badges"><span>{formatLabels[shown.format]}</span><span>{statusLabels[shown.status]}</span>{shown.score !== null && <Rating score={shown.score} variant="badge" />}</div>
       <div className="detail-progress" data-accent={shown.accent}><div><span>已经看到</span><strong>{shown.watched_episodes}<small> / {shown.total_episodes || '—'} 话</small></strong></div><Button className="button ink" disabled={cover.isPending || remove.isPending} onClick={() => onWatch(shown)}><Icon name="plus" />记一次观看</Button></div>
       {shown.tags.length > 0 && <div className="entry-tags">{shown.tags.map(tag => <TagChip key={tag} name={tag} />)}</div>}
       {shown.notes && <section className="detail-notes"><h3>我的短评</h3><p>{shown.notes}</p></section>}

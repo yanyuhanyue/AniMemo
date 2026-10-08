@@ -1,15 +1,15 @@
-.rating { --rating-ink: #111; --rating-star: #c89120; display: inline-flex; align-items: center; gap: 4px; color: var(--rating-ink); font-family: var(--am-font-latin); font-variant-numeric: tabular-nums; white-space: nowrap; vertical-align: middle; line-height: 1.3; }
-.rating .rating-value { font-size: 1em; font-weight: 900; color: var(--rating-ink); }
-.rating > svg { width: 14px; height: 14px; color: var(--rating-star); fill: currentColor; flex-shrink: 0; }
-.rating > small { color: #766f7f; font-family: var(--am-font-body); font-size: 10px; font-weight: 400; }
+.rating { --rating-ink: #30303b; --rating-star: #be9144; display: inline-flex; align-items: baseline; gap: 3px; color: var(--rating-ink); font-family: var(--am-font-body); font-style: normal; font-variant-numeric: tabular-nums; white-space: nowrap; vertical-align: baseline; line-height: 1.4; }
+.rating .rating-value { font-size: 1em; font-weight: 500; font-style: normal; color: var(--rating-ink); letter-spacing: 0; }
+.rating > svg { width: 12px; height: 12px; color: var(--rating-star); fill: currentColor; stroke-width: 1.2; flex-shrink: 0; }
+.rating > small { color: var(--am-muted); font-size: .75em; font-weight: 400; }
+.rating--badge { align-items: center; gap: 5px; padding: 4px 8px; min-height: 28px; border: 1px solid color-mix(in srgb,var(--rating-ink) 13%,transparent); border-radius: 8px; background: color-mix(in srgb,var(--rating-ink) 3%,var(--am-paper)); font-size: 14px; line-height: 1; }
 /* Original black → orange → red → pink/purple/indigo spectrum, with readable small text. */
 .rating--orange-red { --rating-ink: #bc4b08; --rating-star: #ea580c; }
 .rating--red { --rating-ink: #dc2626; --rating-star: #ea580c; }
 .rating--rainbow { --rating-ink: #8544b2; --rating-star: #a855f7; }
 .rating--rainbow .rating-value { background: linear-gradient(90deg,#bb2874,#8544b2 50%,#4f53bc); background-clip: text; -webkit-background-clip: text; color: transparent; }
 .rating--unrated { --rating-ink: #766f7f; font-family: var(--am-font-body); font-size: 12px; }
-.entry-cover-summary .rating { font-size: 19px; }
-.detail-badges .rating { font-size: 17px; }
+.detail-badges > .rating--badge { color: var(--rating-ink); background: color-mix(in srgb,var(--rating-ink) 3%,var(--am-paper)); }
 .universe-shell .rating--black { --rating-ink: #f6effb; }
 .universe-shell .rating--orange-red { --rating-ink: #ffb36d; }
 .universe-shell .rating--red { --rating-ink: #ff9292; }

@@ -40,7 +40,7 @@ export function EntryCard({
         <div className="entry-cover-copy">
         <div className="cover-heading">
           <span>{formatLabels[entry.format]}</span>
-          {entry.score !== null && <Rating score={entry.score} />}
+          {entry.score !== null && <Rating score={entry.score} variant="badge" />}
         </div>
         <div className="cover-title">
           <h3>{entry.title}</h3>
