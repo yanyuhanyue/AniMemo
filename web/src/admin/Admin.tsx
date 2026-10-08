@@ -14,6 +14,7 @@ import { SiteSettings, Audit } from './Settings';
 import { Overview } from './Overview';
 import { AdminAchievements } from './Achievements';
 import './admin.css';
+import { SiteBrand } from '../components/SiteIdentity';
 
 export function Setup() {
   const cache = useQueryClient();
@@ -50,16 +51,15 @@ export function Admin({ displayName }: { displayName: string }) {
   return <div className="admin-shell">
     <a className="admin-skip" href="#admin-content" onClick={event => { event.preventDefault(); document.getElementById('admin-content')?.focus(); }}>跳到管理内容</a>
     <aside className="admin-sidebar">
-      <a className="admin-brand" href="/admin"><span className="admin-brand-icon"><Icon name="sparkle" /></span><span>AniMemo<span className="admin-brand-caption">管理控制台</span></span></a>
+      <SiteBrand href="/" className="admin-brand" caption="管理控制台" />
       <nav className="admin-nav" aria-label="管理导航">{pages.map((page, i) => <div key={page.id}>
         {(i === 0 || i === 1 || i === 5) && <p className="admin-nav-group">{i === 0 ? '工作台' : i === 1 ? '内容与社区' : '实例管理'}</p>}
         <Button type="button" aria-label={page.label} aria-current={tab === page.id ? 'page' : undefined} aria-pressed={tab === page.id} onClick={() => navigate(page.id)}><Icon name={page.icon} /><span>{page.short}</span>{tab === page.id && <span className="admin-nav-dot" />}</Button>
       </div>)}</nav>
       <div className="admin-sidebar-note"><Icon name="sparkle" /><p>收藏热爱，<br />也守护每一份记忆。</p><span>YOUR LITTLE ANIME UNIVERSE</span></div>
-      <a className="admin-back" href="/"><Icon name="logout" />返回我的手账<Icon name="arrow" /></a>
     </aside>
     <div className="admin-workspace">
-      <header className="admin-topbar"><div className="admin-breadcrumb">管理控制台<Icon name="chevron" /><span>{current.short}</span></div><div className="admin-account"><span className="admin-badge purple">管理员</span><span className="admin-avatar">{displayName.slice(0, 1)}</span><span>{displayName}</span></div></header>
+      <header className="admin-topbar"><div className="admin-breadcrumb">管理控制台<Icon name="chevron" /><span>{current.short}</span></div><div className="admin-topbar-actions"><a className="button secondary" href="/"><Icon name="arrow" />返回主页</a><a className="admin-public-home" href="/home">站点名片 ↗</a><div className="admin-account"><span className="admin-badge purple">管理员</span><span className="admin-avatar">{displayName.slice(0, 1)}</span><span>{displayName}</span></div></div></header>
       <main className="admin-content" id="admin-content" tabIndex={-1}>
         <div className="admin-page-heading"><div><p className="admin-eyebrow">ANIMEMO / CONSOLE</p><h1>{current.short === '概览' ? '控制台概览' : current.short}</h1><p>{current.description}</p></div><span className="admin-date">{new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date())}</span></div>
         {tab === 'overview' ? <Overview navigate={navigate} /> : tab === 'users' ? <Users /> : tab === 'resources' ? <Resources /> : tab === 'plugins' ? <Plugins /> : tab === 'site' ? <SiteSettings /> : tab === 'presets' ? <Presets /> : tab === 'health' ? <Maintenance /> : tab === 'achievements' ? <AdminAchievements /> : <Audit />}

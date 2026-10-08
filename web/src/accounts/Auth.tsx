@@ -7,9 +7,12 @@ import { client, errorMessage, result } from '../api/client';
 import type { User } from '../api/client';
 import { Icon } from '../components/ui/Icon';
 import { EmailRequest } from './EmailAccess';
+import { SiteBrand, useSite } from '../components/SiteIdentity';
 
 export function Auth({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
-  const [mode, setMode] = useState<'login' | 'register'>('register');
+  const [requestedMode, setMode] = useState<'login' | 'register'>('register');
+  const { data: site } = useSite();
+  const mode = site?.registration_open === false ? 'login' : requestedMode;
   const [mailMode, setMailMode] = useState<'verify' | 'reset' | null>(null);
   const [message, setMessage] = useState('');
   const options = useQuery({ queryKey: ['auth-options'], retry: false, queryFn: ({ signal }) => result(client.GET('/api/v1/auth/options', { signal })) });
@@ -25,7 +28,7 @@ export function Auth({ onAuthenticated }: { onAuthenticated: (user: User) => voi
   function handleSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); submit.mutate(new FormData(event.currentTarget)); }
   return <main className="auth-page">
     <section className="auth-story" aria-labelledby="welcome-title">
-      <a className="brand" href="/"><span className="brand-mark"><Icon name="play" /></span>AniMemo<span className="brand-dot">.</span></a>
+      <SiteBrand href="/home" />
       <div className="auth-intro">
         <p className="eyebrow">MY ANIME MEMORY</p>
         <h1 id="welcome-title">故事会完结。<br /><span>记忆，继续放映。</span></h1>
@@ -43,10 +46,11 @@ export function Auth({ onAuthenticated }: { onAuthenticated: (user: User) => voi
         <span className="small-label"><span className="status-dot" /> YOUR PRIVATE JOURNAL</span>
         <h2>{mode === 'register' ? '开启你的番剧手账' : '欢迎回来'}</h2>
         <p className="muted">{mode === 'register' ? '从第一部想记住的动画开始。' : '来看看故事又进行到哪里了。'}</p>
-        <div className="auth-tabs" aria-label="账号操作">
+        {site?.registration_open !== false && <div className="auth-tabs" aria-label="账号操作">
           <Button type="button" aria-pressed={mode === 'register'} onClick={() => { setMode('register'); submit.reset(); }}>创建账号</Button>
           <Button type="button" aria-pressed={mode === 'login'} onClick={() => { setMode('login'); submit.reset(); }}>已有账号</Button>
-        </div>
+        </div>}
+        {site?.registration_open === false && <p className="auth-registration-note">本站暂未开放注册，已有账号可以正常登录。</p>}
         {mailMode ? <EmailRequest purpose={mailMode} onBack={() => setMailMode(null)} /> : <form key={mode} onSubmit={handleSubmit} className="auth-form">
           {mode === 'register' && <label>怎么称呼你<Input name="display_name" autoComplete="nickname" placeholder="你的昵称" required maxLength={32} autoFocus /></label>}
           <label>邮箱地址<Input name="email" type="email" autoComplete="email" placeholder="you@example.com" required maxLength={254} autoFocus={mode === 'login'} /></label>

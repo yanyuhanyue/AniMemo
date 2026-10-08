@@ -1,0 +1,20 @@
+.site-brand { gap: 10px; min-width: 0; }
+.site-logo { flex-shrink: 0; overflow: hidden; }
+.site-logo img { width: 100%; height: 100%; object-fit: contain; background: var(--am-paper); }
+.site-brand-copy { display: flex; flex-direction: column; min-width: 0; }
+.site-brand-name { display: block; max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-brand-copy > small { margin-top: 6px; font: 500 11px/1.4 var(--am-font-body); color: var(--am-muted); letter-spacing: 1px; }
+.auth-registration-note { margin: 20px 0; padding: 12px 14px; border-radius: 9px; background: #f1eaf8; color: #756586; font-size: 12px; line-height: 1.8; }
+.site-card { overflow: hidden; border: 1px solid var(--am-border); border-radius: 18px; background: var(--am-paper); margin-bottom: 24px; }
+.site-card-cover { height: 190px; background: linear-gradient(120deg,#e8daf6,#f8e9ef); }
+.site-card-cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.site-card-copy { padding: 0 28px 26px; }
+.site-card-icon { display: grid; place-items: center; width: 72px; height: 72px; position: relative; margin: -36px 0 16px; border: 4px solid var(--am-paper); border-radius: 21px; overflow: hidden; background: #b29acf; color: white; box-shadow: 0 4px 12px #5c3e7415; }
+.site-card-icon svg { width: 32px; height: 32px; }
+.site-card-icon img { width: 100%; height: 100%; object-fit: contain; background: var(--am-paper); }
+.site-card-copy h1,.site-card-copy h2 { font-size: 28px; overflow-wrap: anywhere; line-height: 1.5; }
+.site-card-copy p { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--am-muted); line-height: 1.9; font-size: 14px; margin-top: 9px; }
+.admin-stack .site-card { margin-bottom: 0; }
+.admin-stack .site-card-cover { height: 145px; }
+.admin-stack .site-card-copy h2 { font-size: 22px; }
+@media (max-width: 700px) { .site-brand-name { max-width: 10ch; } .site-card-cover { height: 140px; } .site-card-copy { padding-inline: 20px; } .site-card-copy h1 { font-size: 24px; } }

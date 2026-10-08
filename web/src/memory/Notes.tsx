@@ -7,6 +7,7 @@ import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
 import { Icon } from "../components/ui/Icon";
 import { Pager, Problem } from "../public/Public";
+import { TagField } from "../journal/ManageTools";
 import {
   AnimeSelect,
   MemoryImage,
@@ -531,14 +532,7 @@ export function NoteEditor({
                 </figure>
               ))}
             </div>
-            <label>
-              标签（用逗号分隔）
-              <Input
-                value={tagText}
-                maxLength={1600}
-                onChange={(e) => setTagText(e.target.value)}
-              />
-            </label>
+            <TagField userID={userID} value={tagText} onChange={setTagText} limit={20} maxLength={1600} />
             <Visibility
               value={form.visibility ?? "private"}
               onChange={(v) => set("visibility", v)}

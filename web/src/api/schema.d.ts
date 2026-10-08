@@ -5925,6 +5925,126 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/site/images/{kind}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "icon" | "cover";
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Upload a public site icon or card cover (administrator) */
+        put: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    kind: "icon" | "cover";
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "image/jpeg": string;
+                    "image/png": string;
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SiteSettings"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /** Restore the default site icon or card cover (administrator) */
+        delete: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    kind: "icon" | "cover";
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SiteSettings"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/site/images/{kind}/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "icon" | "cover";
+                revision: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Read the current public site branding image
+         * @description Public raster image. New revisions use new URLs; unknown or removed revisions return 404.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    kind: "icon" | "cover";
+                    revision: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Original validated image bytes */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/jpeg": string;
+                        "image/png": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -6374,6 +6494,10 @@ export interface components {
             registration_open: boolean;
             version: number;
             homepage_owner_slug: string;
+            /** @description Current public branding image revision; empty when using the default. */
+            readonly icon_revision?: string;
+            /** @description Current public branding image revision; empty when using the default. */
+            readonly cover_revision?: string;
         };
         AuditEvent: {
             /** Format: uuid */

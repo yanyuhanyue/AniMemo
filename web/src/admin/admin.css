@@ -41,11 +41,18 @@
 .admin-sidebar-note > svg { position: absolute; top: 20px; left: 16px; color: #776384; }
 .admin-sidebar-note p { line-height: 1.9; font-size: 13px; }
 .admin-sidebar-note > span { display: block; margin-top: 9px; font-size: 6.5px; letter-spacing: 1.1px; color: #766781; }
-.admin-back { display: flex; align-items: center; gap: 8px; min-height: 40px; margin: 0 6px; padding: 12px 4px 0; border-top: 1px solid var(--admin-line); font-size: 12px; color: #6d6876 !important; }
-.admin-back svg { width: 16px; height: 16px; }
-.admin-back svg:last-child { margin-left: auto; }
 .admin-workspace { min-width: 0; }
-.admin-topbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; min-height: 76px; padding: 14px 36px; border-bottom: 1px solid var(--admin-line); background: #ffffffd9; }
+.admin-topbar { position: sticky; top: 0; z-index: 10; display: flex; justify-content: space-between; align-items: center; gap: 20px; min-height: 76px; padding: 14px 36px; border-bottom: 1px solid var(--admin-line); background: #fff; }
+.admin-topbar-actions { display: flex; align-items: center; gap: 16px; }
+.admin-topbar-actions > .button svg { transform: rotate(180deg); }
+.admin-public-home { font-size: 12px; white-space: nowrap; }
+.admin-brand .site-brand-name { max-width: 8ch; }
+.admin-branding-field { display: grid; gap: 12px; padding-top: 18px; border-top: 1px solid var(--admin-line); }
+.admin-branding-field p { margin-top: 5px; color: var(--admin-muted); font-size: 12px; }
+.admin-branding-field .management-actions { flex-wrap: wrap; margin: 0; gap: 12px; }
+.admin-branding-thumbnail { display: block; object-fit: contain; border: 1px solid var(--admin-line); border-radius: 10px; background: #faf8fc; }
+.admin-branding-thumbnail.icon { width: 64px; height: 64px; }
+.admin-branding-thumbnail.cover { width: min(100%,280px); height: 120px; object-fit: cover; }
 .admin-breadcrumb { display: flex; align-items: center; gap: 12px; color: #6c6975; font-size: 13px; white-space: nowrap; }
 .admin-breadcrumb > svg { width: 12px; height: 12px; color: #6d6975; }
 .admin-breadcrumb > span { color: #5e586c; }
@@ -293,9 +300,11 @@
   .admin-nav button { min-height: 42px; padding: 10px 12px; gap: 7px; font-size: 13px; margin: 0; white-space: nowrap; }
   .admin-nav button svg { width: 16px; height: 16px; }
   .admin-nav-dot, .admin-nav-group, .admin-sidebar-note { display: none; }
-  .admin-back { position: absolute; top: 18px; right: 18px; margin: 0; padding: 8px 0; border: 0; }
-  .admin-back svg:last-child { display: none; }
   .admin-topbar { min-height: 53px; padding: 10px 18px; }
+  .admin-topbar-actions { gap: 0; }
+  .admin-topbar-actions .admin-account,.admin-public-home { display: none; }
+  .admin-topbar .admin-breadcrumb { gap: 6px; font-size: 11px; }
+  .admin-topbar .button { min-height: 36px; padding: 8px 10px; font-size: 12px; }
   .admin-account > .admin-badge { display: none; }
   .admin-content { padding: 23px 16px 18px; }
   .admin-page-heading { margin-bottom: 20px; }

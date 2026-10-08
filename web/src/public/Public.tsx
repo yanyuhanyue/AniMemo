@@ -7,11 +7,12 @@ import { useQuery } from '@tanstack/react-query';
 import { client, errorMessage, result } from '../api/client';
 import type { components } from '../api/schema';
 import { statusLabels, formatLabels } from '../journal/labels';
+import { SiteBrand, useSite } from '../components/SiteIdentity';
 
 type PublicItem = components['schemas']['PublicItem'];
-export function PageShell({ title, children }: { title: string; children: ReactNode }) {
-  const site = useQuery({ queryKey: ['site'], queryFn: ({ signal }) => result(client.GET('/api/v1/site', { signal })) });
-  return <div className="app-shell"><header className="site-header"><div className="header-inner"><a className="brand" href="/">{site.data?.name || 'AniMemo'}.</a><nav className="public-nav" aria-label="主要导航"><a href="/home">站点首页</a><a href="/">我的手账</a><a href="/explore">公开手账</a><a href="/catalog">发现番剧</a><a href="/featured">专栏</a></nav></div></header><main className="main-content public-content"><section className="page-intro"><div><p className="eyebrow">STORIES WORTH SHARING</p><h1>{title}</h1></div></section>{children}<footer className="site-footer"><p>{site.data?.description || '故事会完结，记忆继续放映。'}</p></footer></main></div>;
+export function PageShell({ title, children, intro }: { title: string; children: ReactNode; intro?: ReactNode }) {
+  const site = useSite();
+  return <div className="app-shell"><header className="site-header"><div className="header-inner"><SiteBrand href="/home" /><nav className="public-nav" aria-label="主要导航"><a href="/home">站点首页</a><a href="/">我的手账</a><a href="/explore">公开手账</a><a href="/catalog">发现番剧</a><a href="/featured">专栏</a></nav></div></header><main className="main-content public-content">{intro ?? <section className="page-intro"><div><p className="eyebrow">STORIES WORTH SHARING</p><h1>{title}</h1></div></section>}{children}<footer className="site-footer"><p>{site.data?.description || '故事会完结，记忆继续放映。'}</p></footer></main></div>;
 }
 export function Problem({ error }: { error: unknown }) { return <p className="error-message" role="alert">{errorMessage(error)}</p>; }
 export function Pager({ page, total, size, onChange }: { page: number; total: number; size: number; onChange: (page: number) => void }) {

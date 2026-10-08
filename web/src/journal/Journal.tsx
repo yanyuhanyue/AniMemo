@@ -15,6 +15,7 @@ import { Settings } from '../accounts/Settings';
 import { BulkToolbar, SavedFilters, TagColors, TagEditor } from './ManageTools';
 import { NoteEditor } from '../memory/Notes';
 import { statusLabels, statuses } from './labels';
+import { SiteBrand } from '../components/SiteIdentity';
 
 type Modal = { kind: 'create' | 'settings' | 'tags' | 'transfer' } | { kind: 'edit' | 'detail' | 'watch' | 'memory'; entry: Entry } | null;
 
@@ -69,7 +70,7 @@ export function Journal({ user, onLogout, loggingOut }: { user: User; onLogout: 
   return <TagColors.Provider value={Object.fromEntries((tags.data?.items || []).map(tag => [tag.name, tag.color]))}><div className="app-shell" data-accent={user.accent}>
     <a href="#main-content" className="skip-link">跳到主要内容</a>
     <header className="site-header"><div className="header-inner">
-      <a className="brand" href="/" aria-label="AniMemo 首页"><span className="brand-mark"><Icon name="play" /></span>AniMemo<span className="brand-dot">.</span></a>
+      <SiteBrand />
       <nav className="main-nav" aria-label="主要导航"><a href="/explore"><Icon name="sparkle" />发现</a><Button aria-current={section === 'journal' ? 'page' : undefined} onClick={() => setSection('journal')}><Icon name="book" />我的番剧</Button><a href="/memory"><Icon name="star" />记忆库</a><Button aria-current={section === 'history' ? 'page' : undefined} onClick={() => setSection('history')}><Icon name="clock" />观看足迹</Button></nav>
       <details className="account-menu"><summary><span className="avatar">{user.avatar_revision ? <img src={`/api/v1/avatar/${user.avatar_revision}`} alt="" /> : Array.from(user.display_name)[0]}</span><span className="account-name">{user.display_name}</span><Icon name="chevron" /></summary><div className="account-dropdown"><strong>{user.display_name}</strong><span>{user.email}</span><Button type="button" onClick={() => setModal({ kind: 'settings' })}>账号与偏好</Button><a href="/my-columns">我的专栏</a>{user.is_admin && <a href="/admin">实例管理</a>}<Button type="button" onClick={onLogout} disabled={loggingOut}><Icon name="logout" />{loggingOut ? '正在退出…' : '退出登录'}</Button></div></details>
     </div></header>
@@ -94,8 +95,8 @@ export function Journal({ user, onLogout, loggingOut }: { user: User; onLogout: 
     {modal?.kind === 'transfer' && <TransferDialog userID={user.id} onClose={() => setModal(null)} />}
     {modal?.kind === 'settings' && <Settings user={user} onClose={() => setModal(null)} />}
     {modal?.kind === 'tags' && <TagEditor userID={user.id} onClose={() => setModal(null)} />}
-    {modal?.kind === 'create' && <EntryEditor onClose={() => setModal(null)} onSaved={saved} entry={null} />}
-    {modal?.kind === 'edit' && <EntryEditor onClose={() => setModal(null)} onSaved={saved} entry={modal.entry} />}
+    {modal?.kind === 'create' && <EntryEditor userID={user.id} onClose={() => setModal(null)} onSaved={saved} entry={null} />}
+    {modal?.kind === 'edit' && <EntryEditor userID={user.id} onClose={() => setModal(null)} onSaved={saved} entry={modal.entry} />}
     {modal?.kind === 'memory' && <NoteEditor userID={user.id} note={null} kind="note" anime={modal.entry.anime_id} animeTitle={modal.entry.title} onClose={() => setModal(null)} />}
     {modal?.kind === 'watch' && <WatchEditor onClose={() => setModal(null)} onSaved={saved} entry={modal.entry} />}
     {modal?.kind === 'detail' && <EntryDetail entry={modal.entry} userID={user.id} onClose={() => setModal(null)} onEdit={entry => setModal({ kind: 'edit', entry })} onWatch={entry => setModal({ kind: 'watch', entry })} onDeleted={saved} />}

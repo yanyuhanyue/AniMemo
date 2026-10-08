@@ -36,3 +36,17 @@ test('an old account response is cancelled before the new session is exposed', a
   assert.equal(cache.getQueryData(['journal', 'old-user']), undefined);
   cache.clear();
 });
+
+test('site branding stays observed across sign-in and updates immediately after saving', async () => {
+  const cache = new QueryClient();
+  cache.setQueryData(['site'], { name: 'AniMemo', icon_revision: '' });
+  const observer = new QueryObserver(cache, { queryKey: ['site'], enabled: false });
+  const unsubscribe = observer.subscribe(() => {});
+  await changeAccount(cache, { id: 'admin' });
+  const updated = { name: '星夜手账', icon_revision: 'new-icon' };
+  cache.setQueryData(['site'], updated);
+  assert.deepEqual(observer.getCurrentResult().data, updated);
+  await changeAccount(cache, null);
+  assert.deepEqual(cache.getQueryData(['site']), updated);
+  unsubscribe(); cache.clear();
+});

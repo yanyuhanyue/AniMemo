@@ -5685,6 +5685,149 @@
           }
         }
       }
+    },
+    "/api/v1/admin/site/images/{kind}": {
+      "put": {
+        "summary": "Upload a public site icon or card cover (administrator)",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Restore the default site icon or card cover (administrator)",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      },
+      "parameters": [
+        {
+          "name": "kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "icon",
+              "cover"
+            ]
+          }
+        }
+      ]
+    },
+    "/api/v1/site/images/{kind}/{revision}": {
+      "parameters": [
+        {
+          "name": "kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "icon",
+              "cover"
+            ]
+          }
+        },
+        {
+          "name": "revision",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Read the current public site branding image",
+        "description": "Public raster image. New revisions use new URLs; unknown or removed revisions return 404.",
+        "responses": {
+          "200": {
+            "description": "Original validated image bytes",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
     }
   },
   "components": {
@@ -7632,6 +7775,16 @@
           },
           "homepage_owner_slug": {
             "type": "string"
+          },
+          "icon_revision": {
+            "type": "string",
+            "readOnly": true,
+            "description": "Current public branding image revision; empty when using the default."
+          },
+          "cover_revision": {
+            "type": "string",
+            "readOnly": true,
+            "description": "Current public branding image revision; empty when using the default."
           }
         }
       },

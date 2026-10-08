@@ -6,11 +6,27 @@ import { client, errorMessage, result } from '../api/client';
 import type { Entry, Status } from '../api/client';
 import { Dialog } from '../components/ui/Dialog';
 import { statusLabels } from './labels';
+import { Icon } from '../components/ui/Icon';
 
 export const TagColors = createContext<Record<string, string>>({});
 export function TagChip({ name }: { name: string }) {
   const color = useContext(TagColors)[name];
   return <span style={color ? { backgroundColor: `color-mix(in srgb, ${color} 22%, white)`, color: '#272238', borderColor: color } : undefined}>{name}</span>;
+}
+
+export function TagField({ userID, value, onChange, limit = 8, maxLength = 200 }: { userID: string; value: string; onChange: (value: string) => void; limit?: number; maxLength?: number }) {
+  const tags = useQuery({ queryKey: ['journal', userID, 'tags'], queryFn: ({ signal }) => result(client.GET('/api/v1/tags', { signal })) });
+  const [expanded, setExpanded] = useState(false);
+  const selected = [...new Set(value.split(/[,，]/).map(v => v.trim()).filter(Boolean))];
+  const choices = tags.data?.items || [];
+  return <div className="tag-field">
+    <label>标签 <span className="optional">选填</span><Input name="tags" value={value} onChange={event => onChange(event.target.value)} maxLength={maxLength} placeholder="选择下方标签，也可以自己填写" /><span className="field-hint">用逗号分隔，最多 {limit} 个标签。</span></label>
+    {choices.length > 0 && <div className="tag-suggestions" role="group" aria-label="可选标签">{(expanded ? choices : choices.slice(0, 12)).map(tag => {
+      const active = selected.includes(tag.name);
+      return <Button type="button" className="tag-suggestion" key={tag.name} aria-pressed={active} disabled={!active && selected.length >= limit} style={{ borderColor: tag.color, backgroundColor: `color-mix(in srgb, ${tag.color} ${active ? 25 : 9}%, white)` }} onClick={() => onChange((active ? selected.filter(name => name !== tag.name) : [...selected, tag.name]).join('，'))}>{active && <Icon name="check" />}{tag.name}</Button>;
+    })}{choices.length > 12 && <Button type="button" className="text-button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? '收起标签' : `更多标签（${choices.length}）`}</Button>}</div>}
+    {tags.isPending && <p className="field-hint" role="status">正在读取可选标签…</p>}{tags.error && <p className="error-message" role="alert">{errorMessage(tags.error)}</p>}
+  </div>;
 }
 
 export function TagEditor({ userID, onClose }: { userID: string; onClose: () => void }) {

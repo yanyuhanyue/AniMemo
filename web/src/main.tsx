@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from './App';
 import { ApiError } from './api/client';
+import { SiteIdentity } from './components/SiteIdentity';
 import './styles.css';
 
 const queryClient = new QueryClient({ defaultOptions: {
@@ -10,4 +11,4 @@ const queryClient = new QueryClient({ defaultOptions: {
   mutations: { retry: false },
 } });
 
-createRoot(document.getElementById('root')!).render(<StrictMode><QueryClientProvider client={queryClient}><App /></QueryClientProvider></StrictMode>);
+createRoot(document.getElementById('root')!).render(<StrictMode><QueryClientProvider client={queryClient}><SiteIdentity /><App /></QueryClientProvider></StrictMode>);

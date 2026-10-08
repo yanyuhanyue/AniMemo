@@ -88,7 +88,7 @@ type Tag struct {
 var hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 func (s *Service) Tags(ctx context.Context, owner string) ([]Tag, error) {
-	rows, err := s.pool.Query(ctx, `SELECT n.name,coalesce(t.color,'#8974cc') FROM (SELECT name FROM tags WHERE user_id=$1 UNION SELECT unnest(tags) FROM entries WHERE user_id=$1 AND deleted_at IS NULL) n LEFT JOIN tags t ON t.name=n.name AND t.user_id=$1 ORDER BY n.name`, owner)
+	rows, err := s.pool.Query(ctx, `SELECT n.name,coalesce(t.color,p.color,'#8974cc') FROM (SELECT name FROM tags WHERE user_id=$1 UNION SELECT name FROM tag_presets UNION SELECT unnest(tags) FROM entries WHERE user_id=$1 AND deleted_at IS NULL) n LEFT JOIN tags t ON t.name=n.name AND t.user_id=$1 LEFT JOIN tag_presets p ON p.name=n.name ORDER BY n.name`, owner)
 	if err != nil {
 		return nil, err
 	}

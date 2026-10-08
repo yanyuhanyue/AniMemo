@@ -14,6 +14,7 @@ import { Achievements } from "./Achievements";
 import { MemorySearch } from "./Search";
 import { AnimeSelect, useAnimeReference } from "./shared";
 import { Rating } from "../components/Rating";
+import { SiteCard, useSite } from "../components/SiteIdentity";
 import "./memory.css";
 const tabs = {
   search: "找回记忆",
@@ -319,6 +320,7 @@ export function SharedMemoryPage({ token }: { token: string }) {
   );
 }
 export function SiteHomepage() {
+  const site = useSite();
   const q = useQuery({
     queryKey: ["public", "homepage"],
     retry: false,
@@ -329,6 +331,7 @@ export function SiteHomepage() {
       title={
         q.data?.owner ? `${q.data.owner.name} 的放映室` : "欢迎来到 AniMemo"
       }
+      intro={<SiteCard site={site.data} />}
     >
       {q.isPending ? (
         <p role="status">正在读取站点首页…</p>
@@ -336,6 +339,7 @@ export function SiteHomepage() {
         <Problem error={q.error} />
       ) : q.data.owner ? (
         <>
+          <h2>{q.data.owner.name} 的放映室</h2>
           <p className="intro-description">{q.data.owner.bio}</p>
           <div className="public-grid">
             {q.data.items.map((item) => (
@@ -346,11 +350,12 @@ export function SiteHomepage() {
         </>
       ) : (
         <div className="memory-empty">
-          <h2>站点还没有指定公开主人</h2>
-          <p>你仍然可以登录自己的手账，或浏览公开目录。</p>
+          <h2>收藏你的番剧记忆</h2>
+          <p>从一部看过的动画开始，也可以看看大家分享的手账。</p>
           <a className="button primary" href="/">
             打开我的手账
           </a>
+          <a className="button secondary" href="/explore">浏览公开手账</a>
         </div>
       )}
     </PageShell>

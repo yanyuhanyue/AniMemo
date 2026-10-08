@@ -9,6 +9,7 @@ import { Icon } from "../components/ui/Icon";
 import { accentLabels, formatLabels, statusLabels, statuses } from "./labels";
 import type { components } from "../api/schema";
 import { SourcePicker, type SourceChoice } from "./SourcePicker";
+import { TagField } from "./ManageTools";
 
 type EntryInput = components["schemas"]["CreateEntry"];
 function readEntryForm(data: FormData): EntryInput {
@@ -35,10 +36,12 @@ function readEntryForm(data: FormData): EntryInput {
 
 export function EntryEditor({
   entry,
+  userID,
   onClose,
   onSaved,
 }: {
   entry: Entry | null;
+  userID: string;
   onClose: () => void;
   onSaved: (message: string) => void;
 }) {
@@ -46,6 +49,7 @@ export function EntryEditor({
   const [draft, setDraft] = useState<EntryInput | null>(null);
   const [source, setSource] = useState<SourceChoice | null>(null);
   const [picking, setPicking] = useState(false);
+  const [tagText, setTagText] = useState(entry?.tags.join('，') || '');
   const values = draft ?? entry;
   const save = useMutation({
     mutationFn: async (data: FormData) => {
@@ -107,7 +111,7 @@ export function EntryEditor({
       title={entry ? "编辑番剧记录" : "加入番剧"}
       onClose={onClose}
       wide
-      className={entry ? "entry-editor" : ""}
+      className={`entry-form-dialog${entry ? " entry-editor" : ""}`}
     >
       <p className="editor-introduction muted">
         {entry
@@ -150,22 +154,13 @@ export function EntryEditor({
               rows={3}
             />
           </label>
+          <TagField userID={userID} value={tagText} onChange={setTagText} />
           <details className="extra-fields">
-            <summary>{entry ? "作品资料与标签" : "补充评分、状态与作品资料"}</summary>
+            <summary>{entry ? "作品资料" : "补充评分、状态与作品资料"}</summary>
             {!entry && <p className="field-hint">
               不填写细节也能保存；选择“看过”不会生成观看日期或逐集记录。
             </p>}
             {!entry && personalFields}
-            <label>
-              标签 <span className="optional">选填</span>
-              <Input
-                name="tags"
-                defaultValue={values?.tags?.join("，")}
-                placeholder="治愈，夏天，学生时代"
-                maxLength={200}
-              />
-              <span className="field-hint">用逗号分隔，最多 8 个标签。</span>
-            </label>
             <label>
               原名 <span className="optional">选填</span>
               <Input

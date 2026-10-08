@@ -200,6 +200,8 @@ func (s *Service) AdminUserAction(ctx context.Context, actor, target string, inp
 
 type SiteSettings struct {
 	HomepageOwnerSlug string `json:"homepage_owner_slug"`
+	IconRevision      string `json:"icon_revision"`
+	CoverRevision     string `json:"cover_revision"`
 	Name              string `json:"name"`
 	Description       string `json:"description"`
 	RegistrationOpen  bool   `json:"registration_open"`
@@ -208,8 +210,14 @@ type SiteSettings struct {
 
 func (s *Service) Site(ctx context.Context) (SiteSettings, error) {
 	var v SiteSettings
-	err := s.pool.QueryRow(ctx, `SELECT name,description,registration_open,version,coalesce((SELECT public_slug::text FROM users WHERE id=homepage_owner),'') FROM site_settings`).Scan(&v.Name, &v.Description, &v.RegistrationOpen, &v.Version, &v.HomepageOwnerSlug)
+	err := scanSite(s.pool.QueryRow(ctx, siteQuery), &v)
 	return v, err
+}
+
+const siteQuery = `SELECT name,description,registration_open,version,coalesce((SELECT public_slug::text FROM users WHERE id=homepage_owner),''),coalesce((SELECT revision::text FROM site_images WHERE kind='icon'),''),coalesce((SELECT revision::text FROM site_images WHERE kind='cover'),'') FROM site_settings`
+
+func scanSite(row pgx.Row, v *SiteSettings) error {
+	return row.Scan(&v.Name, &v.Description, &v.RegistrationOpen, &v.Version, &v.HomepageOwnerSlug, &v.IconRevision, &v.CoverRevision)
 }
 func (s *Service) UpdateSite(ctx context.Context, actor string, input SiteSettings) (SiteSettings, error) {
 	input.Name = strings.TrimSpace(input.Name)
@@ -245,6 +253,9 @@ func (s *Service) UpdateSite(ctx context.Context, actor string, input SiteSettin
 		return input, err
 	}
 	if err = governance.Audit(ctx, tx, actor, "update-settings", "site", "singleton", map[string]any{"name": input.Name, "registration_open": input.RegistrationOpen}); err != nil {
+		return input, err
+	}
+	if err = scanSite(tx.QueryRow(ctx, siteQuery), &input); err != nil {
 		return input, err
 	}
 	return input, tx.Commit(ctx)
