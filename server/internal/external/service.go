@@ -107,14 +107,18 @@ func (s *Service) Cover(ctx context.Context, subjectID int64) (media.Image, erro
 }
 
 type ApplyInput struct {
-	SubjectID int64    `json:"subject_id"`
-	Version   int      `json:"version"`
-	Snapshot  string   `json:"snapshot"`
-	Fields    []string `json:"fields"`
-	Cover     bool     `json:"cover"`
+	SubjectID int64           `json:"subject_id"`
+	Version   int             `json:"version"`
+	Snapshot  string          `json:"snapshot"`
+	Fields    []string        `json:"fields"`
+	Cover     bool            `json:"cover"`
+	Entry     *journal.Create `json:"entry,omitempty"`
 }
 
 func (s *Service) Apply(ctx context.Context, owner, entryID string, input ApplyInput) (journal.Entry, error) {
+	if entryID != "" && input.Entry != nil {
+		return journal.Entry{}, fault.Field("entry", "新建内容只能用于加入新番剧；更新资料不会修改个人记录。")
+	}
 	subject, err := s.provider.Subject(ctx, input.SubjectID)
 	if err != nil {
 		return journal.Entry{}, err
@@ -131,5 +135,5 @@ func (s *Service) Apply(ctx context.Context, owner, entryID string, input ApplyI
 		}
 		cover = &picture
 	}
-	return s.journal.ApplySource(ctx, owner, entryID, input.Version, preview.Metadata, input.Fields, cover)
+	return s.journal.ApplySource(ctx, owner, entryID, input.Version, preview.Metadata, input.Fields, cover, input.Entry)
 }

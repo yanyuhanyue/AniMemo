@@ -6627,6 +6627,8 @@ export interface components {
             page_size: number;
         };
         ApplySource: {
+            /** @description Optional new-entry draft, accepted only by /entries/from-bangumi. Selected metadata fields override the draft; cover, binding and personal fields are saved atomically. */
+            entry?: components["schemas"]["CreateEntry"];
             subject_id: number;
             snapshot: string;
             fields: ("title" | "original_title" | "format" | "total_episodes" | "studio" | "airing_period" | "description" | "reference_url")[];

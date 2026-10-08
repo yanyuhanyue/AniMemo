@@ -52,7 +52,7 @@ func TestDurableImportBackupAndIsolation(t *testing.T) {
 	data := coverFixture(t, "image/png")
 	uploadCover(t, alice, base, path+"/cover?version=1", "image/png", data, 200)
 	request(t, alice, base, "POST", path+"/history", journal.RecordInput{WatchedOn: "2026-10-07", EpisodeFrom: 1, EpisodeTo: 4, Note: "原始观看记录", Rewatch: 2, RequestID: id.New()}, 201)
-	if _, err := service.ApplySource(ctx, aliceUser.ID, e.ID, 3, journal.SourceMetadata{SubjectID: 101, Title: "完整备份", Format: "tv", TotalEpisodes: 12}, nil, nil); err != nil {
+	if _, err := service.ApplySource(ctx, aliceUser.ID, e.ID, 3, journal.SourceMetadata{SubjectID: 101, Title: "完整备份", Format: "tv", TotalEpisodes: 12}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	backup := request(t, alice, base, "GET", "/api/v1/backup", nil, 200)

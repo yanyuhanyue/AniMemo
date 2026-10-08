@@ -10,7 +10,7 @@ export function Dialog({ title, eyebrow, onClose, children, wide = false }: { ti
       <Primitive.Backdrop className="dialog-backdrop" />
       <Primitive.Popup className={`dialog ${wide ? 'dialog-wide' : ''}`} ref={popup} initialFocus={() => popup.current?.querySelector<HTMLElement>('[data-initial-focus]') ?? popup.current}>
         <header className="dialog-header"><div>{eyebrow && <p className="eyebrow">{eyebrow}</p>}<Primitive.Title render={<h2 />}>{title}</Primitive.Title></div><Button type="button" className="icon-button" onClick={onClose} aria-label="关闭窗口"><Icon name="close" /></Button></header>
-        {children}
+        <div className="dialog-body">{children}</div>
       </Primitive.Popup>
     </Primitive.Portal>
   </Primitive.Root>;

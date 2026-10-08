@@ -46,7 +46,11 @@ body { background: radial-gradient(ellipse at 0 20%,#f5eafb80,transparent 48%),v
 .search-field,.sort-field select { border-radius: 11px; }
 .site-footer { border-color: var(--am-border); color: var(--am-muted); }
 .dialog-backdrop { position: fixed; inset: 0; z-index: 100; background: #30203e70; backdrop-filter: blur(6px); }
-.dialog { position: fixed; z-index: 101; top: 50%; left: 50%; transform: translate(-50%,-50%); margin: 0; border: 1px solid #e1d6ed; border-radius: 22px; background: var(--am-paper); box-shadow: 0 25px 90px #30203e35; }
+.dialog { position: fixed; z-index: 101; top: 50%; left: 50%; transform: translate(-50%,-50%); margin: 0; border: 1px solid #e1d6ed; border-radius: 22px; background: var(--am-paper); box-shadow: 0 25px 90px #30203e35; display: flex; flex-direction: column; overflow: hidden; max-height: calc(100dvh - 32px); }
+.dialog-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.dialog-header { flex: 0 0 auto; }
+.dialog-header h2 { margin-top: 0; }
+.dialog-header .eyebrow + h2 { margin-top: 7px; }
 .dialog input,.dialog select,.dialog textarea,.auth-form input { border-color: var(--am-border); border-radius: 10px; }
 .dialog-header { background: linear-gradient(110deg,#f4ecfa,#fff8fb); border-color: var(--am-border); }
 .dialog-header .eyebrow { color: var(--am-muted); }

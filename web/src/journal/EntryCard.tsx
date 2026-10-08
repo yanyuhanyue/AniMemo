@@ -28,11 +28,15 @@ export function EntryCard({
         </label>
       )}
       <Button
-        className="entry-cover"
+        className="entry-cover entry-cover-summary"
         onClick={() => onOpen(entry)}
         aria-label={`查看 ${entry.title}`}
       >
-        <CoverImage entry={entry} card />
+        <span className="entry-poster">
+          <span className="entry-poster-empty" aria-hidden="true"><Icon name="book" /><small>暂无封面</small></span>
+          <CoverImage entry={entry} card />
+        </span>
+        <div className="entry-cover-copy">
         <div className="cover-heading">
           <span>{formatLabels[entry.format]}</span>
           {entry.score !== null && (
@@ -43,43 +47,20 @@ export function EntryCard({
             </span>
           )}
         </div>
-        <div className="cover-art" aria-hidden="true">
-          <span className="cover-orbit" />
-          <span className="cover-disc">
-            <Icon name="play" />
-          </span>
-          <span className="cover-caption">MY ANIME MEMORY</span>
-        </div>
         <div className="cover-title">
           <h3>{entry.title}</h3>
-          <span>{entry.original_title || "把故事，留在这里。"}</span>
+          {entry.original_title && <span>{entry.original_title}</span>}
         </div>
         <span className={`entry-status status-${entry.status}`}>
           <span />
           {statusLabels[entry.status]}
         </span>
+        </div>
       </Button>
       <div className="entry-body">
-        <div className="entry-tags">
-          {entry.tags.length > 0 ? (
-            entry.tags
-              .slice(0, 3)
-              .map((tag) => <TagChip key={tag} name={tag} />)
-          ) : (
-            <span className="tag-placeholder">属于你的观看清单</span>
-          )}
-        </div>
-        <p className="entry-memory-preview">
-          {entry.notes || "还记得哪一幕，或当时的自己？"}
-        </p>
-        <p className="entry-viewing-fact">
-          {entry.watched_episodes > 0
-            ? `已记录到第 ${entry.watched_episodes} 话`
-            : entry.status === "planned"
-              ? "尚未记录观看经历"
-              : "具体话数未记"}
-          {entry.score !== null ? ` · 我的评分 ${entry.score}` : ""}
-        </p>
+        {entry.tags.length > 0 && <div className="entry-tags">{entry.tags.slice(0, 3).map(tag => <TagChip key={tag} name={tag} />)}</div>}
+        {entry.notes && <p className="entry-memory-preview">{entry.notes}</p>}
+        {entry.watched_episodes > 0 && <p className="entry-viewing-fact">已记录到第 {entry.watched_episodes} 话</p>}
         <div className="entry-actions">
           <Button className="record-button" onClick={() => onMemory(entry)}>
             <Icon name="plus" />

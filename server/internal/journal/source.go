@@ -24,7 +24,10 @@ type SourceMetadata struct {
 }
 
 // ApplySource owns identity, quota and version checks. Network I/O is finished before entering this transaction.
-func (s *Service) ApplySource(ctx context.Context, owner, entryID string, version int, metadata SourceMetadata, fields []string, cover *media.Image) (Entry, error) {
+func (s *Service) ApplySource(ctx context.Context, owner, entryID string, version int, metadata SourceMetadata, fields []string, cover *media.Image, initial *Create) (Entry, error) {
+	if entryID != "" && initial != nil {
+		return Entry{}, fault.Field("entry", "新建内容不能用于覆盖已有记录。")
+	}
 	if metadata.SubjectID < 1 || metadata.SubjectID > 2147483647 {
 		return Entry{}, fault.Field("subject_id", "Bangumi 条目标识无效。")
 	}
@@ -67,6 +70,26 @@ func (s *Service) ApplySource(ctx context.Context, owner, entryID string, versio
 			return Entry{}, fault.New("validation_error", "手账最多保存 5000 部番剧。")
 		}
 		entry = Entry{Title: metadata.Title, Status: "recorded", AiringState: "unknown", Format: "tv", Accent: "violet", Tags: []string{}, Visibility: "private"}
+		if initial != nil {
+			entry.Title, entry.OriginalTitle = initial.Title, initial.OriginalTitle
+			entry.TotalEpisodes, entry.Details = initial.TotalEpisodes, initial.Details
+			entry.Score, entry.Notes, entry.Tags = initial.Score, initial.Notes, initial.Tags
+			if initial.Format != "" {
+				entry.Format = initial.Format
+			}
+			if initial.Status != "" {
+				entry.Status = initial.Status
+			}
+			if initial.AiringState != "" {
+				entry.AiringState = initial.AiringState
+			}
+			if initial.Accent != "" {
+				entry.Accent = initial.Accent
+			}
+			if initial.Visibility != "" {
+				entry.Visibility = initial.Visibility
+			}
+		}
 	} else {
 		entry, err = scanEntry(tx.QueryRow(ctx, `SELECT `+columns+` FROM entries WHERE id::text=$1 AND user_id=$2 AND deleted_at IS NULL FOR UPDATE`, entryID, owner))
 		if err != nil {
@@ -104,7 +127,7 @@ func (s *Service) ApplySource(ctx context.Context, owner, entryID string, versio
 		return Entry{}, err
 	}
 	if entryID == "" {
-		entry, err = insertEntry(ctx, tx, owner, Create{Title: entry.Title, OriginalTitle: entry.OriginalTitle, Format: entry.Format, TotalEpisodes: entry.TotalEpisodes, Details: entry.Details})
+		entry, err = insertEntry(ctx, tx, owner, Create{Title: entry.Title, OriginalTitle: entry.OriginalTitle, Format: entry.Format, TotalEpisodes: entry.TotalEpisodes, Details: entry.Details, Status: entry.Status, AiringState: entry.AiringState, Score: entry.Score, Notes: entry.Notes, Tags: entry.Tags, Accent: entry.Accent, Visibility: entry.Visibility})
 		entryID = entry.ID
 	} else {
 		// Metadata refresh never changes personal scores, tags, notes, visibility or watch progress.

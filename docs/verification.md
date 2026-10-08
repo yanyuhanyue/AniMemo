@@ -1,6 +1,20 @@
 # 开发验收记录
 
-## 当前：1.3 RC4 本机交接（2026-10-08，Windows + Docker Desktop）
+## 当前：番剧录入与资料弹窗修复（2026-10-08）
+
+新建可在保存前搜索和选择 Bangumi，选择结果回填到原草稿；最终创建在同一事务保存作品、来源、封面与个人字段。修复资料弹窗正文裁切，增加海报搜索结果，简化状态名称及作品卡片。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 源码及合同 | `npm run check` PASS；OpenAPI 与 Go/TypeScript 生成物一致 |
+| PostgreSQL | `TestBangumiMetadataIsolationAndConflicts`、`TestRecorded*`、`TestImport*` PASS；新建保留草稿字段，非法草稿无残留，既有条目拒绝混入新建内容 |
+| 真实 Bangumi 与浏览器 | 隔离账号搜索夏目友人帐、选 subject 259、带回表单并保存 PASS；封面、13 话资料、8.5 分、标签及选片前的感想均保留；数据库仅新增一条、默认私密/recorded/0 已看话数 |
+| 回退与既有入口 | 返回手动填写保留草稿；已有作品刷新资料保留个人内容；卡片/列表、详情关闭后的焦点恢复 PASS |
+| 布局 | 桌面 1280 × 720、手机 390 × 844 与 320 × 640 实际检查；窄屏正文无横向溢出，标题/关闭按钮及预览底部操作可达；没有观察到页面脚本异常 |
+
+截图与保存结果在 `.local/output/entry-ui/`，数据库结果在 `.local/output/entry-source-test-api.json`。本轮使用内置浏览器与真实 Go API，没有重新执行 axe 全站扫描，也不代表 iOS Safari 验收。用户实例升级与备份记录另存 `.local/output/entry-ui-local-review-update.json`；源码通过既有分支交接，不新建正式发行标签。
+
+## 1.3 RC4 本机交接（2026-10-08，Windows + Docker Desktop）
 
 已核验新交接包的 332 项文件，并接入 `E:\番剧记录\animemo-next`。原 ZIP SHA-256 为 `d2489c2ded480e174d815a83867b3cc87a07868993326c0e3ac2cdd9faf354ad`。从本机 RC2 提交 `b61a63b` 应用累计补丁得到的 Git tree 与包内源码提交 `12755de` 的 tree 一致，均为 `58e0ae608e26a3e67e97688f37cf9339bd3f6fba`；合并冲突按这一完整结果核对，295 项源码逐一校验通过，保留两边提交历史。
 

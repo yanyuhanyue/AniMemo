@@ -70,6 +70,23 @@ func TestBangumiMetadataIsolationAndConflicts(t *testing.T) {
 	}
 	preview := decodeAs[external.SubjectPreview](t, request(t, owner, base, "GET", "/api/v1/providers/bangumi/subjects/101", nil, 200))
 	input := external.ApplyInput{SubjectID: 101, Snapshot: preview.Snapshot, Fields: []string{"title", "original_title", "total_episodes", "description", "reference_url"}, Cover: true}
+	draftInput := input
+	score := 8.5
+	draftInput.Fields = []string{"original_title", "total_episodes", "description"}
+	draftInput.Entry = &journal.Create{Title: "保留我填写的名称", Notes: "选片之前写好的感想", Score: &score, Tags: []string{"学生时代"}, Accent: "blue"}
+	draft := decodeAs[journal.Entry](t, request(t, other, base, "POST", "/api/v1/entries/from-bangumi", draftInput, 201))
+	if draft.Title != draftInput.Entry.Title || draft.Notes != draftInput.Entry.Notes || draft.Score == nil || *draft.Score != score || len(draft.Tags) != 1 || draft.Accent != "blue" || draft.OriginalTitle != "原文" || draft.TotalEpisodes != 12 || draft.Status != "recorded" || draft.WatchedEpisodes != 0 || draft.CoverRevision == nil || draft.Source == nil {
+		t.Fatalf("new source draft was not saved together: %+v", draft)
+	}
+	request(t, other, base, "GET", fmt.Sprintf("/api/v1/entries/%s/cover/%s", draft.ID, *draft.CoverRevision), nil, 200)
+	request(t, other, base, "POST", "/api/v1/entries/"+draft.ID+"/source", draftInput, 400)
+	// Failed drafts must not leave a half-created entry or consume the identity.
+	invalid := draftInput
+	invalid.Entry = &journal.Create{Title: "无效草稿", Status: "invalid"}
+	request(t, owner, base, "POST", "/api/v1/entries/from-bangumi", invalid, 400)
+	if page := decodeAs[journal.Page](t, request(t, owner, base, "GET", "/api/v1/entries", nil, 200)); page.Total != 0 {
+		t.Fatal("invalid source draft created an entry")
+	}
 	entry := decodeAs[journal.Entry](t, request(t, owner, base, "POST", "/api/v1/entries/from-bangumi", input, 201))
 	if entry.Source == nil || entry.Source.SubjectID != 101 || entry.CoverRevision == nil || entry.Visibility != "private" {
 		t.Fatalf("incomplete source import: %+v", entry)

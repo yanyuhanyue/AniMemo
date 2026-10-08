@@ -1,12 +1,37 @@
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { useMutation } from "@tanstack/react-query";
-import type { FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { client, errorMessage, result } from "../api/client";
 import type { Accent, Entry, Status } from "../api/client";
 import { Dialog } from "../components/ui/Dialog";
 import { Icon } from "../components/ui/Icon";
 import { accentLabels, formatLabels, statusLabels, statuses } from "./labels";
+import type { components } from "../api/schema";
+import { SourcePicker, type SourceChoice } from "./SourcePicker";
+
+type EntryInput = components["schemas"]["CreateEntry"];
+function readEntryForm(data: FormData): EntryInput {
+  return {
+    title: String(data.get("title")).trim(),
+    original_title: String(data.get("original_title")).trim(),
+    format: String(data.get("format")) as Entry["format"],
+    status: String(data.get("status")) as Status,
+    airing_state: String(data.get("airing_state")) as Entry["airing_state"],
+    total_episodes: Number(data.get("total_episodes")),
+    score: Number(data.get("score")) || null,
+    notes: String(data.get("notes")).trim(),
+    tags: String(data.get("tags")).split(/[,，]/).map(tag => tag.trim()).filter(Boolean),
+    accent: String(data.get("accent")) as Accent,
+    visibility: String(data.get("visibility")) as Entry["visibility"],
+    details: {
+      studio: String(data.get("studio")).trim(),
+      airing_period: String(data.get("airing_period")).trim(),
+      description: String(data.get("description")).trim(),
+      reference_url: String(data.get("reference_url")).trim(),
+    },
+  };
+}
 
 export function EntryEditor({
   entry,
@@ -17,40 +42,27 @@ export function EntryEditor({
   onClose: () => void;
   onSaved: (message: string) => void;
 }) {
+  const form = useRef<HTMLFormElement>(null);
+  const [draft, setDraft] = useState<EntryInput | null>(null);
+  const [source, setSource] = useState<SourceChoice | null>(null);
+  const [picking, setPicking] = useState(false);
+  const values = draft ?? entry;
   const save = useMutation({
     mutationFn: async (data: FormData) => {
-      const score = Number(data.get("score"));
-      const body = {
-        title: String(data.get("title")).trim(),
-        original_title: String(data.get("original_title")).trim(),
-        format: String(data.get("format")) as Entry["format"],
-        status: String(data.get("status")) as Status,
-        airing_state: String(data.get("airing_state")) as Entry["airing_state"],
-        total_episodes: Number(data.get("total_episodes")),
-        notes: String(data.get("notes")).trim(),
-        tags: String(data.get("tags"))
-          .split(/[,，]/)
-          .map((tag) => tag.trim())
-          .filter(Boolean),
-        accent: String(data.get("accent")) as Accent,
-        visibility: String(data.get("visibility")) as Entry["visibility"],
-        details: {
-          studio: String(data.get("studio")).trim(),
-          airing_period: String(data.get("airing_period")).trim(),
-          description: String(data.get("description")).trim(),
-          reference_url: String(data.get("reference_url")).trim(),
-        },
-      };
+      const body = readEntryForm(data);
+      if (!entry && source) return result(client.POST("/api/v1/entries/from-bangumi", {
+        body: { subject_id: source.preview.metadata.subject_id, snapshot: source.preview.snapshot, fields: [], cover: source.cover, entry: body },
+      }));
       return entry
         ? result(
             client.PATCH("/api/v1/entries/{id}", {
               params: { path: { id: entry.id } },
-              body: { ...body, score, version: entry.version },
+              body: { ...body, score: body.score ?? 0, version: entry.version },
             }),
           )
         : result(
             client.POST("/api/v1/entries", {
-              body: { ...body, score: score || null },
+              body,
             }),
           );
     },
@@ -61,18 +73,37 @@ export function EntryEditor({
     event.preventDefault();
     save.mutate(new FormData(event.currentTarget));
   }
+  function openPicker() {
+    setDraft(readEntryForm(new FormData(form.current!)));
+    setPicking(true);
+  }
+  function choose(choice: SourceChoice) {
+    const next: EntryInput = { ...draft!, details: { ...draft?.details } };
+    const metadata = choice.preview.metadata;
+    for (const field of ["title", "original_title", "format", "total_episodes"] as const) {
+      if (choice.fields.includes(field)) Object.assign(next, { [field]: metadata[field] });
+    }
+    for (const field of ["studio", "airing_period", "description", "reference_url"] as const) {
+      if (choice.fields.includes(field)) Object.assign(next.details!, { [field]: metadata.details[field] });
+    }
+    setDraft(next);
+    setSource(choice);
+    setPicking(false);
+  }
+  if (picking) return <SourcePicker entry={null} initialQuery={draft?.title} onClose={() => setPicking(false)} onSaved={onSaved} onPick={choose} />;
   return (
     <Dialog
-      title={entry ? "编辑番剧记录" : "记下一部看过的番"}
-      eyebrow="KEEP YOUR ANIME MEMORIES"
+      title={entry ? "编辑番剧记录" : "加入番剧"}
       onClose={onClose}
+      wide={!entry}
     >
       <p className="editor-introduction muted">
         {entry
           ? "只修改想补充的内容，其他资料会保留。"
-          : "只记得名字也可以。日期、集数和评分，都可以以后再补。"}
+          : "搜索 Bangumi 带入资料，也可以只填名称保存。"}
       </p>
       <form
+        ref={form}
         className="editor-form"
         onSubmit={submit}
         onInvalidCapture={(event) => {
@@ -81,31 +112,35 @@ export function EntryEditor({
         }}
       >
         <fieldset disabled={save.isPending}>
-          <label>
+          {source && <section className="selected-source" aria-label="已选择的 Bangumi 作品">
+            {source.cover && <img src={"/api/v1/providers/bangumi/subjects/" + source.preview.metadata.subject_id + "/cover"} alt="" />}
+            <div><span className="source-provider-label">已填入 Bangumi 资料</span><strong>{source.preview.metadata.title}</strong><span>{source.cover ? "封面会随记录一起保存" : "不使用 Bangumi 封面"}</span><div className="selected-source-actions"><Button type="button" className="text-button" onClick={openPicker}>更换作品</Button><Button type="button" className="text-button" onClick={() => setSource(null)}>取消绑定</Button></div></div>
+          </section>}
+          <div className="entry-title-row"><label>
             番剧名称 <span className="required">*</span>
             <Input
               name="title"
               placeholder="例如：夏目友人帐"
-              defaultValue={entry?.title}
+              defaultValue={values?.title}
               required
               maxLength={160}
               data-initial-focus
             />
-          </label>
+          </label>{!entry && !source && <Button type="button" className="button secondary source-start" onClick={openPicker}><Icon name="search" />搜索 Bangumi</Button>}</div>
           <label>
             留一点感想 <span className="optional">选填</span>
             <textarea
               name="notes"
-              defaultValue={entry?.notes}
-              placeholder="高中时看过，已经不记得哪一天，但还记得那时的心情。"
+              defaultValue={values?.notes}
+              placeholder="记下你的感想，也可以以后再补。"
               maxLength={4000}
-              rows={4}
+              rows={3}
             />
           </label>
           <details className="extra-fields">
             <summary>补充评分、状态与作品资料</summary>
             <p className="field-hint">
-              不填写细节也能保存；“看过，细节未记”不会生成观看日期或逐集记录。
+              不填写细节也能保存；选择“看过”不会生成观看日期或逐集记录。
             </p>
             <div className="form-row">
               <label>
@@ -113,9 +148,9 @@ export function EntryEditor({
                 <select
                   name="status"
                   aria-label="观看情况"
-                  defaultValue={entry?.status || "recorded"}
+                  defaultValue={values?.status || "recorded"}
                 >
-                  {statuses.filter(value => value !== "planned" || entry?.status === "planned").map((value) => (
+                  {statuses.filter(value => value !== "planned" || values?.status === "planned").map((value) => (
                     <option key={value} value={value}>
                       {statusLabels[value]}
                     </option>
@@ -130,7 +165,7 @@ export function EntryEditor({
                   min="0"
                   max="10"
                   step="0.1"
-                  defaultValue={entry?.score || ""}
+                  defaultValue={values?.score || ""}
                   placeholder="未评分"
                 />
                 <span className="field-hint">
@@ -142,7 +177,7 @@ export function EntryEditor({
               标签 <span className="optional">选填</span>
               <Input
                 name="tags"
-                defaultValue={entry?.tags.join("，")}
+                defaultValue={values?.tags?.join("，")}
                 placeholder="治愈，夏天，学生时代"
                 maxLength={200}
               />
@@ -152,14 +187,14 @@ export function EntryEditor({
               原名 <span className="optional">选填</span>
               <Input
                 name="original_title"
-                defaultValue={entry?.original_title}
+                defaultValue={values?.original_title}
                 maxLength={160}
               />
             </label>
             <div className="form-row">
               <label>
                 类型
-                <select name="format" defaultValue={entry?.format || "tv"}>
+                <select name="format" defaultValue={values?.format || "tv"}>
                   {Object.entries(formatLabels).map(([value, label]) => (
                     <option key={value} value={value}>
                       {label}
@@ -175,7 +210,7 @@ export function EntryEditor({
                   min="0"
                   max="10000"
                   step="1"
-                  defaultValue={entry?.total_episodes || ""}
+                  defaultValue={values?.total_episodes || ""}
                   placeholder="不知道可留空"
                 />
               </label>
@@ -184,7 +219,7 @@ export function EntryEditor({
               作品播出情况
               <select
                 name="airing_state"
-                defaultValue={entry?.airing_state || "unknown"}
+                defaultValue={values?.airing_state || "unknown"}
               >
                 <option value="unknown">不确定</option>
                 <option value="airing">尚未完结</option>
@@ -196,7 +231,7 @@ export function EntryEditor({
                 制作公司
                 <Input
                   name="studio"
-                  defaultValue={entry?.details.studio}
+                  defaultValue={values?.details?.studio}
                   maxLength={120}
                 />
               </label>
@@ -204,7 +239,7 @@ export function EntryEditor({
                 播出时期
                 <Input
                   name="airing_period"
-                  defaultValue={entry?.details.airing_period}
+                  defaultValue={values?.details?.airing_period}
                   maxLength={50}
                 />
               </label>
@@ -213,7 +248,7 @@ export function EntryEditor({
               作品简介
               <textarea
                 name="description"
-                defaultValue={entry?.details.description}
+                defaultValue={values?.details?.description}
                 maxLength={8000}
                 rows={3}
               />
@@ -223,7 +258,7 @@ export function EntryEditor({
               <Input
                 name="reference_url"
                 type="url"
-                defaultValue={entry?.details.reference_url}
+                defaultValue={values?.details?.reference_url}
                 maxLength={1000}
                 placeholder="https://…"
               />
@@ -235,7 +270,7 @@ export function EntryEditor({
               可见性
               <select
                 name="visibility"
-                defaultValue={entry?.visibility || "private"}
+                defaultValue={values?.visibility || "private"}
               >
                 <option value="private">私密 · 仅自己</option>
                 <option value="unlisted">持链接可见</option>
@@ -259,7 +294,7 @@ export function EntryEditor({
                       name="accent"
                       type="radio"
                       value={value}
-                      defaultChecked={value === (entry?.accent || "violet")}
+                      defaultChecked={value === (values?.accent || "violet")}
                     />
                     <span>
                       <Icon name="check" />
@@ -270,14 +305,9 @@ export function EntryEditor({
               </div>
             </div>
           </details>
-          {!entry && (
-            <p className="field-hint">
-              保存后，可在作品详情搜索 Bangumi 资料或上传封面。
-            </p>
-          )}
           <p className="field-hint">
             {!entry
-              ? "新记录默认仅自己可见，可在上方调整。记不清的细节可以一直留空。"
+              ? "默认仅自己可见。没有填写的观看细节会留空。"
               : "可见性沿用原设置，可在上方调整。"}
           </p>
         </fieldset>

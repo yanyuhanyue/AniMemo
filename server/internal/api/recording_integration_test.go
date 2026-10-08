@@ -32,7 +32,7 @@ func TestRememberedWorkWithoutInventedViewing(t *testing.T) {
 	if stats.Recorded != 1 || stats.Completed != 0 || stats.WatchedEpisodes != 0 || stats.WatchRecords != 0 || note.OccurredOn != "" || note.EpisodeID != "" || note.WatchID != "" {
 		t.Fatal("an incomplete recollection was treated as exact viewing")
 	}
-	fromSource, err := s.ApplySource(ctx, owner.ID, "", 0, journal.SourceMetadata{SubjectID: 42, Title: "补充作品资料", TotalEpisodes: 24}, []string{"total_episodes"}, nil)
+	fromSource, err := s.ApplySource(ctx, owner.ID, "", 0, journal.SourceMetadata{SubjectID: 42, Title: "补充作品资料", TotalEpisodes: 24}, []string{"total_episodes"}, nil, nil)
 	if err != nil || fromSource.Status != "recorded" || fromSource.WatchedEpisodes != 0 || fromSource.AiringState != "unknown" {
 		t.Fatalf("metadata lookup inferred viewing: %+v %v", fromSource, err)
 	}

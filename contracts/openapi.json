@@ -8710,6 +8710,10 @@
           "cover"
         ],
         "properties": {
+          "entry": {
+            "$ref": "#/components/schemas/CreateEntry",
+            "description": "Optional new-entry draft, accepted only by /entries/from-bangumi. Selected metadata fields override the draft; cover, binding and personal fields are saved atomically."
+          },
           "subject_id": {
             "type": "integer",
             "minimum": 1,
