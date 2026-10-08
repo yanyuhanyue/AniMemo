@@ -90,6 +90,13 @@ func pushTarget(item SyncItem, progress bool) (*RemoteRecord, error) {
 		return nil, fault.New("validation_error", "没有本地记录可以推送。")
 	}
 	value := item.Local.Value.Normalized()
+	if value.Status == "recorded" {
+		return nil, fault.New("validation_error", "仅记得看过的记录没有对应的 Bangumi 状态。请在需要推送时明确选择观看状态；本地回忆可继续保留。")
+	}
+	// Bangumi has no caught-up state; keep the local memory, project to watching.
+	if value.Status == "caught_up" {
+		value.Status = "watching"
+	}
 	value.Score = math.Round(value.Score)
 	for _, tag := range value.Tags {
 		if strings.IndexFunc(tag, unicode.IsSpace) >= 0 {

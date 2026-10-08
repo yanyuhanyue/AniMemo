@@ -1,7 +1,9 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -23,12 +25,12 @@ func New(pool *pgxpool.Pool) *Service {
 }
 func (s *Service) ConfigureStorage(storage *mediastore.Store) { s.storage = storage }
 
-const columns = `id,title,original_title,format,status,total_episodes,watched_episodes,score,notes,tags,accent,version,created_at,updated_at,(SELECT revision FROM entry_covers WHERE entry_id=entries.id),details,visibility,share_slug,(SELECT jsonb_build_object('provider',provider,'subject_id',subject_id,'refreshed_at',refreshed_at) FROM entry_sources WHERE entry_id=entries.id)`
-const recordColumns = `w.id,w.entry_id,e.title,e.accent,to_char(w.watched_on,'YYYY-MM-DD'),w.episode_from,w.episode_to,w.note,w.request_id,w.created_at,w.rewatch,w.version`
+const columns = `id,anime_id,airing_state,title,original_title,format,status,total_episodes,watched_episodes,score,notes,tags,accent,version,created_at,updated_at,(SELECT revision FROM entry_covers WHERE entry_id=entries.id),details,visibility,share_slug,(SELECT jsonb_build_object('provider',provider,'subject_id',subject_id,'refreshed_at',refreshed_at) FROM entry_sources WHERE entry_id=entries.id)`
+const recordColumns = `w.id,w.entry_id,e.title,e.accent,coalesce(to_char(w.watched_on,'YYYY-MM-DD'),''),w.episode_from,w.episode_to,w.note,w.request_id,w.created_at,w.rewatch,w.version,w.time_precision,w.source_line,w.source_filename`
 
 func scanEntry(row pgx.Row, extra ...any) (Entry, error) {
 	var e Entry
-	args := []any{&e.ID, &e.Title, &e.OriginalTitle, &e.Format, &e.Status, &e.TotalEpisodes, &e.WatchedEpisodes, &e.Score, &e.Notes, &e.Tags, &e.Accent, &e.Version, &e.CreatedAt, &e.UpdatedAt, &e.CoverRevision, &e.Details, &e.Visibility, &e.ShareSlug, &e.Source}
+	args := []any{&e.ID, &e.AnimeID, &e.AiringState, &e.Title, &e.OriginalTitle, &e.Format, &e.Status, &e.TotalEpisodes, &e.WatchedEpisodes, &e.Score, &e.Notes, &e.Tags, &e.Accent, &e.Version, &e.CreatedAt, &e.UpdatedAt, &e.CoverRevision, &e.Details, &e.Visibility, &e.ShareSlug, &e.Source}
 	err := row.Scan(append(args, extra...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return e, fault.New("not_found", "没有找到这部番剧。")
@@ -38,12 +40,12 @@ func scanEntry(row pgx.Row, extra ...any) (Entry, error) {
 
 func scanRecord(row pgx.Row) (Record, error) {
 	var r Record
-	err := row.Scan(&r.ID, &r.EntryID, &r.EntryTitle, &r.Accent, &r.WatchedOn, &r.EpisodeFrom, &r.EpisodeTo, &r.Note, &r.RequestID, &r.CreatedAt, &r.Rewatch, &r.Version)
+	err := row.Scan(&r.ID, &r.EntryID, &r.EntryTitle, &r.Accent, &r.WatchedOn, &r.EpisodeFrom, &r.EpisodeTo, &r.Note, &r.RequestID, &r.CreatedAt, &r.Rewatch, &r.Version, &r.TimePrecision, &r.SourceLine, &r.SourceFilename)
 	return r, err
 }
 
 func (s *Service) Create(ctx context.Context, owner string, input Create) (Entry, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -59,12 +61,15 @@ func (s *Service) Create(ctx context.Context, owner string, input Create) (Entry
 }
 
 func insertEntry(ctx context.Context, tx pgx.Tx, owner string, input Create) (Entry, error) {
-	e := Entry{Visibility: input.Visibility, Details: input.Details, ID: id.New(), Title: input.Title, OriginalTitle: input.OriginalTitle, Format: input.Format, Status: input.Status, TotalEpisodes: input.TotalEpisodes, Score: input.Score, Notes: input.Notes, Tags: input.Tags, Accent: input.Accent}
+	e := Entry{AnimeID: input.AnimeID, AiringState: input.AiringState, Visibility: input.Visibility, Details: input.Details, ID: id.New(), Title: input.Title, OriginalTitle: input.OriginalTitle, Format: input.Format, Status: input.Status, TotalEpisodes: input.TotalEpisodes, Score: input.Score, Notes: input.Notes, Tags: input.Tags, Accent: input.Accent}
 	if e.Format == "" {
 		e.Format = "tv"
 	}
 	if e.Status == "" {
-		e.Status = "planned"
+		e.Status = "recorded"
+	}
+	if e.AiringState == "" {
+		e.AiringState = "unknown"
 	}
 	if e.Accent == "" {
 		e.Accent = "violet"
@@ -75,7 +80,7 @@ func insertEntry(ctx context.Context, tx pgx.Tx, owner string, input Create) (En
 	if err := e.Validate(); err != nil {
 		return Entry{}, err
 	}
-	return scanEntry(tx.QueryRow(ctx, `INSERT INTO entries (id,user_id,title,original_title,format,status,total_episodes,watched_episodes,score,notes,tags,accent,details,visibility) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING `+columns, e.ID, owner, e.Title, e.OriginalTitle, e.Format, e.Status, e.TotalEpisodes, e.WatchedEpisodes, e.Score, e.Notes, e.Tags, e.Accent, e.Details, e.Visibility))
+	return scanEntry(tx.QueryRow(ctx, `INSERT INTO entries (id,user_id,title,original_title,format,status,total_episodes,watched_episodes,score,notes,tags,accent,details,visibility,airing_state,anime_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,nullif($16,'')::uuid) RETURNING `+columns, e.ID, owner, e.Title, e.OriginalTitle, e.Format, e.Status, e.TotalEpisodes, e.WatchedEpisodes, e.Score, e.Notes, e.Tags, e.Accent, e.Details, e.Visibility, e.AiringState, e.AnimeID))
 }
 
 func (s *Service) Get(ctx context.Context, owner, entryID string) (Entry, error) {
@@ -89,7 +94,7 @@ func (s *Service) List(ctx context.Context, owner string, filter Filter) (Page, 
 	if err := filter.Validate(); err != nil {
 		return Page{}, err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return Page{}, err
 	}
@@ -123,7 +128,7 @@ func (s *Service) List(ctx context.Context, owner string, filter Filter) (Page, 
 }
 
 func (s *Service) Update(ctx context.Context, owner, entryID string, patch Patch) (Entry, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -148,6 +153,9 @@ func updateEntry(ctx context.Context, tx pgx.Tx, owner, entryID string, patch Pa
 	}
 	if patch.Version != e.Version {
 		return Entry{}, fault.New("version_conflict", "这条记录已在其他地方更新，请关闭编辑后重新打开。")
+	}
+	if patch.AiringState != nil {
+		e.AiringState = *patch.AiringState
 	}
 	if patch.Visibility != nil {
 		e.Visibility = *patch.Visibility
@@ -191,7 +199,7 @@ func updateEntry(ctx context.Context, tx pgx.Tx, owner, entryID string, patch Pa
 	if err = e.Validate(); err != nil {
 		return Entry{}, err
 	}
-	e, err = scanEntry(tx.QueryRow(ctx, `UPDATE entries SET title=$3,original_title=$4,format=$5,status=$6,total_episodes=$7,watched_episodes=$8,score=$9,notes=$10,tags=$11,accent=$12,details=$13,visibility=$14,version=version+1,updated_at=now() WHERE id=$1 AND user_id=$2 RETURNING `+columns, entryID, owner, e.Title, e.OriginalTitle, e.Format, e.Status, e.TotalEpisodes, e.WatchedEpisodes, e.Score, e.Notes, e.Tags, e.Accent, e.Details, e.Visibility))
+	e, err = scanEntry(tx.QueryRow(ctx, `UPDATE entries SET title=$3,original_title=$4,format=$5,status=$6,total_episodes=$7,watched_episodes=$8,score=$9,notes=$10,tags=$11,accent=$12,details=$13,visibility=$14,airing_state=$15,version=version+1,updated_at=now() WHERE id=$1 AND user_id=$2 RETURNING `+columns, entryID, owner, e.Title, e.OriginalTitle, e.Format, e.Status, e.TotalEpisodes, e.WatchedEpisodes, e.Score, e.Notes, e.Tags, e.Accent, e.Details, e.Visibility, e.AiringState))
 	if err != nil {
 		return Entry{}, err
 	}
@@ -205,7 +213,7 @@ func (s *Service) Delete(ctx context.Context, owner, entryID string, version int
 	if version < 1 {
 		return fault.Field("version", "缺少记录版本，请刷新后重试。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return err
 	}
@@ -235,7 +243,7 @@ func (s *Service) RecordWatch(ctx context.Context, owner, entryID string, input 
 	if err := input.Validate(); err != nil {
 		return RecordResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return RecordResult{}, err
 	}
@@ -246,7 +254,7 @@ func (s *Service) RecordWatch(ctx context.Context, owner, entryID string, input 
 	}
 	existing, err := scanRecord(tx.QueryRow(ctx, `SELECT `+recordColumns+` FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE w.entry_id=$1 AND w.request_id=$2`, entryID, input.RequestID))
 	if err == nil {
-		if existing.WatchedOn != input.WatchedOn || existing.EpisodeFrom != input.EpisodeFrom || existing.EpisodeTo != input.EpisodeTo || existing.Note != input.Note || existing.Rewatch != input.Rewatch {
+		if existing.WatchedOn != input.WatchedOn || existing.EpisodeFrom != input.EpisodeFrom || existing.EpisodeTo != input.EpisodeTo || existing.Note != input.Note || existing.Rewatch != input.Rewatch || existing.TimePrecision != input.TimePrecision {
 			return RecordResult{}, fault.New("idempotency_conflict", "这次请求已保存过不同内容，请重新打开记录窗口。")
 		}
 		return RecordResult{Record: existing, Entry: e}, nil
@@ -258,16 +266,20 @@ func (s *Service) RecordWatch(ctx context.Context, owner, entryID string, input 
 		return RecordResult{}, fault.Field("episode_to", "观看话数不能超过总话数。")
 	}
 	recordID := id.New()
-	_, err = tx.Exec(ctx, `INSERT INTO watch_records (id,entry_id,watched_on,episode_from,episode_to,note,request_id,rewatch) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, recordID, entryID, input.WatchedOn, input.EpisodeFrom, input.EpisodeTo, input.Note, input.RequestID, input.Rewatch)
+	_, err = tx.Exec(ctx, `INSERT INTO watch_records (id,entry_id,watched_on,episode_from,episode_to,note,request_id,rewatch,time_precision) VALUES ($1,$2,nullif($3,'')::date,$4,$5,$6,$7,$8,$9)`, recordID, entryID, input.WatchedOn, input.EpisodeFrom, input.EpisodeTo, input.Note, input.RequestID, input.Rewatch, input.TimePrecision)
 	if err != nil {
 		return RecordResult{}, err
 	}
 	e.WatchedEpisodes = max(e.WatchedEpisodes, input.EpisodeTo)
-	if e.Status == "planned" {
+	if e.Status == "planned" || e.Status == "recorded" {
 		e.Status = "watching"
 	}
 	if e.TotalEpisodes > 0 && e.WatchedEpisodes == e.TotalEpisodes {
-		e.Status = "completed"
+		if e.AiringState == "finished" {
+			e.Status = "completed"
+		} else {
+			e.Status = "caught_up"
+		}
 	}
 	e, err = scanEntry(tx.QueryRow(ctx, `UPDATE entries SET watched_episodes=$3,status=$4,version=version+1,updated_at=now() WHERE id=$1 AND user_id=$2 RETURNING `+columns, entryID, owner, e.WatchedEpisodes, e.Status))
 	if err != nil {
@@ -307,19 +319,22 @@ func (s *Service) History(ctx context.Context, owner, entryID string) ([]Record,
 
 func (s *Service) Stats(ctx context.Context, owner string) (Stats, error) {
 	var stats Stats
-	err := s.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE status='watching'),count(*) FILTER(WHERE status='completed'),count(*) FILTER(WHERE status='planned'),count(*) FILTER(WHERE status='on_hold'),count(*) FILTER(WHERE status='dropped'),COALESCE(sum(watched_episodes),0),(SELECT count(*) FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1 AND e.deleted_at IS NULL) FROM entries WHERE user_id=$1 AND deleted_at IS NULL`, owner).Scan(&stats.Total, &stats.Watching, &stats.Completed, &stats.Planned, &stats.OnHold, &stats.Dropped, &stats.WatchedEpisodes, &stats.WatchRecords)
+	err := s.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE status='recorded'),count(*) FILTER(WHERE status='watching'),count(*) FILTER(WHERE status='caught_up'),count(*) FILTER(WHERE status='completed'),count(*) FILTER(WHERE status='planned'),count(*) FILTER(WHERE status='on_hold'),count(*) FILTER(WHERE status='dropped'),COALESCE(sum(watched_episodes),0),(SELECT count(*) FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1 AND e.deleted_at IS NULL) FROM entries WHERE user_id=$1 AND deleted_at IS NULL`, owner).Scan(&stats.Total, &stats.Recorded, &stats.Watching, &stats.CaughtUp, &stats.Completed, &stats.Planned, &stats.OnHold, &stats.Dropped, &stats.WatchedEpisodes, &stats.WatchRecords)
 	return stats, err
 }
 
 type Export struct {
-	Schema     string    `json:"schema"`
-	ExportedAt time.Time `json:"exported_at"`
-	Entries    []Entry   `json:"entries"`
-	History    []Record  `json:"history"`
+	Library    *LibraryBundle   `json:"library,omitempty"`
+	Resources  []AnimeResource  `json:"resources,omitempty"`
+	Revisions  []MemoryRevision `json:"revisions,omitempty"`
+	Schema     string           `json:"schema"`
+	ExportedAt time.Time        `json:"exported_at"`
+	Entries    []Entry          `json:"entries"`
+	History    []Record         `json:"history"`
 }
 
 func (s *Service) Export(ctx context.Context, owner string) (Export, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return Export{}, err
 	}
@@ -327,6 +342,13 @@ func (s *Service) Export(ctx context.Context, owner string) (Export, error) {
 	out, err := exportJournal(ctx, tx, owner)
 	if err != nil {
 		return Export{}, err
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return Export{}, err
+	}
+	if len(data) > MaxJournalBytes {
+		return Export{}, fault.New("export_too_large", "个人导出超过 144 MiB，请使用实例快照完整备份。")
 	}
 	return out, tx.Commit(ctx)
 }
@@ -341,7 +363,7 @@ func exportJournal(ctx context.Context, tx pgx.Tx, owner string) (Export, error)
 	if entryCount > 5000 || recordCount > 20000 {
 		return Export{}, fault.New("export_too_large", "当前直接导出支持最多 5000 部番剧和 20000 条观看记录。")
 	}
-	out := Export{Schema: "animemo.journal/v1", ExportedAt: time.Now().UTC(), Entries: []Entry{}, History: []Record{}}
+	out := Export{Schema: "animemo.journal/v2", ExportedAt: time.Now().UTC(), Entries: []Entry{}, History: []Record{}}
 	rows, err := tx.Query(ctx, `SELECT `+columns+` FROM entries WHERE user_id=$1 AND deleted_at IS NULL ORDER BY created_at,id`, owner)
 	if err != nil {
 		return Export{}, err
@@ -372,6 +394,17 @@ func exportJournal(ctx context.Context, tx pgx.Tx, owner string) (Export, error)
 	}
 	if err = rows.Err(); err != nil {
 		return Export{}, err
+	}
+	rows.Close()
+	if err = exportMemory(ctx, tx, owner, &out); err != nil {
+		return Export{}, err
+	}
+	out.Library, err = exportLibrary(ctx, tx, owner)
+	if err != nil {
+		return Export{}, err
+	}
+	if out.Library != nil {
+		out.Schema = "animemo.journal/v3"
 	}
 	return out, nil
 }

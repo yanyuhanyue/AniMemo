@@ -82,7 +82,7 @@ func TestJournalManagementAndHistory(t *testing.T) {
 	bulk.Entries = []journal.VersionedID{{ID: a.ID, Version: 2}, {ID: foreign.ID, Version: 1}}
 	request(t, alice, base, "POST", "/api/v1/entries/bulk", bulk, 404)
 	still := decodeAs[journal.Entry](t, request(t, alice, base, "GET", "/api/v1/entries/"+a.ID, nil, 200))
-	if still.Status != "planned" || still.Version != 2 {
+	if still.Status != "recorded" || still.Version != 2 {
 		t.Fatal("failed bulk mutation partially committed")
 	}
 	bulk.Entries = []journal.VersionedID{{ID: a.ID, Version: 2}, {ID: b.ID, Version: 1}}

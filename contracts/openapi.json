@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "AniMemo API",
-    "version": "0.1.0",
+    "version": "1.3.0-rc.2",
     "description": "AniMemo 新项目 API。写请求必须携带与 PUBLIC_ORIGIN 完全一致的 Origin；登录使用 HttpOnly Cookie。所有 API 响应不缓存。详情见 docs/api.md。管理路径需要当前账号仍有管理权限，版本冲突为 409。"
   },
   "servers": [
@@ -200,11 +200,13 @@
             "schema": {
               "type": "string",
               "enum": [
+                "recorded",
                 "planned",
                 "watching",
                 "completed",
                 "on_hold",
-                "dropped"
+                "dropped",
+                "caught_up"
               ]
             }
           },
@@ -1453,11 +1455,13 @@
             "schema": {
               "type": "string",
               "enum": [
+                "recorded",
                 "planned",
                 "watching",
                 "completed",
                 "on_hold",
-                "dropped"
+                "dropped",
+                "caught_up"
               ]
             }
           },
@@ -1531,11 +1535,13 @@
             "schema": {
               "type": "string",
               "enum": [
+                "recorded",
                 "planned",
                 "watching",
                 "completed",
                 "on_hold",
-                "dropped"
+                "dropped",
+                "caught_up"
               ]
             }
           },
@@ -3471,6 +3477,2026 @@
           }
         }
       }
+    },
+    "/api/v1/entries/{id}/revisions": {
+      "get": {
+        "summary": "Private meaningful revisions, latest 100",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryRevisions"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/v1/admin/runtime": {
+      "get": {
+        "summary": "Worker heartbeat and durable event metrics",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/notes": {
+      "get": {
+        "summary": "GET memory/notes",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MemoryNote"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total",
+                    "page",
+                    "page_size"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "anime_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "character_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "highlight",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "POST memory/notes",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryNote"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryNoteInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/notes/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "PUT memory/notes/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryNote"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryNoteInput"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "GET memory/notes/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryNote"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "summary": "DELETE memory/notes/{id}",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/memory/characters": {
+      "get": {
+        "summary": "GET memory/characters",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Character"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total",
+                    "page",
+                    "page_size"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "anime_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "character_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "highlight",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "POST memory/characters",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Character"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CharacterInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/characters/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "PUT memory/characters/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Character"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CharacterInput"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "GET memory/characters/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Character"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/episodes": {
+      "get": {
+        "summary": "GET memory/episodes",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Episode"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total",
+                    "page",
+                    "page_size"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "anime_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "character_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "highlight",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "POST memory/episodes",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Episode"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/episodes/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "PUT memory/episodes/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Episode"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/collections": {
+      "get": {
+        "summary": "GET memory/collections",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MemoryCollection"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "summary": "POST memory/collections",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryCollection"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectionInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/collections/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "PUT memory/collections/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryCollection"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectionInput"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "DELETE memory/collections/{id}",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/memory/yearly": {
+      "get": {
+        "summary": "GET memory/yearly",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/YearlyMemory"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "summary": "POST memory/yearly",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/YearlyMemory"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/YearlyInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/yearly/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "PUT memory/yearly/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/YearlyMemory"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/YearlyInput"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "GET memory/yearly/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/YearlyMemory"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/revisions/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "GET memory/revisions/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/LibraryRevision"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/identities/{kind}/{id}": {
+      "parameters": [
+        {
+          "name": "kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "POST memory/identities/{kind}/{id}",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "version": {
+                    "type": "integer"
+                  },
+                  "target_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "version",
+                  "target_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/relations": {
+      "get": {
+        "summary": "GET memory/relations",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AnimeRelation"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "summary": "PUT memory/relations",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnimeRelation"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "DELETE memory/relations",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnimeRelation"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/progress": {
+      "get": {
+        "summary": "GET memory/progress",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ProgressAssertion"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "anime_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "POST memory/progress",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProgressAssertion"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProgressAssertionInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/media": {
+      "get": {
+        "summary": "GET memory/media",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MemoryMedia"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "type": "integer"
+                    },
+                    "used_bytes": {
+                      "type": "integer"
+                    },
+                    "quota_bytes": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total",
+                    "page",
+                    "page_size",
+                    "used_bytes",
+                    "quota_bytes"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "POST memory/media",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryMedia"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "byte_size": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "byte_size"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/media/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "PUT memory/media/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryMedia"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "DELETE memory/media/{id}",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "get": {
+        "summary": "GET memory/media/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "thumbnail",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/memory/shares": {
+      "post": {
+        "summary": "POST memory/shares",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryShareResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryShareInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/shared/{token}": {
+      "parameters": [
+        {
+          "name": "token",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "GET memory/shared/{token}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SharedMemory"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/memory/shared/{token}/media/{media}": {
+      "parameters": [
+        {
+          "name": "token",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "media",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "GET memory/shared/{token}/media/{media}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/memory/public/{kind}/{id}": {
+      "parameters": [
+        {
+          "name": "kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "GET memory/public/{kind}/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SharedMemory"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/memory/public/{kind}/{id}/media/{media}": {
+      "parameters": [
+        {
+          "name": "kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "media",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "GET memory/public/{kind}/{id}/media/{media}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/homepage": {
+      "get": {
+        "summary": "GET homepage",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/memory/achievements": {
+      "get": {
+        "summary": "GET memory/achievements",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Achievement"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/achievements/showcase": {
+      "put": {
+        "summary": "PUT memory/achievements/showcase",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "unlock_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "unlock_ids"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/achievements/acknowledge": {
+      "post": {
+        "summary": "POST memory/achievements/acknowledge",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/achievements/rules": {
+      "get": {
+        "summary": "GET admin/achievements/rules",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AchievementRule"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "summary": "PUT admin/achievements/rules",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AchievementRule"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AchievementRule"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/achievements/grants": {
+      "post": {
+        "summary": "POST admin/achievements/grants",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "owner_id": {
+                    "type": "string"
+                  },
+                  "tier_id": {
+                    "type": "string"
+                  },
+                  "grant": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "owner_id",
+                  "tier_id",
+                  "grant",
+                  "reason"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/achievements/backfills": {
+      "get": {
+        "summary": "GET admin/achievements/backfills",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AchievementBackfill"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "summary": "POST admin/achievements/backfills",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AchievementBackfill"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/achievements/backfills/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "POST admin/achievements/backfills/{id}",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AchievementBackfill"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "run",
+                      "pause"
+                    ]
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/search": {
+      "get": {
+        "summary": "GET memory/search",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MemorySearchItem"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total",
+                    "page",
+                    "page_size"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "anime_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "character_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "highlight",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/memory/references": {
+      "post": {
+        "summary": "POST memory/references",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MemoryReference"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/CollectionItem"
+                    }
+                  }
+                },
+                "required": [
+                  "items"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/episodes/batch": {
+      "post": {
+        "summary": "POST memory/episodes/batch",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Episode"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "anime_id": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "integer"
+                  },
+                  "to": {
+                    "type": "integer"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "main",
+                      "special",
+                      "ova",
+                      "movie"
+                    ]
+                  },
+                  "progress_role": {
+                    "type": "string",
+                    "enum": [
+                      "required",
+                      "optional",
+                      "excluded"
+                    ]
+                  }
+                },
+                "required": [
+                  "anime_id",
+                  "from",
+                  "to",
+                  "kind",
+                  "progress_role"
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3654,7 +5680,9 @@
           "details",
           "visibility",
           "share_slug",
-          "source"
+          "source",
+          "anime_id",
+          "airing_state"
         ],
         "properties": {
           "id": {
@@ -3682,11 +5710,13 @@
           "status": {
             "type": "string",
             "enum": [
+              "recorded",
               "planned",
               "watching",
               "completed",
               "on_hold",
-              "dropped"
+              "dropped",
+              "caught_up"
             ]
           },
           "total_episodes": {
@@ -3777,6 +5807,19 @@
               }
             ],
             "readOnly": true
+          },
+          "airing_state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "airing",
+              "finished"
+            ]
+          },
+          "anime_id": {
+            "type": "string",
+            "format": "uuid",
+            "readOnly": true
           }
         }
       },
@@ -3808,12 +5851,15 @@
           "status": {
             "type": "string",
             "enum": [
+              "recorded",
               "planned",
               "watching",
               "completed",
               "on_hold",
-              "dropped"
-            ]
+              "dropped",
+              "caught_up"
+            ],
+            "description": "Defaults to recorded: remembers having seen this work without inventing completion, dates or watched episodes."
           },
           "total_episodes": {
             "type": "integer",
@@ -3862,6 +5908,14 @@
               "unlisted",
               "public"
             ]
+          },
+          "airing_state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "airing",
+              "finished"
+            ]
           }
         }
       },
@@ -3893,11 +5947,13 @@
           "status": {
             "type": "string",
             "enum": [
+              "recorded",
               "planned",
               "watching",
               "completed",
               "on_hold",
-              "dropped"
+              "dropped",
+              "caught_up"
             ]
           },
           "total_episodes": {
@@ -3949,6 +6005,14 @@
               "unlisted",
               "public"
             ]
+          },
+          "airing_state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "airing",
+              "finished"
+            ]
           }
         }
       },
@@ -3964,7 +6028,7 @@
         "properties": {
           "watched_on": {
             "type": "string",
-            "format": "date"
+            "description": "YYYY-MM-DD for day; YYYY-MM or normalized YYYY-MM-01 for month; YYYY or normalized YYYY-01-01 for year; empty for unknown."
           },
           "episode_from": {
             "type": "integer",
@@ -3990,6 +6054,15 @@
             "minimum": 1,
             "maximum": 1000,
             "default": 1
+          },
+          "time_precision": {
+            "type": "string",
+            "enum": [
+              "day",
+              "month",
+              "year",
+              "unknown"
+            ]
           }
         }
       },
@@ -4008,7 +6081,10 @@
           "request_id",
           "created_at",
           "rewatch",
-          "version"
+          "version",
+          "time_precision",
+          "source_line",
+          "source_filename"
         ],
         "properties": {
           "id": {
@@ -4034,7 +6110,7 @@
           },
           "watched_on": {
             "type": "string",
-            "format": "date"
+            "description": "Normalized ISO date; month/year precision is explicit. Empty only for unknown."
           },
           "episode_from": {
             "type": "integer",
@@ -4063,6 +6139,21 @@
           "version": {
             "type": "integer",
             "minimum": 1
+          },
+          "time_precision": {
+            "type": "string",
+            "enum": [
+              "day",
+              "month",
+              "year",
+              "unknown"
+            ]
+          },
+          "source_line": {
+            "type": "integer"
+          },
+          "source_filename": {
+            "type": "string"
           }
         }
       },
@@ -4140,7 +6231,9 @@
           "on_hold",
           "dropped",
           "watched_episodes",
-          "watch_records"
+          "watch_records",
+          "caught_up",
+          "recorded"
         ],
         "properties": {
           "total": {
@@ -4174,6 +6267,14 @@
           "watch_records": {
             "type": "integer",
             "minimum": 0
+          },
+          "caught_up": {
+            "type": "integer"
+          },
+          "recorded": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Remembered works whose viewing details are unspecified."
           }
         }
       },
@@ -4189,7 +6290,11 @@
         "properties": {
           "schema": {
             "type": "string",
-            "const": "animemo.journal/v1"
+            "enum": [
+              "animemo.journal/v1",
+              "animemo.journal/v2",
+              "animemo.journal/v3"
+            ]
           },
           "exported_at": {
             "type": "string",
@@ -4206,6 +6311,21 @@
             "items": {
               "$ref": "#/components/schemas/WatchRecord"
             }
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryResource"
+            }
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryRevision"
+            }
+          },
+          "library": {
+            "$ref": "#/components/schemas/LibraryBundle"
           }
         }
       },
@@ -4275,7 +6395,7 @@
         "properties": {
           "watched_on": {
             "type": "string",
-            "format": "date"
+            "description": "YYYY-MM-DD for day; YYYY-MM or normalized YYYY-MM-01 for month; YYYY or normalized YYYY-01-01 for year; empty for unknown."
           },
           "episode_from": {
             "type": "integer",
@@ -4300,6 +6420,15 @@
           "version": {
             "type": "integer",
             "minimum": 1
+          },
+          "time_precision": {
+            "type": "string",
+            "enum": [
+              "day",
+              "month",
+              "year",
+              "unknown"
+            ]
           }
         }
       },
@@ -4437,12 +6566,14 @@
           "status": {
             "type": "string",
             "enum": [
+              "recorded",
               "",
               "planned",
               "watching",
               "completed",
               "on_hold",
-              "dropped"
+              "dropped",
+              "caught_up"
             ]
           },
           "sort": {
@@ -4477,12 +6608,14 @@
           "status": {
             "type": "string",
             "enum": [
+              "recorded",
               "",
               "planned",
               "watching",
               "completed",
               "on_hold",
-              "dropped"
+              "dropped",
+              "caught_up"
             ]
           },
           "sort": {
@@ -4671,7 +6804,9 @@
           "covers",
           "warnings",
           "titles",
-          "history"
+          "history",
+          "complete_memory",
+          "choices"
         ],
         "properties": {
           "total": {
@@ -4711,6 +6846,15 @@
             "maxItems": 100,
             "items": {
               "$ref": "#/components/schemas/ImportRecordPreview"
+            }
+          },
+          "complete_memory": {
+            "type": "boolean"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportChoice"
             }
           }
         }
@@ -4800,6 +6944,12 @@
               "apply",
               "cancel"
             ]
+          },
+          "selection": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportSelection"
+            }
           }
         }
       },
@@ -4883,11 +7033,13 @@
           "status": {
             "type": "string",
             "enum": [
+              "recorded",
               "planned",
               "watching",
               "completed",
               "on_hold",
-              "dropped"
+              "dropped",
+              "caught_up"
             ]
           },
           "total_episodes": {
@@ -5271,7 +7423,8 @@
           "name",
           "description",
           "registration_open",
-          "version"
+          "version",
+          "homepage_owner_slug"
         ],
         "properties": {
           "name": {
@@ -5288,6 +7441,9 @@
           "version": {
             "type": "integer",
             "minimum": 0
+          },
+          "homepage_owner_slug": {
+            "type": "string"
           }
         }
       },
@@ -6077,7 +8233,12 @@
           "active",
           "enabled",
           "revision",
-          "installed_at"
+          "installed_at",
+          "publisher_id",
+          "distribution",
+          "installation_id",
+          "health",
+          "health_reason"
         ],
         "properties": {
           "manifest": {
@@ -6098,6 +8259,21 @@
           "installed_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "publisher_id": {
+            "type": "string"
+          },
+          "distribution": {
+            "type": "string"
+          },
+          "installation_id": {
+            "type": "string"
+          },
+          "health": {
+            "type": "string"
+          },
+          "health_reason": {
+            "type": "string"
           }
         }
       },
@@ -6129,7 +8305,8 @@
             "type": "string",
             "enum": [
               "activate",
-              "disable"
+              "disable",
+              "uninstall"
             ]
           },
           "version": {
@@ -6174,7 +8351,10 @@
           "episode_from",
           "episode_to",
           "rewatch",
-          "note"
+          "note",
+          "time_precision",
+          "source_line",
+          "source_filename"
         ],
         "properties": {
           "title": {
@@ -6182,7 +8362,7 @@
           },
           "watched_on": {
             "type": "string",
-            "format": "date"
+            "description": "Normalized ISO date, or empty when time_precision is unknown."
           },
           "episode_from": {
             "type": "integer"
@@ -6194,6 +8374,21 @@
             "type": "integer"
           },
           "note": {
+            "type": "string"
+          },
+          "time_precision": {
+            "type": "string",
+            "enum": [
+              "day",
+              "month",
+              "year",
+              "unknown"
+            ]
+          },
+          "source_line": {
+            "type": "integer"
+          },
+          "source_filename": {
             "type": "string"
           }
         }
@@ -6496,11 +8691,13 @@
           "status": {
             "type": "string",
             "enum": [
+              "recorded",
               "planned",
               "watching",
               "completed",
               "on_hold",
-              "dropped"
+              "dropped",
+              "caught_up"
             ]
           },
           "score": {
@@ -7031,6 +9228,1908 @@
             "type": "integer"
           }
         }
+      },
+      "MemoryRevision": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "anime_id",
+          "kind",
+          "recorded_at",
+          "snapshot",
+          "entry_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "anime_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "snapshot": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "entry_id": {
+            "type": "string"
+          }
+        }
+      },
+      "MemoryRevisions": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryRevision"
+            }
+          }
+        }
+      },
+      "RuntimeStatus": {
+        "type": "object",
+        "required": [
+          "worker_ready",
+          "pending",
+          "running",
+          "failed",
+          "done",
+          "checked_at"
+        ],
+        "properties": {
+          "worker_ready": {
+            "type": "boolean"
+          },
+          "pending": {
+            "type": "integer"
+          },
+          "running": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "done": {
+            "type": "integer"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "MemoryResource": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "identities"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExternalIdentity"
+            }
+          }
+        }
+      },
+      "ExternalIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider",
+          "external_id",
+          "active",
+          "metadata",
+          "recorded_at"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "bangumi"
+            ]
+          },
+          "external_id": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "MemoryAnchor": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "",
+              "episode",
+              "timestamp",
+              "quote",
+              "scene",
+              "freeform"
+            ]
+          },
+          "timestamp_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quote": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "scene": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "kind",
+          "timestamp_seconds",
+          "quote",
+          "scene"
+        ]
+      },
+      "MemoryNoteInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "moment"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 40000
+          },
+          "anime_id": {
+            "type": "string"
+          },
+          "character_id": {
+            "type": "string"
+          },
+          "episode_id": {
+            "type": "string"
+          },
+          "watch_id": {
+            "type": "string"
+          },
+          "anchor": {
+            "$ref": "#/components/schemas/MemoryAnchor"
+          },
+          "media_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "occurred_on": {
+            "type": "string"
+          },
+          "time_precision": {
+            "type": "string",
+            "enum": [
+              "day",
+              "month",
+              "year",
+              "approximate",
+              "unknown"
+            ]
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "unlisted",
+              "public"
+            ]
+          },
+          "spoiler": {
+            "type": "boolean"
+          },
+          "highlight": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "MemoryNote": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "moment"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 40000
+          },
+          "anime_id": {
+            "type": "string"
+          },
+          "character_id": {
+            "type": "string"
+          },
+          "episode_id": {
+            "type": "string"
+          },
+          "watch_id": {
+            "type": "string"
+          },
+          "anchor": {
+            "$ref": "#/components/schemas/MemoryAnchor"
+          },
+          "media_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "occurred_on": {
+            "type": "string"
+          },
+          "time_precision": {
+            "type": "string",
+            "enum": [
+              "day",
+              "month",
+              "year",
+              "approximate",
+              "unknown"
+            ]
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "unlisted",
+              "public"
+            ]
+          },
+          "spoiler": {
+            "type": "boolean"
+          },
+          "highlight": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "watch_missing": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "title",
+          "body",
+          "anime_id",
+          "character_id",
+          "episode_id",
+          "watch_id",
+          "anchor",
+          "media_ids",
+          "tags",
+          "occurred_on",
+          "time_precision",
+          "visibility",
+          "spoiler",
+          "highlight",
+          "id",
+          "created_at",
+          "updated_at",
+          "deleted_at",
+          "watch_missing"
+        ]
+      },
+      "CharacterInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 10000
+          },
+          "anime_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "favorite": {
+            "type": "boolean"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "unlisted",
+              "public"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "Character": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 10000
+          },
+          "anime_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "favorite": {
+            "type": "boolean"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "unlisted",
+              "public"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "redirect_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "version",
+          "name",
+          "aliases",
+          "description",
+          "anime_ids",
+          "favorite",
+          "visibility",
+          "id",
+          "redirect_id",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "EpisodeInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "anime_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "number": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "main",
+              "special",
+              "ova",
+              "movie"
+            ]
+          },
+          "progress_role": {
+            "type": "string",
+            "enum": [
+              "required",
+              "optional",
+              "excluded"
+            ]
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "external_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "provider",
+                "external_id"
+              ]
+            }
+          }
+        },
+        "required": [
+          "anime_id",
+          "title",
+          "number"
+        ]
+      },
+      "Episode": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "anime_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "number": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "main",
+              "special",
+              "ova",
+              "movie"
+            ]
+          },
+          "progress_role": {
+            "type": "string",
+            "enum": [
+              "required",
+              "optional",
+              "excluded"
+            ]
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "external_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "provider",
+                "external_id"
+              ]
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "redirect_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "version",
+          "anime_id",
+          "title",
+          "number",
+          "kind",
+          "progress_role",
+          "identities",
+          "id",
+          "redirect_id",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "AnimeRelation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "from_id": {
+            "type": "string"
+          },
+          "to_id": {
+            "type": "string"
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "sequel",
+              "prequel",
+              "side_story",
+              "same_franchise"
+            ]
+          }
+        },
+        "required": [
+          "from_id",
+          "to_id",
+          "relation"
+        ]
+      },
+      "ProgressAssertionInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "anime_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "mainline",
+              "all",
+              "custom"
+            ]
+          },
+          "precision": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "approximate",
+              "caught_up"
+            ]
+          },
+          "episodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "version"
+              ]
+            }
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "anime_id",
+          "scope",
+          "precision",
+          "episodes"
+        ]
+      },
+      "ProgressAssertion": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "anime_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "mainline",
+              "all",
+              "custom"
+            ]
+          },
+          "precision": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "approximate",
+              "caught_up"
+            ]
+          },
+          "episode_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "anime_id",
+          "scope",
+          "precision",
+          "episode_ids",
+          "note",
+          "created_at"
+        ]
+      },
+      "MemoryMedia": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "reserved",
+              "ready",
+              "deleted"
+            ]
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "byte_size": {
+            "type": "integer"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "content_type",
+          "sha256",
+          "byte_size",
+          "width",
+          "height",
+          "created_at",
+          "deleted_at"
+        ]
+      },
+      "CollectionItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "anime",
+              "character",
+              "note",
+              "moment"
+            ]
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ]
+      },
+      "CollectionInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CollectionItem"
+            }
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "unlisted",
+              "public"
+            ]
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "MemoryCollection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CollectionItem"
+            }
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "unlisted",
+              "public"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "version",
+          "title",
+          "description",
+          "items",
+          "visibility",
+          "id",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "LibraryRevision": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "resource_id",
+          "kind",
+          "action",
+          "snapshot",
+          "recorded_at"
+        ]
+      },
+      "YearlyInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "year": {
+            "type": "integer"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "introduction": {
+            "type": "string",
+            "maxLength": 10000
+          },
+          "note_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "unlisted",
+              "public"
+            ]
+          }
+        },
+        "required": [
+          "year",
+          "title",
+          "note_ids"
+        ]
+      },
+      "YearlyStats": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "watch_records": {
+            "type": "integer"
+          },
+          "anime": {
+            "type": "integer"
+          },
+          "episodes": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "integer"
+          },
+          "imprecise_records": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "watch_records",
+          "anime",
+          "episodes",
+          "notes",
+          "imprecise_records"
+        ]
+      },
+      "YearlyItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "note_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "occurred_on": {
+            "type": "string"
+          },
+          "time_precision": {
+            "type": "string"
+          },
+          "spoiler": {
+            "type": "boolean"
+          },
+          "media_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unavailable": {
+            "type": "string"
+          },
+          "source_visibility": {
+            "type": "string"
+          },
+          "source_version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "note_id",
+          "kind",
+          "title",
+          "body",
+          "occurred_on",
+          "time_precision",
+          "spoiler",
+          "media_ids",
+          "unavailable",
+          "source_visibility",
+          "source_version"
+        ]
+      },
+      "YearlyRevision": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "cutoff": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "algorithm": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "introduction": {
+            "type": "string"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/YearlyStats"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/YearlyItem"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "cutoff",
+          "algorithm",
+          "title",
+          "introduction",
+          "stats",
+          "items",
+          "created_at"
+        ]
+      },
+      "YearlyMemory": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "year": {
+            "type": "integer"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "introduction": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "unlisted",
+              "public"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/YearlyRevision"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "year",
+          "timezone",
+          "title",
+          "introduction",
+          "version",
+          "visibility",
+          "created_at",
+          "updated_at",
+          "revisions"
+        ]
+      },
+      "MemoryShareInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "collection",
+              "yearly",
+              "character"
+            ]
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "days": {
+            "type": "integer"
+          },
+          "revoke": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "resource_id"
+        ]
+      },
+      "MemoryShareResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "token",
+          "expires_at"
+        ]
+      },
+      "SharedMemory": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "introduction": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/YearlyItem"
+            }
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "year": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "title",
+          "introduction",
+          "items",
+          "revision",
+          "year"
+        ]
+      },
+      "AchievementRule": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "series_id": {
+            "type": "string"
+          },
+          "series_title": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "badge": {
+            "type": "string",
+            "enum": [
+              "spark",
+              "moon",
+              "orbit",
+              "flower",
+              "book"
+            ]
+          },
+          "metric": {
+            "type": "string",
+            "enum": [
+              "watch_records",
+              "distinct_anime",
+              "completed_anime",
+              "watched_episodes",
+              "memory_notes"
+            ]
+          },
+          "threshold": {
+            "type": "integer"
+          },
+          "active": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "series_id",
+          "series_title",
+          "tier",
+          "revision",
+          "title",
+          "description",
+          "badge",
+          "metric",
+          "threshold",
+          "active"
+        ]
+      },
+      "Achievement": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "series_id": {
+            "type": "string"
+          },
+          "series_title": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "badge": {
+            "type": "string",
+            "enum": [
+              "spark",
+              "moon",
+              "orbit",
+              "flower",
+              "book"
+            ]
+          },
+          "metric": {
+            "type": "string",
+            "enum": [
+              "watch_records",
+              "distinct_anime",
+              "completed_anime",
+              "watched_episodes",
+              "memory_notes"
+            ]
+          },
+          "threshold": {
+            "type": "integer"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "value": {
+            "type": "integer"
+          },
+          "unlock_id": {
+            "type": "string"
+          },
+          "unlocked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "granted": {
+            "type": "boolean"
+          },
+          "notified": {
+            "type": "boolean"
+          },
+          "showcase_slot": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "series_id",
+          "series_title",
+          "tier",
+          "revision",
+          "title",
+          "description",
+          "badge",
+          "metric",
+          "threshold",
+          "active",
+          "value",
+          "unlock_id",
+          "unlocked_at",
+          "granted",
+          "notified",
+          "showcase_slot"
+        ]
+      },
+      "AchievementBackfill": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "preview",
+              "running",
+              "paused",
+              "done"
+            ]
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AchievementRule"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "cursor": {
+            "type": "integer"
+          },
+          "granted": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "rules",
+          "total",
+          "cursor",
+          "granted",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "MemorySearchItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "excerpt": {
+            "type": "string"
+          },
+          "anime_id": {
+            "type": "string"
+          },
+          "character_id": {
+            "type": "string"
+          },
+          "occurred_on": {
+            "type": "string"
+          },
+          "time_precision": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "spoiler": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "excerpt",
+          "anime_id",
+          "character_id",
+          "occurred_on",
+          "time_precision",
+          "status",
+          "spoiler",
+          "updated_at"
+        ]
+      },
+      "MemoryReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "anime",
+              "character",
+              "note",
+              "moment"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "available"
+        ]
+      },
+      "ImportCandidate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "version"
+        ]
+      },
+      "ImportChoice": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "default_selected": {
+            "type": "boolean"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportCandidate"
+            }
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportRecordPreview"
+            }
+          }
+        },
+        "required": [
+          "index",
+          "title",
+          "default_selected",
+          "candidates",
+          "history"
+        ]
+      },
+      "ImportSelection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "target_version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "records",
+          "target_id",
+          "target_version"
+        ]
+      },
+      "PortableGrantEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "granted",
+              "revoked"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "action",
+          "reason",
+          "created_at"
+        ]
+      },
+      "PortableAchievement": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rule": {
+            "$ref": "#/components/schemas/AchievementRule"
+          },
+          "unlock_id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "automatic",
+              "administrator"
+            ]
+          },
+          "value": {
+            "type": "integer"
+          },
+          "unlocked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "granted": {
+            "type": "boolean"
+          },
+          "notified": {
+            "type": "boolean"
+          },
+          "showcase_slot": {
+            "type": "integer"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortableGrantEvent"
+            }
+          }
+        },
+        "required": [
+          "rule",
+          "unlock_id",
+          "source",
+          "value",
+          "unlocked_at",
+          "granted",
+          "notified",
+          "showcase_slot",
+          "events"
+        ]
+      },
+      "PortableAchievementProgress": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rule": {
+            "$ref": "#/components/schemas/AchievementRule"
+          },
+          "value": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "rule",
+          "value",
+          "updated_at"
+        ]
+      },
+      "AchievementBundle": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "unlocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortableAchievement"
+            }
+          },
+          "progress": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortableAchievementProgress"
+            }
+          }
+        },
+        "required": [
+          "unlocks",
+          "progress"
+        ]
+      },
+      "PortableMemoryMedia": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "reserved",
+              "ready",
+              "deleted"
+            ]
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "byte_size": {
+            "type": "integer"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "data": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "contentEncoding": "base64"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "content_type",
+          "sha256",
+          "byte_size",
+          "width",
+          "height",
+          "created_at",
+          "deleted_at",
+          "data"
+        ]
+      },
+      "LibraryBundle": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "achievements": {
+            "$ref": "#/components/schemas/AchievementBundle"
+          },
+          "characters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Character"
+            }
+          },
+          "episodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Episode"
+            }
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AnimeRelation"
+            }
+          },
+          "progress": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProgressAssertion"
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryNote"
+            }
+          },
+          "media": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortableMemoryMedia"
+            }
+          },
+          "collections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryCollection"
+            }
+          },
+          "yearlies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/YearlyMemory"
+            }
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LibraryRevision"
+            }
+          }
+        },
+        "required": [
+          "achievements",
+          "characters",
+          "episodes",
+          "relations",
+          "progress",
+          "notes",
+          "media",
+          "collections",
+          "yearlies",
+          "revisions"
+        ]
       }
     },
     "responses": {

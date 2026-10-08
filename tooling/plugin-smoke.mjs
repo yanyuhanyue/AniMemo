@@ -19,20 +19,22 @@ export async function pluginSmoke({ image, previousImage = image, incompatibleIm
   const names = [0,1].map(() => `probe-${randomBytes(6).toString('hex')}`), created = [];
   const report = { status: 'RUNNING', started_at: new Date().toISOString(), checks: [] };
   const mark = message => { report.checks.push(message); console.log(`Plugin check: ${message}`); };
-  const source = JSON.parse(await readFile(packageFile, 'utf8'));
+  let source = JSON.parse(await readFile(packageFile, 'utf8'));
+  const packageVersion=source.manifest.version;const nextVersion=packageVersion.split('.').map((n,i)=>i===2?Number(n)+1:n).join('.');
   try {
     created.push(names[0]); const a = await installInstance({ name: names[0], image: previousImage, port: await port() }); const original = await config(names[0]);
     const credentials = { email: `plugin-probe-${randomUUID()}@example.test`, password: `probe-${randomUUID()}` };
     let call = client(a.origin); await call('POST', '/api/v1/setup', { ...credentials, display_name: '插件验收管理', token: original.setupToken }, 201);
     if (previousImage !== image) { await updateInstance(names[0], image); call = client(a.origin); await call('POST', '/api/v1/auth/login', credentials); mark('upgrade pre-plugin database through read-only preflight and additive migration'); }
     if (browser) { const { pluginBrowser } = await import('./plugin-browser.mjs'); await pluginBrowser({ root, origin: a.origin, credentials, packageFile }); mark('real browser install, activate, TXT preview, confirmation, disable and mobile layout'); }
-    else { await call('POST', '/api/v1/admin/plugins', source, 201); const installed = (await call('GET', '/api/v1/admin/plugins')).items[0]; await call('POST', '/api/v1/admin/plugins/watch-history-text', { action: 'activate', version: '1.0.0', revision: installed.revision }); }
-    const before = (await call('GET', '/api/v1/plugins')).items[0]; assert.equal(before.manifest.version, '1.0.0');
+    else { const bundled = (await call('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'watch-history-text' && p.manifest.version===packageVersion); if (!bundled) await call('POST', '/api/v1/admin/plugins', source, 201); const installed = bundled || (await call('GET', '/api/v1/admin/plugins')).items[0]; await call('POST', '/api/v1/admin/plugins/watch-history-text', { action: 'activate', version: installed.manifest.version, revision: installed.revision }); }
+    const before = (await call('GET', '/api/v1/plugins')).items[0]; assert.equal(before.manifest.version, packageVersion);const beforeInventory=(await call('GET','/api/v1/admin/plugins')).items;
     const backup = await backupInstance(names[0]); created.push(names[1]); const b = await installInstance({ name: names[1], backup, port: await port() }); const restored = client(b.origin); await restored('POST', '/api/v1/auth/login', credentials);
-    const cloned = (await restored('GET', '/api/v1/plugins')).items[0]; assert.equal(cloned.digest, before.digest); assert.equal(cloned.enabled, true);
+    const cloned = (await restored('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'watch-history-text' && p.manifest.version === before.manifest.version); assert.equal(cloned.digest, before.digest); assert.equal(cloned.enabled, false);
+    await restored('POST', '/api/v1/admin/plugins/watch-history-text', { action: 'activate', version: cloned.manifest.version, revision: cloned.revision });
     const job = await restored('POST', '/api/v1/plugins/watch-history-text/imports?filename=2026.txt', '10月3日\n首刷 恢复后的插件 共12集\n', 202, true);
     for (let n = 0; n < 60; n++) { const state = await restored('GET', `/api/v1/imports/${job.id}`); if (state.state === 'ready') { assert.equal(state.preview.records, 1); break; } assert.notEqual(state.state, 'failed', state.error); assert.ok(n < 59); await new Promise(resolve => setTimeout(resolve, 150)); }
-    mark('database snapshot restores immutable WASM bytes, digest and activation; restored module executes');
+    mark('database snapshot restores immutable WASM bytes and digest; explicit reactivation executes restored module');
     if (incompatibleImage) {
       const old = await config(names[0]); await assert.rejects(() => updateInstance(names[0], incompatibleImage), /original image and database are running again/);
       const state = await instanceStatus(names[0]); assert.equal(state.image, old.image); assert.equal(state.database, old.database); assert.ok(state.services.some(s => s.service === 'app' && s.health === 'healthy'));
@@ -40,12 +42,12 @@ export async function pluginSmoke({ image, previousImage = image, incompatibleIm
     }
     await updateInstance(names[0], image); call = client(a.origin); await call('POST', '/api/v1/auth/login', credentials);
     assert.equal((await call('GET', '/api/v1/plugins')).items[0].digest, before.digest);
-    const newer = structuredClone(source); newer.manifest.version = '1.1.0'; await call('POST', '/api/v1/admin/plugins', newer, 201);
-    const active = (await call('GET', '/api/v1/plugins')).items[0]; await call('POST', '/api/v1/admin/plugins/watch-history-text', { action: 'activate', version: '1.1.0', revision: active.revision });
-    assert.equal((await call('GET', '/api/v1/plugins')).items[0].manifest.version, '1.1.0');
+    const newer = structuredClone(source); newer.manifest.version = nextVersion; await call('POST', '/api/v1/admin/plugins', newer, 201);
+    const active = (await call('GET', '/api/v1/plugins')).items[0]; await call('POST', '/api/v1/admin/plugins/watch-history-text', { action: 'activate', version: nextVersion, revision: active.revision });
+    assert.equal((await call('GET', '/api/v1/plugins')).items[0].manifest.version, nextVersion);
     await rollbackInstance(names[0], true); call = client(a.origin); await call('POST', '/api/v1/auth/login', credentials);
-    const rolled = (await call('GET', '/api/v1/plugins')).items[0]; assert.equal(rolled.digest, before.digest); assert.equal(rolled.manifest.version, '1.0.0'); assert.equal((await call('GET', '/api/v1/admin/plugins')).items.length, 1);
-    mark('host update preserves plugin; instance rollback restores previous package inventory and activation together'); report.status = 'PASS';
+    const rolled = (await call('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'watch-history-text'&&p.manifest.version===before.manifest.version); assert.equal(rolled.enabled, false); assert.equal(rolled.digest, before.digest); assert.equal(rolled.manifest.version, before.manifest.version); assert.equal((await call('GET', '/api/v1/admin/plugins')).items.length, beforeInventory.length);
+    mark('host update preserves plugin; instance rollback restores previous package inventory with restored grants disabled'); report.status = 'PASS';
   } catch (error) { report.status = 'FAIL'; report.error = error.message; throw error; }
   finally {
     report.cleanup = []; for (const name of created.reverse()) { try { await removeTestInstance(name); report.cleanup.push({ name, removed: true }); } catch (error) { report.cleanup.push({ name, removed: false, error: error.message }); } }

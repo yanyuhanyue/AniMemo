@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"errors"
 	"regexp"
@@ -46,7 +47,7 @@ func (s *Service) Bulk(ctx context.Context, owner string, input BulkInput) ([]En
 			return nil, fault.Field("entries", "条目标识、版本或重复选择无效。")
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +151,7 @@ func (s *Service) SaveFilter(ctx context.Context, owner string, input QuickFilte
 	}
 	input.Search, input.Sort = f.Search, f.Sort
 	input.ID = id.New()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return input, err
 	}

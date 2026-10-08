@@ -1,0 +1,40 @@
+/* Internal product tokens, not a stable third-party theme interface. */
+:root {
+  color-scheme: light;
+  /* Foundation: palette and dimensions. */
+  --am-violet-900: #342c50;
+  --am-violet-600: #8062b8;
+  --am-violet-700: #7550ad;
+  --am-neutral-600: #6f637f;
+  --am-neutral-100: #faf7fc;
+  --am-neutral-50: #fffdfd;
+  --am-space-page: 32px;
+  /* Semantics: text, surfaces, focus and feedback. */
+  --am-ink: var(--am-violet-900);
+  --am-muted: var(--am-neutral-600);
+  --am-paper: var(--am-neutral-50);
+  --am-canvas: var(--am-neutral-100);
+  --am-border: #e9e0f1;
+  --am-primary: var(--am-violet-600);
+  --am-pink: #edb9cd;
+  --am-focus: var(--am-violet-700);
+  --am-danger: #a02e43;
+  --am-success: #28765b;
+  /* Component defaults stay independent of poster colors. */
+  --am-radius: 20px;
+  --am-radius-field: 9px;
+  --am-touch-target: 44px;
+  --am-shadow: 0 8px 32px rgb(91 59 122 / 7%);
+  /* Motion tokens apply only to nonessential decoration. */
+  --am-motion: 160ms;
+  --am-motion-ease: ease-out;
+}
+@theme inline {
+  --color-memory-ink: var(--am-ink);
+  --color-memory-paper: var(--am-paper);
+  --color-memory-primary: var(--am-primary);
+}
+@media (prefers-reduced-motion: reduce) { :root { --am-motion: 0ms; } }
+@media (prefers-contrast: more) {
+  :root { --am-ink: #21152f; --am-muted: #41364c; --am-border: #8f829e; --am-primary: #684098; }
+}

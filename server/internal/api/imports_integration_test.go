@@ -124,10 +124,9 @@ func TestDurableImportBackupAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	job = decodeAs[journal.ImportJob](t, request(t, bob, base, "GET", "/api/v1/imports/"+job.ID, nil, 200))
-	if job.Preview.Ready != 0 || job.Preview.Duplicates != 1 {
-		t.Fatal("duplicate preview incorrect")
+	if job.State != "failed" || job.Error == "" {
+		t.Fatal("complete memory restore must reject occupied journals, not drop duplicate history")
 	}
-	request(t, bob, base, "POST", "/api/v1/imports/"+job.ID, map[string]string{"action": "cancel"}, 200)
 }
 
 func TestImportCancellationConflictAndAtomicFailure(t *testing.T) {

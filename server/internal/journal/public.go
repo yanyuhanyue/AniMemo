@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"errors"
 	"strings"
@@ -72,7 +73,7 @@ func (s *Service) Directory(ctx context.Context, search string, page int) (Direc
 		return Directory{}, err
 	}
 	out := Directory{Items: []PublicOwner{}, Page: page}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
@@ -110,7 +111,7 @@ func (s *Service) PublicEntries(ctx context.Context, slug string, filter Filter)
 	if slug != "" && !id.Valid(slug) {
 		return out, fault.New("not_found", "没有找到公开手账。")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
@@ -162,7 +163,7 @@ func (s *Service) Shared(ctx context.Context, slug string) (PublicItem, error) {
 	if !id.Valid(slug) {
 		return PublicItem{}, fault.New("not_found", "分享不存在或已关闭。")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return PublicItem{}, err
 	}
@@ -211,7 +212,7 @@ func (s *Service) ResetShare(ctx context.Context, owner, entryID string, version
 	if !id.Valid(entryID) {
 		return Entry{}, fault.New("not_found", "没有找到这部番剧。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Entry{}, err
 	}

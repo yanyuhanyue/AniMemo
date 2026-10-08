@@ -15,7 +15,7 @@ services:
       timeout: 3s
       retries: 30
     restart: unless-stopped
-  app:
+  app: &app
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -24,6 +24,7 @@ services:
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://127.0.0.1:18081}
       LISTEN_ADDR: 0.0.0.0:18081
       WEB_DIR: /app/web
+      ANIMEMO_BUNDLED_DIR: /app/extensions
       ANIMEMO_SECRET_KEY: ${ANIMEMO_SECRET_KEY:-}
       ANIMEMO_SETUP_TOKEN: ${ANIMEMO_SETUP_TOKEN:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
@@ -53,3 +54,18 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+  worker:
+    profiles: [runtime-worker]
+    <<: *app
+    command: [worker]
+    ports: []
+    healthcheck:
+      test: [CMD, /app/animemo, worker-health]
+      interval: 5s
+      timeout: 4s
+      start_period: 10s
+      retries: 12
+    depends_on:
+      app:
+        condition: service_healthy

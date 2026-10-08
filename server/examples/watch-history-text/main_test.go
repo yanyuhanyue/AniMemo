@@ -17,7 +17,7 @@ func TestTextRecordsAndAmbiguity(t *testing.T) {
 		History []record `json:"history"`
 	}
 	json.Unmarshal([]byte(data), &out)
-	if len(out.Entries) != 1 || out.Entries[0].Watched != 3 || len(out.History) != 2 || out.History[1].Rewatch != 2 || out.History[1].Note != "重温" {
+	if len(out.Entries) != 1 || out.Entries[0].Watched != 3 || len(out.History) != 3 || out.History[1].Rewatch != 2 || out.History[1].Note != "重温" || out.History[2].Note != "重复" || out.History[1].SourceLine != 4 || out.History[1].SourceFilename != "2026记录.txt" {
 		t.Fatalf("bad import: %+v", out)
 	}
 	if _, err := convert(pluginproto.Request{Text: "2026-10-01\t测试\t1-12\t1\t笔记"}); err != nil {

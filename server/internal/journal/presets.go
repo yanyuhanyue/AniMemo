@@ -3,6 +3,7 @@ package journal
 import (
 	"animemo.local/server/internal/fault"
 	"animemo.local/server/internal/governance"
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"strings"
 	"unicode/utf8"
@@ -35,7 +36,7 @@ func (s *Service) SavePreset(ctx context.Context, actor string, p Preset, remove
 	if utf8.RuneCountInString(p.Name) < 1 || utf8.RuneCountInString(p.Name) > 24 || strings.ContainsRune(p.Name, 0) || (!remove && !hexColor.MatchString(p.Color)) {
 		return fault.New("validation_error", "标签名需要 1–24 字，请选择有效颜色。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return err
 	}

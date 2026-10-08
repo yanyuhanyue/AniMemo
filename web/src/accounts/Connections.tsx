@@ -1,3 +1,5 @@
+import { Button } from '../components/ui/Button';
+import { Input } from '../components/ui/Input';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { client, errorMessage, result } from '../api/client';
@@ -35,19 +37,19 @@ export function Connections({ userID }: { userID: string }) {
     {outcome === 'failed' && <p className="error-message" role="alert">授权未完成或已过期，请重新连接。</p>}
     <section className="connection-card"><h2>Bangumi</h2>{connection.isPending ? <p role="status">正在读取连接…</p> : connection.data && <>
       <p>{connection.data.state === 'connected' ? `已连接 ${connection.data.nickname || connection.data.username}（${connection.data.username}）` : connection.data.state === 'reauthorize' ? '需要重新授权' : connection.data.state === 'authorizing' ? '等待完成授权' : '尚未连接账号'}</p>
-      {!connection.data.configured ? <p className="muted">实例尚未启用 Bangumi 账号连接，请联系管理员配置应用。</p> : <div className="management-actions">{connection.data.state === 'connected' ? <button className="button secondary" disabled={busy} onClick={() => verify.mutate()}>验证连接</button> : <button className="button primary" disabled={busy} onClick={() => authorize.mutate()}>前往 Bangumi 授权</button>}{connection.data.state !== 'disconnected' && <button className="button quiet" disabled={busy} onClick={() => setDisconnecting(true)}>断开连接</button>}</div>}
+      {!connection.data.configured ? <p className="muted">实例尚未启用 Bangumi 账号连接，请联系管理员配置应用。</p> : <div className="management-actions">{connection.data.state === 'connected' ? <Button className="button secondary" disabled={busy} onClick={() => verify.mutate()}>验证连接</Button> : <Button className="button primary" disabled={busy} onClick={() => authorize.mutate()}>前往 Bangumi 授权</Button>}{connection.data.state !== 'disconnected' && <Button className="button quiet" disabled={busy} onClick={() => setDisconnecting(true)}>断开连接</Button>}</div>}
       {verify.isSuccess && <p role="status">账号身份验证通过。</p>}
-      {disconnecting && <div className="delete-confirm"><p>断开后取消后续同步；已经发出的写回请求可能已生效。手账会保留。</p><div><button className="button quiet" disabled={busy} onClick={() => setDisconnecting(false)}>保持连接</button><button className="button danger" disabled={busy} onClick={() => disconnect.mutate()}>确认断开</button></div></div>}
+      {disconnecting && <div className="delete-confirm"><p>断开后取消后续同步；已经发出的写回请求可能已生效。手账会保留。</p><div><Button className="button quiet" disabled={busy} onClick={() => setDisconnecting(false)}>保持连接</Button><Button className="button danger" disabled={busy} onClick={() => disconnect.mutate()}>确认断开</Button></div></div>}
     </>}</section>
     <section className="connection-card"><h2>生成差异预览</h2><p className="muted">对照已绑定的 Bangumi 条目。先核对每项差异，确认后才会修改手账或外部收藏。</p>
       <form className="editor-form compact-form" onSubmit={event => { event.preventDefault(); start.mutate(new FormData(event.currentTarget)); }}><fieldset disabled={connection.data?.state !== 'connected' || !!active || start.isPending}>
         <label>同步方向<select name="mode" defaultValue="pull"><option value="pull">Bangumi → 手账</option><option value="push">手账 → Bangumi</option><option value="two_way">双向对照，逐项选择</option></select></label>
-        <label className="source-field"><input type="checkbox" name="progress" /><span>同时同步观看进度<small>写回时将第 1 话至当前进度设为看过，后续正片设为未收藏；观看日期、刷次和逐次笔记留在手账中。</small></span></label>
-        <p className="field-hint">默认对照收藏状态、评分、短评和标签。Bangumi 评分为整数，写回时的取整结果会列入预览。新建外部收藏默认私密，不自动删除任何一边的条目。</p><button className="button primary">{start.isPending ? '正在创建预览…' : '生成预览'}</button>
+        <label className="source-field"><Input type="checkbox" name="progress" /><span>同时同步观看进度<small>写回时将第 1 话至当前进度设为看过，后续正片设为未收藏；观看日期、刷次和逐次笔记留在手账中。</small></span></label>
+        <p className="field-hint">默认对照收藏状态、评分、短评和标签。Bangumi 评分为整数，写回时的取整结果会列入预览。新建外部收藏默认私密，不自动删除任何一边的条目。</p><Button className="button primary">{start.isPending ? '正在创建预览…' : '生成预览'}</Button>
       </fieldset></form>{active && <p className="muted">请先完成或取消下方的任务，再生成新预览。</p>}
     </section>
     {jobs.data && jobs.data.items.length > 0 && <label className="sync-history">查看任务<select value={jobID} onChange={event => setSelected(event.target.value)}>{jobs.data.items.map(job => <option value={job.id} key={job.id}>{new Date(job.created_at).toLocaleString()} · {states[job.state]}</option>)}</select></label>}
-    {current.data && <section className="connection-card"><div className="section-heading"><h2>{states[current.data.state]}</h2>{['fetching','ready','applying'].includes(current.data.state) && <button className="button quiet" disabled={change.isPending} onClick={() => change.mutate({ id: current.data!.id, body: { action: 'cancel' } })}>取消后续操作</button>}</div>
+    {current.data && <section className="connection-card"><div className="section-heading"><h2>{states[current.data.state]}</h2>{['fetching','ready','applying'].includes(current.data.state) && <Button className="button quiet" disabled={change.isPending} onClick={() => change.mutate({ id: current.data!.id, body: { action: 'cancel' } })}>取消后续操作</Button>}</div>
       {current.data.state === 'fetching' && <p role="status">已读取 {current.data.cursor} / {current.data.remote_total || '…'} 项收藏，可稍后回到本页继续。</p>}
       {current.data.error && <p className="error-message" role="alert">{current.data.error}</p>}
       {current.data.state !== 'fetching' && <SyncPreview key={current.data.id} job={current.data} busy={change.isPending} onApply={choices => change.mutate({ id: current.data!.id, body: { action: 'apply', choices } })} />}
@@ -77,7 +79,7 @@ function SyncPreview({ job, busy, onApply }: { job: Job; busy: boolean; onApply:
         {actionFor(item) !== 'skip' && <details className="sync-target"><summary>确认后的目标内容</summary><ValueSummary value={actionFor(item) === 'push' ? item.push_target?.value : item.pull_target} absent="无可用目标" />{actionFor(item) === 'push' && <p className="field-hint">外部收藏：{item.push_target?.private ? '私密' : '保持公开'}{job.include_progress ? '；将按连续话数调整正片观看状态。' : '；不单独修改逐话状态。'}</p>}</details>}
       </> : <p role="status">{{ pending:'等待处理',running:'正在核对与执行',done:'已完成',conflict:'需要重新核对',failed:'未完成',skipped:'已跳过' }[item.state]}{item.result && ` · ${item.result}`}</p>}
     </article>)}</div>
-    {job.items.length > 20 && <div className="pagination"><button className="button quiet" disabled={page === 1} onClick={() => setPage(page - 1)}>上一页</button><span>{page} / {Math.ceil(job.items.length / 20)}</span><button className="button quiet" disabled={page * 20 >= job.items.length} onClick={() => setPage(page + 1)}>下一页</button></div>}
-    {job.state === 'ready' && <div className="sync-confirm"><p>将导入 / 更新手账 {pulls} 项，写回 Bangumi {pushes} 项，其余跳过。</p><button className="button primary" disabled={busy} onClick={() => onApply(selected)}>确认执行所选操作</button></div>}
+    {job.items.length > 20 && <div className="pagination"><Button className="button quiet" disabled={page === 1} onClick={() => setPage(page - 1)}>上一页</Button><span>{page} / {Math.ceil(job.items.length / 20)}</span><Button className="button quiet" disabled={page * 20 >= job.items.length} onClick={() => setPage(page + 1)}>下一页</Button></div>}
+    {job.state === 'ready' && <div className="sync-confirm"><p>将导入 / 更新手账 {pulls} 项，写回 Bangumi {pushes} 项，其余跳过。</p><Button className="button primary" disabled={busy} onClick={() => onApply(selected)}>确认执行所选操作</Button></div>}
   </>;
 }

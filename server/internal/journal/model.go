@@ -11,6 +11,8 @@ import (
 )
 
 type Entry struct {
+	AnimeID         string    `json:"anime_id"`
+	AiringState     string    `json:"airing_state"`
 	Source          *Source   `json:"source"`
 	Visibility      string    `json:"visibility"`
 	ShareSlug       string    `json:"share_slug"`
@@ -33,6 +35,8 @@ type Entry struct {
 }
 
 type Create struct {
+	AnimeID       string   `json:"-"`
+	AiringState   string   `json:"airing_state"`
 	Visibility    string   `json:"visibility"`
 	Details       Details  `json:"details"`
 	Title         string   `json:"title"`
@@ -49,6 +53,7 @@ type Create struct {
 // A patch always carries the version that was shown to the user.
 // Score=0 clears a score; absence leaves it unchanged.
 type Patch struct {
+	AiringState   *string   `json:"airing_state"`
 	Visibility    *string   `json:"visibility"`
 	Details       *Details  `json:"details"`
 	Version       int       `json:"version"`
@@ -64,32 +69,38 @@ type Patch struct {
 }
 
 type Record struct {
-	Rewatch     int       `json:"rewatch"`
-	Version     int       `json:"version"`
-	ID          string    `json:"id"`
-	EntryID     string    `json:"entry_id"`
-	EntryTitle  string    `json:"entry_title"`
-	Accent      string    `json:"accent"`
-	WatchedOn   string    `json:"watched_on"`
-	EpisodeFrom int       `json:"episode_from"`
-	EpisodeTo   int       `json:"episode_to"`
-	Note        string    `json:"note"`
-	RequestID   string    `json:"request_id"`
-	CreatedAt   time.Time `json:"created_at"`
+	SourceLine     int       `json:"source_line"`
+	SourceFilename string    `json:"source_filename"`
+	TimePrecision  string    `json:"time_precision"`
+	Rewatch        int       `json:"rewatch"`
+	Version        int       `json:"version"`
+	ID             string    `json:"id"`
+	EntryID        string    `json:"entry_id"`
+	EntryTitle     string    `json:"entry_title"`
+	Accent         string    `json:"accent"`
+	WatchedOn      string    `json:"watched_on"`
+	EpisodeFrom    int       `json:"episode_from"`
+	EpisodeTo      int       `json:"episode_to"`
+	Note           string    `json:"note"`
+	RequestID      string    `json:"request_id"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type RecordInput struct {
-	Rewatch     int    `json:"rewatch"`
-	WatchedOn   string `json:"watched_on"`
-	EpisodeFrom int    `json:"episode_from"`
-	EpisodeTo   int    `json:"episode_to"`
-	Note        string `json:"note"`
-	RequestID   string `json:"request_id"`
+	TimePrecision string `json:"time_precision"`
+	Rewatch       int    `json:"rewatch"`
+	WatchedOn     string `json:"watched_on"`
+	EpisodeFrom   int    `json:"episode_from"`
+	EpisodeTo     int    `json:"episode_to"`
+	Note          string `json:"note"`
+	RequestID     string `json:"request_id"`
 }
 
 type Stats struct {
 	Total           int `json:"total"`
+	Recorded        int `json:"recorded"`
 	Watching        int `json:"watching"`
+	CaughtUp        int `json:"caught_up"`
 	Completed       int `json:"completed"`
 	Planned         int `json:"planned"`
 	OnHold          int `json:"on_hold"`
@@ -111,10 +122,16 @@ type Filter struct {
 }
 
 func ValidStatus(s string) bool {
-	return s == "planned" || s == "watching" || s == "completed" || s == "on_hold" || s == "dropped"
+	return s == "recorded" || s == "planned" || s == "watching" || s == "caught_up" || s == "completed" || s == "on_hold" || s == "dropped"
 }
 
 func (e *Entry) Validate() error {
+	if e.AiringState == "" {
+		e.AiringState = "finished"
+	}
+	if e.AiringState != "finished" && e.AiringState != "airing" && e.AiringState != "unknown" {
+		return fault.Field("airing_state", "播出状态无效。")
+	}
 	if e.Visibility == "" {
 		e.Visibility = "private"
 	}
@@ -186,9 +203,8 @@ func (r *RecordInput) Validate() error {
 	if r.Rewatch < 1 || r.Rewatch > 1000 {
 		return fault.Field("rewatch", "重看次数需要在 1–1000 之间。")
 	}
-	date, err := time.Parse("2006-01-02", r.WatchedOn)
-	if err != nil || date.Year() < 1900 || date.Year() > 2100 {
-		return fault.Field("watched_on", "请输入有效的观看日期。")
+	if err := r.validateTime(); err != nil {
+		return err
 	}
 	if r.EpisodeFrom < 1 || r.EpisodeTo < r.EpisodeFrom || r.EpisodeTo > 10000 {
 		return fault.Field("episode_to", "请填写有效的话数范围。")

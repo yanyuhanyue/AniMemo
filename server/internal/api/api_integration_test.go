@@ -154,7 +154,7 @@ func TestJournalHTTPWorkflow(t *testing.T) {
 	request(t, alice, base, "GET", "/api/v1/auth/me", nil, 200)
 	unknown := map[string]any{"title": "forbidden owner", "user_id": id.New()}
 	request(t, alice, base, "POST", "/api/v1/entries", unknown, 400)
-	entry := decodeAs[journal.Entry](t, request(t, alice, base, "POST", "/api/v1/entries", map[string]any{"title": "葬送的芙莉莲", "total_episodes": 12, "tags": []string{"治愈", "治愈", "冒险"}}, 201))
+	entry := decodeAs[journal.Entry](t, request(t, alice, base, "POST", "/api/v1/entries", map[string]any{"title": "葬送的芙莉莲", "total_episodes": 12, "airing_state": "finished", "tags": []string{"治愈", "治愈", "冒险"}}, 201))
 	if !id.Valid(entry.ID) || entry.Version != 1 || len(entry.Tags) != 2 {
 		t.Fatalf("bad new entry: %+v", entry)
 	}
@@ -272,7 +272,7 @@ func TestJournalHTTPWorkflow(t *testing.T) {
 		t.Fatalf("wrong aggregate after viewing: %+v", stats)
 	}
 	exported := decodeAs[journal.Export](t, request(t, alice, base, "GET", "/api/v1/export", nil, 200))
-	if exported.Schema != "animemo.journal/v1" || len(exported.Entries) != 1 || len(exported.History) != 2 || exported.History[0].EntryID != exported.Entries[0].ID {
+	if exported.Schema != "animemo.journal/v2" || len(exported.Entries) != 1 || len(exported.History) != 2 || exported.History[0].EntryID != exported.Entries[0].ID {
 		t.Fatal("export is incomplete")
 	}
 

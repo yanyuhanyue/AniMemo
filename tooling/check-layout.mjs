@@ -18,6 +18,7 @@ for (const file of [...files('server/pkg/pluginproto'), ...files('server/example
   if (file.endsWith('.go') && /"animemo\.local\/server\/internal\//.test(readFileSync(file, 'utf8'))) violations.push(`${file}: plugin SDK/consumer imports host internals`);
 }
 for (const file of files('web/src')) {
+  if (!file.includes(`${path.sep}components${path.sep}ui${path.sep}`) && /from ['"](?:@base-ui\/|motion\/|gsap)/.test(readFileSync(file,'utf8'))) violations.push(`${file}: feature imports a UI engine directly`);
   if (/\.(exe|zip|log|png)$/.test(file)) violations.push(`${file}: generated artifact in source tree`);
 }
 if (violations.length) { console.error(violations.join('\n')); process.exitCode = 1; }

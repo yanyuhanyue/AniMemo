@@ -257,7 +257,7 @@ export interface paths {
             parameters: {
                 query?: {
                     search?: string;
-                    status?: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+                    status?: "recorded" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
                     sort?: "updated" | "title" | "score";
                     page?: number;
                     page_size?: number;
@@ -1650,7 +1650,7 @@ export interface paths {
                 query?: {
                     search?: string;
                     page?: number;
-                    status?: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+                    status?: "recorded" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
                     sort?: "updated" | "title" | "score";
                 };
                 header?: never;
@@ -1693,7 +1693,7 @@ export interface paths {
                 query?: {
                     search?: string;
                     page?: number;
-                    status?: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+                    status?: "recorded" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
                     sort?: "updated" | "title" | "score";
                 };
                 header?: never;
@@ -3985,6 +3985,1912 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/entries/{id}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Private meaningful revisions, latest 100 */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryRevisions"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Worker heartbeat and durable event metrics */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RuntimeStatus"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/notes */
+        get: {
+            parameters: {
+                query?: {
+                    search?: string;
+                    anime_id?: string;
+                    character_id?: string;
+                    kind?: string;
+                    year?: string;
+                    highlight?: boolean;
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["MemoryNote"][];
+                            total: number;
+                            page: number;
+                            page_size: number;
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** POST memory/notes */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["MemoryNoteInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryNote"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/notes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/notes/{id} */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryNote"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** PUT memory/notes/{id} */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["MemoryNoteInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryNote"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /** DELETE memory/notes/{id} */
+        delete: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/characters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/characters */
+        get: {
+            parameters: {
+                query?: {
+                    search?: string;
+                    anime_id?: string;
+                    character_id?: string;
+                    kind?: string;
+                    year?: string;
+                    highlight?: boolean;
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["Character"][];
+                            total: number;
+                            page: number;
+                            page_size: number;
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** POST memory/characters */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CharacterInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Character"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/characters/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/characters/{id} */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Character"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** PUT memory/characters/{id} */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CharacterInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Character"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/episodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/episodes */
+        get: {
+            parameters: {
+                query?: {
+                    search?: string;
+                    anime_id?: string;
+                    character_id?: string;
+                    kind?: string;
+                    year?: string;
+                    highlight?: boolean;
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["Episode"][];
+                            total: number;
+                            page: number;
+                            page_size: number;
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** POST memory/episodes */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["EpisodeInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Episode"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/episodes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** PUT memory/episodes/{id} */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["EpisodeInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Episode"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/collections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/collections */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["MemoryCollection"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** POST memory/collections */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CollectionInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryCollection"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/collections/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** PUT memory/collections/{id} */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CollectionInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryCollection"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /** DELETE memory/collections/{id} */
+        delete: {
+            parameters: {
+                query: {
+                    version: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/yearly": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/yearly */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["YearlyMemory"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** POST memory/yearly */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["YearlyInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["YearlyMemory"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/yearly/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/yearly/{id} */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["YearlyMemory"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** PUT memory/yearly/{id} */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["YearlyInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["YearlyMemory"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/revisions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/revisions/{id} */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["LibraryRevision"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/identities/{kind}/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST memory/identities/{kind}/{id} */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    kind: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        version: number;
+                        target_id: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/relations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/relations */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["AnimeRelation"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** PUT memory/relations */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AnimeRelation"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /** DELETE memory/relations */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AnimeRelation"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/progress */
+        get: {
+            parameters: {
+                query: {
+                    anime_id: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["ProgressAssertion"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** POST memory/progress */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProgressAssertionInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProgressAssertion"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/media": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/media */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["MemoryMedia"][];
+                            total: number;
+                            page: number;
+                            page_size: number;
+                            used_bytes: number;
+                            quota_bytes: number;
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** POST memory/media */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        byte_size: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryMedia"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/media/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/media/{id} */
+        get: {
+            parameters: {
+                query?: {
+                    thumbnail?: boolean;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                        "image/jpeg": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** PUT memory/media/{id} */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryMedia"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /** DELETE memory/media/{id} */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST memory/shares */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["MemoryShareInput"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MemoryShareResult"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/shared/{token}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/shared/{token} */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    token: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SharedMemory"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/shared/{token}/media/{media}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+                media: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/shared/{token}/media/{media} */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    token: string;
+                    media: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/jpeg": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/public/{kind}/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/public/{kind}/{id} */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    kind: string;
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SharedMemory"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/public/{kind}/{id}/media/{media}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+                id: string;
+                media: string;
+            };
+            cookie?: never;
+        };
+        /** GET memory/public/{kind}/{id}/media/{media} */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    kind: string;
+                    id: string;
+                    media: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/jpeg": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/homepage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET homepage */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PublicPage"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/achievements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/achievements */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["Achievement"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/achievements/showcase": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** PUT memory/achievements/showcase */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        unlock_ids: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/achievements/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST memory/achievements/acknowledge */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/achievements/rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET admin/achievements/rules */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["AchievementRule"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        /** PUT admin/achievements/rules */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AchievementRule"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AchievementRule"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/achievements/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST admin/achievements/grants */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        owner_id: string;
+                        tier_id: string;
+                        grant: boolean;
+                        reason: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Success */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/achievements/backfills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET admin/achievements/backfills */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["AchievementBackfill"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /** POST admin/achievements/backfills */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AchievementBackfill"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/achievements/backfills/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST admin/achievements/backfills/{id} */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        action: "run" | "pause";
+                    };
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AchievementBackfill"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET memory/search */
+        get: {
+            parameters: {
+                query?: {
+                    search?: string;
+                    anime_id?: string;
+                    character_id?: string;
+                    kind?: string;
+                    year?: string;
+                    highlight?: boolean;
+                    page?: number;
+                    status?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["MemorySearchItem"][];
+                            total: number;
+                            page: number;
+                            page_size: number;
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/references": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST memory/references */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["CollectionItem"][];
+                    };
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["MemoryReference"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/episodes/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST memory/episodes/batch */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        anime_id: string;
+                        from: number;
+                        to: number;
+                        /** @enum {string} */
+                        kind: "main" | "special" | "ova" | "movie";
+                        /** @enum {string} */
+                        progress_role: "required" | "optional" | "excluded";
+                    };
+                };
+            };
+            responses: {
+                /** @description Success */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["Episode"][];
+                        };
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4037,7 +5943,7 @@ export interface components {
             /** @enum {string} */
             format: "tv" | "movie" | "ova" | "other";
             /** @enum {string} */
-            status: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            status: "recorded" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
             total_episodes: number;
             score: number | null;
             notes: string;
@@ -4061,14 +5967,21 @@ export interface components {
             /** Format: uuid */
             share_slug: string;
             readonly source: components["schemas"]["EntrySource"] | null;
+            /** @enum {string} */
+            airing_state: "unknown" | "airing" | "finished";
+            /** Format: uuid */
+            readonly anime_id: string;
         };
         CreateEntry: {
             title: string;
             original_title?: string;
             /** @enum {string} */
             format?: "tv" | "movie" | "ova" | "other";
-            /** @enum {string} */
-            status?: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            /**
+             * @description Defaults to recorded: remembers having seen this work without inventing completion, dates or watched episodes.
+             * @enum {string}
+             */
+            status?: "recorded" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
             total_episodes?: number;
             score?: number | null;
             notes?: string;
@@ -4078,6 +5991,8 @@ export interface components {
             details?: components["schemas"]["Details"];
             /** @enum {string} */
             visibility?: "private" | "unlisted" | "public";
+            /** @enum {string} */
+            airing_state?: "unknown" | "airing" | "finished";
         };
         PatchEntry: {
             title?: string;
@@ -4085,7 +6000,7 @@ export interface components {
             /** @enum {string} */
             format?: "tv" | "movie" | "ova" | "other";
             /** @enum {string} */
-            status?: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            status?: "recorded" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
             total_episodes?: number;
             /** @description 0 clears the score; omitted fields remain unchanged. */
             score?: number;
@@ -4097,9 +6012,11 @@ export interface components {
             details?: components["schemas"]["Details"];
             /** @enum {string} */
             visibility?: "private" | "unlisted" | "public";
+            /** @enum {string} */
+            airing_state?: "unknown" | "airing" | "finished";
         };
         RecordInput: {
-            /** Format: date */
+            /** @description YYYY-MM-DD for day; YYYY-MM or normalized YYYY-MM-01 for month; YYYY or normalized YYYY-01-01 for year; empty for unknown. */
             watched_on: string;
             episode_from: number;
             episode_to: number;
@@ -4111,6 +6028,8 @@ export interface components {
             request_id: string;
             /** @default 1 */
             rewatch: number;
+            /** @enum {string} */
+            time_precision?: "day" | "month" | "year" | "unknown";
         };
         WatchRecord: {
             /** Format: uuid */
@@ -4120,7 +6039,7 @@ export interface components {
             entry_title: string;
             /** @enum {string} */
             accent: "violet" | "coral" | "blue" | "green" | "amber";
-            /** Format: date */
+            /** @description Normalized ISO date; month/year precision is explicit. Empty only for unknown. */
             watched_on: string;
             episode_from: number;
             episode_to: number;
@@ -4131,6 +6050,10 @@ export interface components {
             created_at: string;
             rewatch: number;
             version: number;
+            /** @enum {string} */
+            time_precision: "day" | "month" | "year" | "unknown";
+            source_line: number;
+            source_filename: string;
         };
         RecordResult: {
             entry: components["schemas"]["Entry"];
@@ -4154,14 +6077,20 @@ export interface components {
             dropped: number;
             watched_episodes: number;
             watch_records: number;
+            caught_up: number;
+            /** @description Remembered works whose viewing details are unspecified. */
+            recorded: number;
         };
         Export: {
-            /** @constant */
-            schema: "animemo.journal/v1";
+            /** @enum {string} */
+            schema: "animemo.journal/v1" | "animemo.journal/v2" | "animemo.journal/v3";
             /** Format: date-time */
             exported_at: string;
             entries: components["schemas"]["Entry"][];
             history: components["schemas"]["WatchRecord"][];
+            resources?: components["schemas"]["MemoryResource"][];
+            revisions?: components["schemas"]["MemoryRevision"][];
+            library?: components["schemas"]["LibraryBundle"];
         };
         Error: {
             error: {
@@ -4179,7 +6108,7 @@ export interface components {
             reference_url?: string;
         };
         RecordPatch: {
-            /** Format: date */
+            /** @description YYYY-MM-DD for day; YYYY-MM or normalized YYYY-MM-01 for month; YYYY or normalized YYYY-01-01 for year; empty for unknown. */
             watched_on: string;
             episode_from: number;
             episode_to: number;
@@ -4187,6 +6116,8 @@ export interface components {
             /** @default 1 */
             rewatch: number;
             version: number;
+            /** @enum {string} */
+            time_precision?: "day" | "month" | "year" | "unknown";
         };
         Settings: {
             display_name: string;
@@ -4217,7 +6148,7 @@ export interface components {
             name: string;
             search: string;
             /** @enum {string} */
-            status: "" | "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            status: "recorded" | "" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
             /** @enum {string} */
             sort: "updated" | "title" | "score";
         };
@@ -4225,7 +6156,7 @@ export interface components {
             name: string;
             search: string;
             /** @enum {string} */
-            status: "" | "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            status: "recorded" | "" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
             /** @enum {string} */
             sort: "updated" | "title" | "score";
         };
@@ -4274,6 +6205,8 @@ export interface components {
             warnings: string[];
             titles: string[];
             history: components["schemas"]["ImportRecordPreview"][];
+            complete_memory: boolean;
+            choices: components["schemas"]["ImportChoice"][];
         };
         ImportJob: {
             /** Format: uuid */
@@ -4296,6 +6229,7 @@ export interface components {
         ImportAction: {
             /** @enum {string} */
             action: "apply" | "cancel";
+            selection?: components["schemas"]["ImportSelection"][];
         };
         PublicationInput: {
             /** @enum {string} */
@@ -4313,7 +6247,7 @@ export interface components {
             /** @enum {string} */
             format: "tv" | "movie" | "ova" | "other";
             /** @enum {string} */
-            status: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            status: "recorded" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
             total_episodes: number;
             watched_episodes: number;
             score: number | null;
@@ -4405,6 +6339,7 @@ export interface components {
             description: string;
             registration_open: boolean;
             version: number;
+            homepage_owner_slug: string;
         };
         AuditEvent: {
             /** Format: uuid */
@@ -4596,13 +6531,18 @@ export interface components {
             revision: number;
             /** Format: date-time */
             installed_at: string;
+            publisher_id: string;
+            distribution: string;
+            installation_id: string;
+            health: string;
+            health_reason: string;
         };
         PluginReleases: {
             items: components["schemas"]["PluginRelease"][];
         };
         PluginAction: {
             /** @enum {string} */
-            action: "activate" | "disable";
+            action: "activate" | "disable" | "uninstall";
             version: string;
             revision: number;
         };
@@ -4614,12 +6554,16 @@ export interface components {
         };
         ImportRecordPreview: {
             title: string;
-            /** Format: date */
+            /** @description Normalized ISO date, or empty when time_precision is unknown. */
             watched_on: string;
             episode_from: number;
             episode_to: number;
             rewatch: number;
             note: string;
+            /** @enum {string} */
+            time_precision: "day" | "month" | "year" | "unknown";
+            source_line: number;
+            source_filename: string;
         };
         EntrySource: {
             /** @enum {string} */
@@ -4685,7 +6629,7 @@ export interface components {
         };
         SyncValue: {
             /** @enum {string} */
-            status: "planned" | "watching" | "completed" | "on_hold" | "dropped";
+            status: "recorded" | "planned" | "watching" | "completed" | "on_hold" | "dropped" | "caught_up";
             score: number;
             notes: string;
             tags: string[];
@@ -4808,6 +6752,468 @@ export interface components {
             /** @enum {string} */
             backend: "postgres" | "r2";
             version: number;
+        };
+        MemoryRevision: {
+            id: string;
+            anime_id: string;
+            kind: string;
+            /** Format: date-time */
+            recorded_at: string;
+            snapshot: {
+                [key: string]: unknown;
+            };
+            entry_id: string;
+        };
+        MemoryRevisions: {
+            items: components["schemas"]["MemoryRevision"][];
+        };
+        RuntimeStatus: {
+            worker_ready: boolean;
+            pending: number;
+            running: number;
+            failed: number;
+            done: number;
+            /** Format: date-time */
+            checked_at: string;
+        };
+        MemoryResource: {
+            /** Format: uuid */
+            id: string;
+            title: string;
+            identities: components["schemas"]["ExternalIdentity"][];
+        };
+        ExternalIdentity: {
+            /** @enum {string} */
+            provider: "bangumi";
+            external_id: string;
+            active: boolean;
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            recorded_at: string;
+        };
+        MemoryAnchor: {
+            /** @enum {string} */
+            kind: "" | "episode" | "timestamp" | "quote" | "scene" | "freeform";
+            timestamp_seconds: number | null;
+            quote: string;
+            scene: string;
+        };
+        MemoryNoteInput: {
+            version?: number;
+            /** @enum {string} */
+            kind?: "note" | "moment";
+            title: string;
+            body?: string;
+            anime_id?: string;
+            character_id?: string;
+            episode_id?: string;
+            watch_id?: string;
+            anchor?: components["schemas"]["MemoryAnchor"];
+            media_ids?: string[];
+            tags?: string[];
+            occurred_on?: string;
+            /** @enum {string} */
+            time_precision?: "day" | "month" | "year" | "approximate" | "unknown";
+            /** @enum {string} */
+            visibility?: "private" | "unlisted" | "public";
+            spoiler?: boolean;
+            highlight?: boolean;
+        };
+        MemoryNote: {
+            version: number;
+            /** @enum {string} */
+            kind: "note" | "moment";
+            title: string;
+            body: string;
+            anime_id: string;
+            character_id: string;
+            episode_id: string;
+            watch_id: string;
+            anchor: components["schemas"]["MemoryAnchor"];
+            media_ids: string[];
+            tags: string[];
+            occurred_on: string;
+            /** @enum {string} */
+            time_precision: "day" | "month" | "year" | "approximate" | "unknown";
+            /** @enum {string} */
+            visibility: "private" | "unlisted" | "public";
+            spoiler: boolean;
+            highlight: boolean;
+            id: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: date-time */
+            deleted_at: string | null;
+            watch_missing: boolean;
+        };
+        CharacterInput: {
+            version?: number;
+            name: string;
+            aliases?: string[];
+            description?: string;
+            anime_ids?: string[];
+            favorite?: boolean;
+            /** @enum {string} */
+            visibility?: "private" | "unlisted" | "public";
+        };
+        Character: {
+            version: number;
+            name: string;
+            aliases: string[];
+            description: string;
+            anime_ids: string[];
+            favorite: boolean;
+            /** @enum {string} */
+            visibility: "private" | "unlisted" | "public";
+            id: string;
+            redirect_id: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        EpisodeInput: {
+            version?: number;
+            anime_id: string;
+            title: string;
+            number: number;
+            /** @enum {string} */
+            kind?: "main" | "special" | "ova" | "movie";
+            /** @enum {string} */
+            progress_role?: "required" | "optional" | "excluded";
+            identities?: {
+                provider: string;
+                external_id: string;
+            }[];
+        };
+        Episode: {
+            version: number;
+            anime_id: string;
+            title: string;
+            number: number;
+            /** @enum {string} */
+            kind: "main" | "special" | "ova" | "movie";
+            /** @enum {string} */
+            progress_role: "required" | "optional" | "excluded";
+            identities: {
+                provider: string;
+                external_id: string;
+            }[];
+            id: string;
+            redirect_id: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        AnimeRelation: {
+            from_id: string;
+            to_id: string;
+            /** @enum {string} */
+            relation: "sequel" | "prequel" | "side_story" | "same_franchise";
+        };
+        ProgressAssertionInput: {
+            anime_id: string;
+            /** @enum {string} */
+            scope: "mainline" | "all" | "custom";
+            /** @enum {string} */
+            precision: "exact" | "approximate" | "caught_up";
+            episodes: {
+                id: string;
+                version: number;
+            }[];
+            note?: string;
+        };
+        ProgressAssertion: {
+            id: string;
+            anime_id: string;
+            /** @enum {string} */
+            scope: "mainline" | "all" | "custom";
+            /** @enum {string} */
+            precision: "exact" | "approximate" | "caught_up";
+            episode_ids: string[];
+            note: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        MemoryMedia: {
+            id: string;
+            /** @enum {string} */
+            state: "reserved" | "ready" | "deleted";
+            content_type: string;
+            sha256: string;
+            byte_size: number;
+            width: number;
+            height: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            deleted_at: string | null;
+        };
+        CollectionItem: {
+            /** @enum {string} */
+            kind: "anime" | "character" | "note" | "moment";
+            id: string;
+        };
+        CollectionInput: {
+            version?: number;
+            title: string;
+            description?: string;
+            items?: components["schemas"]["CollectionItem"][];
+            /** @enum {string} */
+            visibility?: "private" | "unlisted" | "public";
+        };
+        MemoryCollection: {
+            version: number;
+            title: string;
+            description: string;
+            items: components["schemas"]["CollectionItem"][];
+            /** @enum {string} */
+            visibility: "private" | "unlisted" | "public";
+            id: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        LibraryRevision: {
+            id: string;
+            resource_id: string;
+            kind: string;
+            action: string;
+            snapshot: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            recorded_at: string;
+        };
+        YearlyInput: {
+            version?: number;
+            year: number;
+            timezone?: string;
+            title: string;
+            introduction?: string;
+            note_ids: string[];
+            /** @enum {string} */
+            visibility?: "private" | "unlisted" | "public";
+        };
+        YearlyStats: {
+            watch_records: number;
+            anime: number;
+            episodes: number;
+            notes: number;
+            imprecise_records: number;
+        };
+        YearlyItem: {
+            note_id: string;
+            kind: string;
+            title: string;
+            body: string;
+            occurred_on: string;
+            time_precision: string;
+            spoiler: boolean;
+            media_ids: string[];
+            unavailable: string;
+            source_visibility: string;
+            source_version: number;
+        };
+        YearlyRevision: {
+            id: string;
+            revision: number;
+            /** Format: date-time */
+            cutoff: string;
+            algorithm: string;
+            title: string;
+            introduction: string;
+            stats: components["schemas"]["YearlyStats"];
+            items: components["schemas"]["YearlyItem"][];
+            /** Format: date-time */
+            created_at: string;
+        };
+        YearlyMemory: {
+            id: string;
+            year: number;
+            timezone: string;
+            title: string;
+            introduction: string;
+            version: number;
+            /** @enum {string} */
+            visibility: "private" | "unlisted" | "public";
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            revisions: components["schemas"]["YearlyRevision"][];
+        };
+        MemoryShareInput: {
+            /** @enum {string} */
+            kind: "note" | "collection" | "yearly" | "character";
+            resource_id: string;
+            days?: number;
+            revoke?: boolean;
+        };
+        MemoryShareResult: {
+            token: string;
+            /** Format: date-time */
+            expires_at: string | null;
+        };
+        SharedMemory: {
+            kind: string;
+            title: string;
+            introduction: string;
+            items: components["schemas"]["YearlyItem"][];
+            revision: number;
+            year: number;
+        };
+        AchievementRule: {
+            id: string;
+            series_id: string;
+            series_title: string;
+            tier: number;
+            revision: number;
+            title: string;
+            description: string;
+            /** @enum {string} */
+            badge: "spark" | "moon" | "orbit" | "flower" | "book";
+            /** @enum {string} */
+            metric: "watch_records" | "distinct_anime" | "completed_anime" | "watched_episodes" | "memory_notes";
+            threshold: number;
+            active: boolean;
+        };
+        Achievement: {
+            id: string;
+            series_id: string;
+            series_title: string;
+            tier: number;
+            revision: number;
+            title: string;
+            description: string;
+            /** @enum {string} */
+            badge: "spark" | "moon" | "orbit" | "flower" | "book";
+            /** @enum {string} */
+            metric: "watch_records" | "distinct_anime" | "completed_anime" | "watched_episodes" | "memory_notes";
+            threshold: number;
+            active: boolean;
+            value: number;
+            unlock_id: string;
+            /** Format: date-time */
+            unlocked_at: string | null;
+            granted: boolean;
+            notified: boolean;
+            showcase_slot: number;
+        };
+        AchievementBackfill: {
+            id: string;
+            /** @enum {string} */
+            state: "preview" | "running" | "paused" | "done";
+            rules: components["schemas"]["AchievementRule"][];
+            total: number;
+            cursor: number;
+            granted: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        MemorySearchItem: {
+            id: string;
+            kind: string;
+            title: string;
+            excerpt: string;
+            anime_id: string;
+            character_id: string;
+            occurred_on: string;
+            time_precision: string;
+            status: string;
+            spoiler: boolean;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        MemoryReference: {
+            id: string;
+            /** @enum {string} */
+            kind: "anime" | "character" | "note" | "moment";
+            title: string;
+            available: boolean;
+        };
+        ImportCandidate: {
+            id: string;
+            title: string;
+            version: number;
+        };
+        ImportChoice: {
+            index: number;
+            title: string;
+            default_selected: boolean;
+            candidates: components["schemas"]["ImportCandidate"][];
+            history: components["schemas"]["ImportRecordPreview"][];
+        };
+        ImportSelection: {
+            index: number;
+            records: number[];
+            target_id: string;
+            target_version: number;
+        };
+        PortableGrantEvent: {
+            /** @enum {string} */
+            action: "granted" | "revoked";
+            reason: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        PortableAchievement: {
+            rule: components["schemas"]["AchievementRule"];
+            unlock_id: string;
+            /** @enum {string} */
+            source: "automatic" | "administrator";
+            value: number;
+            /** Format: date-time */
+            unlocked_at: string;
+            granted: boolean;
+            notified: boolean;
+            showcase_slot: number;
+            events: components["schemas"]["PortableGrantEvent"][];
+        };
+        PortableAchievementProgress: {
+            rule: components["schemas"]["AchievementRule"];
+            value: number;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        AchievementBundle: {
+            unlocks: components["schemas"]["PortableAchievement"][];
+            progress: components["schemas"]["PortableAchievementProgress"][];
+        };
+        PortableMemoryMedia: {
+            id: string;
+            /** @enum {string} */
+            state: "reserved" | "ready" | "deleted";
+            content_type: string;
+            sha256: string;
+            byte_size: number;
+            width: number;
+            height: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            deleted_at: string | null;
+            data: string | null;
+        };
+        LibraryBundle: {
+            achievements: components["schemas"]["AchievementBundle"];
+            characters: components["schemas"]["Character"][];
+            episodes: components["schemas"]["Episode"][];
+            relations: components["schemas"]["AnimeRelation"][];
+            progress: components["schemas"]["ProgressAssertion"][];
+            notes: components["schemas"]["MemoryNote"][];
+            media: components["schemas"]["PortableMemoryMedia"][];
+            collections: components["schemas"]["MemoryCollection"][];
+            yearlies: components["schemas"]["YearlyMemory"][];
+            revisions: components["schemas"]["LibraryRevision"][];
         };
     };
     responses: {

@@ -1,6 +1,181 @@
 # 开发验收记录
 
-## 外部集成本地接手（2026-10-07，最新）
+## 当前：1.3 RC2 本机交接（2026-10-08，Windows + Docker Desktop）
+
+已在 `E:\番剧记录\animemo-next` 接入交接包：包内 305 项文件校验通过，完整补丁基线为 `4eb8b88732a5dc25bfb58bbc0008886fc624afe0`，应用源码与包内 279 项源码清单一致；本机新增改动仅涉及运维工具、验收脚本和交接文档。原 ZIP SHA-256 为 `014cd4bc6c133e86f90bedc20f24ca7a2be3442bc55018fd29b3311f8072c74b`。
+
+环境：Windows PowerShell、Node 24.12.0、Go 1.26.6、Docker Desktop Linux engine 29.7.2、Compose 5.5.0、PostgreSQL 17.11、age 1.2.1、本机 Chrome。Docker Desktop 最初因运行目录的陈旧 socket 无法启动；保存原运行目录后重建空运行目录恢复启动，没有删除镜像、数据卷或虚拟磁盘。这是本机恢复操作，不代表 Docker Desktop 的长期缺陷已修复。
+
+修复了实际阻止 Windows 安装的镜像标识差异：交接包配置摘要为 `sha256:44d8eb4ba3eec3771ae0d8e5f81706256adb541fc88a9adb7040f366c3952e47`，同一归档在本机 containerd 中显示为 `sha256:be795c551b753ffdbfdc880f052bd41c6f5f5040d7ce6e32b0a806c41532072e`。加载器现在验证归档中的摘要关系并返回本机标识；完整备份也记录可移植配置摘要。开发加载需明确 `--development`，不会变为正式来源验证。本次一直使用包内最终应用镜像，未重新编译或修改产品代码。
+
+| 检查 | 本机实际结果 |
+| --- | --- |
+| 源码检查与单元 | `npm ci --ignore-scripts`、`npm run check`、`npm test` PASS；运维修复后重跑 Node 检查，16 项全部 PASS，包含配置/OCI 标识、篡改和错误镜像拒绝 |
+| PostgreSQL 全量集成 | `npm run test:api` PASS，154.8 秒；Windows Go 连接隔离 PostgreSQL 容器，各测试独立 schema，完成后移除测试容器 |
+| 最终镜像记忆库恢复 | PASS；真实 Worker、私人图片字节、完整关联、未知事实、冻结年度册、成就逐字段比较，模拟经典 Docker 快照在 containerd 恢复，错误配置摘要拒绝 |
+| 实例运维 | 12 项 PASS；新建、诊断、配置变更/中断恢复、真实 age 加解密、错误密钥与损坏密文拒绝、独立恢复、旧会话撤销/TOTP 保留、更新、显式回滚、救援备份、坏候选自动恢复；更新路径使用同一 RC2 镜像，不算新的跨版本迁移证明 |
+| 记录主链浏览器 | 7 项 PASS；仅作品名保存、未知日期回忆、精确事实不预填、折叠字段保留、工具直达、检索和 320/390/768 px；0 页面异常，扫描范围内 axe 0 检出 |
+| 后台浏览器 | 9 页 × 4 种宽度 PASS（1440/390/768/320 px）；桌面/手机共 18 次 axe 扫描无检出，0 页面异常；用户操作取消、焦点返回、维护取消、内容检查、预设增改删、设置保存、扩展启停与包审阅取消通过 |
+| 留给用户的实例 | `local-review` 在 `http://127.0.0.1:18082` 运行，doctor PASS，app/worker/db 全部 healthy，初始化仍可用；测试账号及记录只在已经清理的隔离实例中 |
+
+恢复脚本的首次比较因先读取导出、后等成就补算完成而产生时间戳竞争；已等待队列完成、停止测试 Worker 后重新读取基准，保留全部字段比较并复测通过。后台脚本同步当前入口文案并补入成就页。原云端证据保留为下面的历史范围，未计入上述本机结果。
+
+证据：`.local/output/rc2-test-api.{json,log}`、`memory-instance-smoke.json`、`instance-smoke.json`、`rc2-browser.json`、`rc2-local-review-doctor.json`；截图及扫描报告在 `.local/output/browser/rc2-windows-recording/` 和 `.local/output/browser/admin-redesign/verification.json`。桌面后台及手机新建截图已经实际查看。所有临时探针已清理，保留用户实例及本机验收备份。
+
+仍缺真实 Resend 发信凭据/收件验证、Bangumi OAuth 应用/授权账号、R2 私有 bucket 凭据和部署域名/TLS。已复查旧项目配置与 SQLite：没有可用的对应密钥记录。源码通过 GitHub `codex/animemo-next` 分支交接，远端提交及 CI 状态以分支记录为准；未进行版本标签签发或 Release 发布。VM、长时负载、完整 race 和 iOS Safari 未在本机重跑。启动及初始化命令见 [本地交接指南](local-package-handoff.md)，外部服务参数见 [外部交接](local-network-handoff.md)。
+
+## 历史：1.3 RC2 记录与回顾收敛（2026-10-08，云端 Linux）
+
+按用户明确定位调整产品与路线：保存看过的番剧和回忆，不承担追番任务、排期或提醒。源码 `1.3.0-rc.2`，详细交互与数据语义见 [交付说明](v1.3-delivery.md)。新建只需作品名，默认 `recorded`（看过，细节未记）；自由回忆复用 MemoryNote，按需展开结构化工具。迁移 019 只扩展状态与筛选约束，不改写已有条目。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 静态与单元 | `npm run check`、`npm test` PASS；TypeScript、OpenAPI 生成一致性、Go vet、模块边界、15 项 Node 检查及 Go 单元；产品/OpenAPI 版本一致性纳入构建前检查 |
+| 全量 PostgreSQL 集成 | `npm run test:api` PASS，58.2 秒；含既有账号、权限、来源、同步、导入、媒体、分享、成就等回归。本轮未重复全量 race，既有竞态证据按其源码范围保留 |
+| 新记录的真实性 | PASS：最小创建、未知日期、独立回忆不产生集数/完成事实，按新状态检索和保存筛选，跨账号拒绝，明确集数记录及撤回；资料元数据不推断观看经历 |
+| 个人往返与外部边界 | JSON/ZIP 两种完整恢复均保留新状态、关系和未知事实；Bangumi 写回拒绝猜测不支持的状态。使用受控元数据与协议，未调用正式授权服务 |
+| 真实浏览器 | 新建默认仅两个输入框；作品卡片写回忆并自动关联；日期、集数、刷次不预填；编辑折叠字段不覆盖原评分/标签/资料；文字检索、次级工具直达、焦点返回与 320/390/768 px 布局 PASS |
+| 自动可访问性 | 作品页、新建弹窗、回忆弹窗和手机记忆检索 axe WCAG A/AA 0 检出、0 pageerror；修复无标签卡片提示文字的对比度。不代表完整无障碍认证 |
+| 容器升级与恢复 | RC1 → RC2、18 → 19 迁移 PASS；新建无精确细节的记录在跨实例快照恢复后仍为 recorded、0 已记录话数且感想完整；原有记忆库深比较、私人原件字节、年度冻结和成就历史检查通过；两个探针均清理 |
+| 最终验收实例 | 最终镜像更新完成；doctor PASS，app/worker/db healthy。运行中的 OpenAPI 版本与 recorded 枚举核对通过；同一浏览器主链在 18082 实际容器再次 PASS。原六条展示记录保留，补充一条私密合成旧番及未知日期回忆 |
+
+证据：`.local/logs/recording-api-final.log`、`recording-check-final.log`、`recording-test-final.log`；`.local/output/browser/recording-dev/report.json`；`.local/output/memory-instance-smoke.json`。完整 API 回归最初指出旧夹具默认把作品当作已完结，已为该完成统计用例明确提供播出状态后重跑通过；实际产品的未知状态不再靠默认值补全。
+
+容器恢复使用 `sha256:550e20ef77fdc8794764e39f9d3e436dc5b53ee9ff4d5373956dfef70d9a21fa`。之后仅统一嵌入 OpenAPI 的版本元数据，最终镜像为 `sha256:44d8eb4ba3eec3771ae0d8e5f81706256adb541fc88a9adb7040f366c3952e47`，产物清单在 `.local/output/release-v13-rc2-final/release.json`，相同业务代码与数据库迁移不重复全套恢复。最终实例和浏览器复核回执分别保存于 `.local/output/recording-review-doctor.json` 和 `.local/output/browser/recording-review/report.json`。新增可复用脚本为 `tooling/recording-browser.mjs`。
+
+云端 vfs 构建缓存曾使可用空间降到约 611 MiB；只清理未使用构建缓存后恢复约 16 GiB，保留实例、备份和回滚镜像。维护方法已写入 [云端开发](cloud-development.md)，不增加自动清理服务或默认构建门禁。
+
+本轮未增加第三方主题/Bridge/个人插件授权，优先完善记录主链。未推送、签发或正式发布；邮件实际收件、正式 OAuth/R2、公网 DNS/TLS 仍按既有交接处理。Windows 原生、VM 和长时负载未执行；后两项保持可选。
+
+## 历史：1.3 RC1 个人记忆候选（2026-10-08，云端 Linux）
+
+源码版本 `1.3.0-rc.1`，完成范围与容量见 [1.3 交付说明](v1.3-delivery.md)。本轮实现 v1.2 的首页身份、轻量 Universe、TXT 精细导入和主要交互，以及 v1.3 的独立札记、角色与集数、私人图片、收藏检索、年度冻结修订和受控成就。数据库由 15 个迁移升级到 18 个；没有新增生产运行语言、服务或 npm 依赖。
+
+| 检查 | 本轮实际结果 |
+| --- | --- |
+| 静态与生成合同 | `check:web`、`check:api` PASS；OpenAPI 两端生成一致、TypeScript、Go vet 与模块边界；UI 最后调整后补跑 Web 检查 |
+| 全量回归及修正 | 执行一次 `npm run verify`：15 项 Node 检查、全部真实 PostgreSQL API 集成及 race 通过，API 包约 306.6 秒；整体命令因 TXT 旧断言仍要求丢弃不同正文的第二条记录而失败。修正为保留三条有效记录后，`npm test`、TXT 与插件定向检查通过；**未把首次全量命令记为 PASS，也未重复已通过的全量数据库套件** |
+| 记忆与权限定向 race | PASS，42.4 秒：跨账号拒绝、版本冲突、角色合并/拆分、明确集数快照、私人原件、导入往返、年度冻结与分享撤回、成就授予和幂等补算 |
+| 最后受影响检查 | 媒体分页与清理、检索展示定向检查分别 PASS；插件 API 1–2 兼容和 TXT 1.1.1 检查 PASS，约 13.8 秒 |
+| 个人 JSON/ZIP | v3 往返 PASS，核对日期精度、重映射后的关系与重定向、可见性、图片原件 SHA、年度内容/修订、成就时间；损坏原件原子拒绝；导入的个人成就不激活全站规则 |
+| Linux 容器升级与恢复 | PASS，约 70 秒：从 1.1 升级并保留手账、真实 Worker 投影、图片原件、年度冻结内容、成就；快照恢复到另一实例后完整库深比较及原图字节比较；两个探针均清理 |
+| 浏览器真实操作 | Playwright + 系统 Chromium，使用真实 API 与合成账号；札记/角色创建、1,200 集目录与固定快照、有序收藏、检索、图片上传、年度选材/阅读、徽章展示、管理规则/补算预览 PASS |
+| 手机及可访问性 | 320/390/768 px 受影响页面无横向溢出；弹窗焦点归还、Universe 减少动效检查 PASS；记忆页与成就后台 axe WCAG A/AA 规则扫描 0 检出，0 pageerror；不是完整无障碍认证 |
+| 最终验收容器 | `stage3-review` 已更新，app/worker/db healthy，doctor PASS；原有六条条目的身份、版本和观看进度未变，补充私密合成记忆示例；最终 TXT 1.1.1 在真实 WASI 子进程完成逐记录选择、来源行追溯与追加，保留原评分和笔记 |
+
+最终候选镜像 `sha256:a41b4a6a4d4b16a1c470f5d52cd7d9b54bc5010cf6e5837a718411a4cdbef6df`，完整清单见 `.local/output/release-v13-review-final/release.json`；源码基线 `4eb8b88732a5dc25bfb58bbc0008886fc624afe0` 加工作区修改，因此仍是 `development: true` / `-dirty` 候选，未提交、推送、签发或发布正式版本。
+
+容器完整恢复使用同为 18 个迁移的中间候选 `sha256:a920d0eb8da030205e100be7761c5deabf641f74a7fbe617d11e195894f1bbef`；随后仅调整检索摘要、插件 API 兼容声明/TXT 包版本和前端展示，分别补做受影响检查与最终容器浏览器验证。没有把中间镜像的测试冒充最终镜像重新执行的全量恢复。
+
+证据：`.local/logs/v13-verify.log`、`v13-node-test.log`、`v13-race-scoped.log`、`v13-plugins-final.log`、`v13-json-zip-final.log`、`v13-web-final.log`；`.local/output/v13-rc1-memory-instance-smoke.json`、`v13-review-doctor.json`；浏览器 `.local/output/browser/v13/{report,extended-report}.json` 与 `.local/output/browser/v13-review/report.json`，截图在对应目录。
+
+实际发现并处理：TXT 同范围不同笔记的静默去重；冻结年度私人正文被后续公开状态带出的风险；个人成就导入污染全站规则的风险；媒体列表截断；随附包同版本不可变冲突。上述行为均已修复并补定向回归。一次恢复探针因 Docker vfs 构建缓存占满磁盘失败：只清理可回收构建缓存，保留实例卷、备份和回滚镜像，并修复中断探针的安全清理入口；重跑恢复通过，最终无遗留探针容器。生产 CSP 保持不变，axe 由浏览器调试接口执行。
+
+运行入口为云端回环 `http://127.0.0.1:18082`；记忆库 `/memory`、成就管理 `/admin#achievements`。**该地址本身不是公网访问地址**，用户侧需要端口转发或在本地启动；未配置域名/TLS、公网预览或 VPN。邮件实际收件、正式 OAuth/R2 和 GitHub 签发仍受网络/凭据条件限制，按 [本地交接](local-network-handoff.md) 执行。Windows 原生、VM、约 25 分钟负载、iOS Safari/屏幕阅读器和完整暗色主题未在本轮验证；VM/长时负载继续可选。
+
+## 历史：原路线覆盖复核与 UI 修正（2026-10-08，云端 Linux）
+
+对照三份用户上传路线，使用 Product Design 审查流程，先观察六个真实页面，再修改前端。需求结论见 [覆盖表](roadmap-coverage.md)，完整计划见 [当前路线](refactor-next-steps.md)。本次补回主要产品目标，不恢复旧强制流程；没有实现角色、年度记忆、主题运行时或 PWA。
+
+前端修改：统一受影响的辅助文字/徽标对比度；缩短手账横幅，统计改为轻量横排；私人手账的现有三个导航入口在手机显示为底栏，保留安全区与 52 px 高触控目标。未增加生产依赖、API、数据库表或新的插件权限。
+
+| 检查 | 本次实际结果 |
+| --- | --- |
+| `npm run check:web` | PASS，5.1 秒；类型、合同及模块边界 |
+| Docker 构建与现有实例更新 | PASS；新镜像 `sha256:392214092c4faca3f22a31c1fa365470b30d8bf3363da06aa4e63dcb012715e6`；`stage3-review` 更新完成，保留更新前备份和回滚数据库，六条展示记录仍可查看 |
+| 六步真实浏览器审查 | 登录、手账、详情、设置、后台插件、390 px 手机手账，均保存前后截图；使用真实 API，无业务 mock；0 pageerror |
+| 自动可访问性 | 修正前五个步骤有 `color-contrast` 发现；修正后六步 axe WCAG A/AA 扫描 0 检出。弹窗原扫描包含背景的重复节点，不按节点数宣称独立缺陷数量 |
+| 定向交互 | 23 项检查 PASS：320/390/768/1440 px 页面宽度、手机底栏位置及触控尺寸、各宽度详情初始焦点/Shift+Tab 留在弹窗/Escape 关闭并归还焦点、手机手账与历史切换、减少动效、CSS 200% 放大重排、无浏览器异常 |
+| 文档 | 核对当前路线、覆盖表与插件说明的本地链接、差异；未修改既有 52/62 功能统计 |
+
+证据：`.local/output/browser/roadmap-audit/report.html`（自包含六步前后截图）、`capture.json`、`after/capture.json`、`interactions.json`；构建产物为 `.local/output/release-ui-audit/`，日志为 `.local/logs/roadmap-*.log`。本次仍是 `1.1.0-rc.1` / `-dirty` 开发镜像，不是已签发正式版本。
+
+边界：CSS 200% 放大是本次重排检查方式，不等于已人工验收浏览器所有缩放模式；未实测 iOS Safari/屏幕阅读器、完整 WCAG 合规或所有后台状态。验收账号没有绑定真实封面，此次不把装饰回退图视为海报体验已完成。样式/文档改动未重跑全量 Go/PostgreSQL/race、VM 或长时负载；未推送或发布 GitHub 版本。原 1.1 镜像的完整后端/恢复证据保持下方原始记录的适用范围。
+
+## 历史：1.1 预生产候选（2026-10-08，云端 Linux）
+
+源码版本 `1.1.0-rc.1`，范围见 [1.1 交付](v1.1-delivery.md)。本轮实现诊断/配置、持久恢复、v3 快照与兼容性计划、age 加密转移和最小可信发行流程；没有扩大到 1.2 功能。
+
+环境：Debian 13.6 的托管 Linux 容器、amd64、Docker 28.4.0（vfs）、Compose 2.40.3、Node 24.19.0；宿主 Go 1.26.8，生产镜像构建 Go 1.26.6，PostgreSQL 17.11，age 1.2.1，GitHub CLI 2.83.2。这里只证明该 Docker 环境的执行，不声称完成空白 Ubuntu/VM/Windows 宿主安装验收。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 完整适用回归 | `npm run verify` PASS，287.4 秒；Web 类型/合同、Go vet、模块边界、15 项 Node 检查、真实 PostgreSQL 集成及 Go race |
+| 候选构建与版本 | PASS；一次构建 `animemo-next-v11:20261008`；无数据库/无网络执行 `version` 返回版本、源码和 15 个迁移；镜像归档完整性通过 |
+| 实例生命周期 | PASS，12 组检查：初始化、配置预览与冲突拒绝、实际端口切换/中断恢复、无效配置启动失败后恢复、v3 清单与计划、age 正确密钥往返/错误密钥/篡改拒绝、原图与 TOTP 跨实例恢复、损坏快照拒绝、更新副本、回滚、新写入救援、坏候选恢复；3 个探针容器/卷清理完成 |
+| Worker / 扩展 / 更新中断 | `test:stage3` PASS，5 组检查；独立 Worker 停止/恢复、真实 WASI 转换、恢复后审阅、更新切换中断救援、坏包隔离；2 个探针清理完成 |
+| 恢复与回滚中断 | `node tooling/recovery-smoke.mjs` PASS；恢复中断重新导入到空白数据库，启动阶段中断不覆盖新写入；回滚切换中断保存另一侧的新写入并实际还原验证；3 个探针清理完成 |
+| 发行与工作流 | actionlint 1.7.7、YAML、差异与命令检查 PASS；篡改归档和开发候选被拒绝，已有实例的恢复计划返回非零；**未签发真实证明或发布** |
+| 现有验收实例 | `stage3-review` 已用同一镜像更新，doctor PASS，app/worker/db 均 healthy；实际登录及 6 条原展示记录核对成功，原镜像/数据库及更新前备份保留 |
+
+镜像 ID：`sha256:3a60c10a3a99ac5ff22552078a52588f4c023b937225eb5f8569ab4505904370`。镜像归档 29,024,768 字节，SHA-256 `17146f3746d54ce251675017718ba4a40dcda896c048a0703f0338b1b338daa4`。源码基线为 `4eb8b88732a5dc25bfb58bbc0008886fc624afe0` 加未提交修改，因此候选明确为 `development: true` / `-dirty`；官方安装入口拒绝把它当正式签发产物。
+
+证据：`.local/logs/v11-*.log`、`.local/output/instance-smoke.json`、`stage3-smoke.json`、`recovery-smoke.json`、`v11-review-check.json`、`v11-review-doctor.json`、`v11-cli-negative-check.json`、`v11-artifact-check.json` 和 `release-v11-dev/`。恢复测试使用合成数据与持久阶段注入，不是断电/损坏磁盘保证。
+
+本轮处理了构建时的磁盘空间不足风险：仅清理确认闲置的构建缓存，未删除实例卷、备份或回滚镜像，检查结束可用约 8 GB。未改 Docker 驱动或全局代理。
+
+剩余限制：GitHub CLI 授权检查未通过，网络允许列表未覆盖全部 API/签名服务；未推送、远端 tag、GitHub Actions 运行、真实来源证明或公开下载验收。接手步骤见 [发行说明](release.md)。真实邮件/OAuth/R2、Windows/VM 和 25 分钟负载均未在本轮执行；后两项始终可选。本轮没有修改产品 UI，沿用前次浏览器验收，不重复截图或跑完整浏览器套件。
+
+## 历史：Linux 基线与更新路线调整（2026-10-08）
+
+当前版本目标和开发规则统一见 [新更新路线](refactor-next-steps.md)。旧上传路线不再作为执行要求；历史验证记录继续保留其日期、代码范围与限制。
+
+本轮修改路线、`AGENTS.md`、README 和相关说明：Linux/Docker 作为主基线，Windows 保留轻量接手；VM 与约 25 分钟负载明确为可选手动专项，不进入默认开发、PR 必需检查或发布前置。已核对 `package.json`、`tooling/run.mjs` 和 `.github/workflows/ci.yml`，当前不存在这两类强制流程，因此没有新增禁用开关或削弱现有数据/权限测试。
+
+本轮验证仅检查文档差异、链接/锚点、命令与现有脚本的一致性；没有修改运行代码、数据库、npm 脚本或 CI 行为，没有重复执行镜像构建、Go/PostgreSQL、浏览器、VM 或长时负载，也没有发布版本。下方先前的运行验证仍按其原始范围解读。
+
+结果：`git diff --check` 通过；11 份修改文档中的 52 处本地链接/锚点有效，引用的 18 个 npm 脚本名称均存在。检查回执保存在 `.local/output/roadmap-doc-check.json`。
+
+## 历史：后台 UI 重设计（2026-10-08，云端）
+
+后台改用独立侧栏、概览、紧凑表格、分区设置和扩展卡片。样式限制在 `admin-shell` 与后台弹窗内，复用既有 API、版本检查和 Base UI 基础组件；未增加生产依赖或修改数据库合同。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| TypeScript / API 合同 / 模块边界 | `npm run check:web`、`node tooling/check-layout.mjs` PASS |
+| 生产镜像与实例更新 | PASS；镜像 `sha256:cd55e424af012b2cf9cb267f0f761fe3b62e1667af2ae36d80fb6b0476adf3ac`；`stage3-review` app、worker、db 均 healthy，更新前备份及回滚库保留 |
+| 布局与脚本 | Chromium 151 + Playwright 1.62.1，8 个页面 × 320 / 390 / 768 / 1440 px 均无页面横向溢出；手机表格在自身区域内滚动；0 pageerror |
+| 自动可访问性检查 | axe-core 4.11.1，桌面与手机共 16 次 WCAG A / AA 规则扫描，0 检出；不等同于完整 WCAG 合规认证 |
+| 用户与内容 | 搜索空状态、账号操作显式选择、Escape 取消与焦点归还、真实内容预览、资源移除必填原因及取消 PASS；未停用真实账号或移除内容 |
+| 导航与维护 | 刷新 / 后退保留当前页、跳转正文不切换页面、维护确认可取消 PASS |
+| 设置与扩展 | 标签真实创建 / 改色 / 删除、站点原值保存、官方扩展停用 / 恢复、选包审阅并取消 PASS；测试标签清理，原扩展状态恢复 |
+| 前台回归 | 桌面实际手账截图及手机宽度检查通过，后台样式未覆盖手账布局 |
+
+本轮修复了自动检查发现的说明文字对比度、手机下拉框可访问名称、表格键盘滚动，以及跳转正文意外重置页面的问题。截图与回执：`.local/output/browser/admin-redesign/`；构建、更新与浏览器日志：`.local/logs/admin-ui-*.log`。本轮只变更前端与浏览器验收脚本，未重复运行此前已通过的全量 Go / PostgreSQL / race 套件，也未验证真实 R2 服务。
+
+复跑浏览器验收时使用合成实例和管理员账号：
+
+```sh
+npm install --prefix .local/tools/browser --no-audit --no-fund --ignore-scripts --cache .local/cache/npm playwright@1.62.1 @axe-core/playwright@4.11.1
+node tooling/admin-browser.mjs
+```
+
+脚本读取 `ANIMEMO_REVIEW_ACCESS` 或 `.local/output/stage3-review-access.json` 中的 `origin/email/password`，通过 `ANIMEMO_BROWSER` 指定系统 Chrome / Chromium 路径。实例需包含至少一条合成番剧和已激活的官方 TXT 扩展；`ANIMEMO_PLUGIN_PACKAGE` 可指定待审阅的本地扩展包，默认 `.local/output/watch-history-text.animemo-plugin`。验收会产生审计记录，短暂切换扩展状态并恢复，不应在真实生产实例上执行。
+
+## 历史：阶段 1–3 实施验收（2026-10-07，云端）
+
+基线为本地提交 `4eb8b88`，范围见 [stage-1-3-delivery.md](stage-1-3-delivery.md)。未把架构子任务算作原项目新增完整功能，62 项分母和本地已确认结果不变。
+
+| 验证 | 本轮实际结果 |
+| --- | --- |
+| `npm run verify` | PASS，286.3 秒；最终补查 `npm run check` 4.7 秒通过；TypeScript、生成合同一致性、Go vet、Node 回归、真实 PostgreSQL 集成及 Go `-race` |
+| 记忆 / 导入定向回归 | PASS；独立本地身份、失效来源映射、月份/未知时间、连载追平、跨账号拒绝、事务回滚不投递、过期 lease 拒绝提交、完整 v2 导出恢复（含移出清单的历史） |
+| Docker 构建 | PASS；Core、Web、官方 WASI 包和精确二进制绑定清单生成成功 |
+| 实例测试 | PASS；从原云端镜像升级、图片与加密 TOTP 备份恢复、坏快照拒绝、数据库副本迁移、回滚、更新后写入 rescue 再恢复、坏候选自动恢复；三个探针实例均清理 |
+| `test:stage3` | PASS；真实插件子进程、停 Worker 后任务只排队、重启继续、恢复扩展默认停用、注入 switching 持久状态后 recover、坏包隔离且 Core 可用；两个探针实例均清理 |
+| 真实 Chromium | PASS；1440px 手账、390px 手机布局、Base UI 表单/日期/弹窗、月份记录与追平、历史展示、管理官方身份；无 pageerror / 水平溢出 |
+| 插件浏览器流程 | PASS；官方包启用、真实文件上传、TXT 日期/刷次预览、刷新恢复预览、确认导入、停用和手机界面；无 pageerror |
+| 持久操作日志 | PASS；跨读取保留阶段、私有文件权限、公开回执不包含配置凭据 |
+| 云端验收站 | `stage3-review` app / worker / db 均 healthy，云端回环 `http://127.0.0.1:18082`；未配置用户侧转发或公网预览 |
+
+证据在 `.local/logs/stage3-final-verify.log`、`.local/output/instance-smoke.json`、`.local/output/stage3-smoke.json`、`.local/output/browser/stage3/report.json` 和 `.local/output/browser/plugin-report.json`。截图同目录。完整流程使用镜像 `sha256:d69e7081a248971c6003141b26bffc37d50f82fcf91c531cdc7f0168e206ad57`。最终补齐 OpenAPI 导出身份和日期精度说明后构建为 `sha256:c42e43d3e7dd91b401000bbeede517304d41b7666b1d7593c480acd2de7f2031`，通过真实实例更新；再次检查健康、六条展示数据、v2 导出和官方子进程转换成功（`stage3-final-runtime.json`）。最后这次合同说明变化未重复运行完整竞态套件。
+
+过程中实际发现并修复：月份/未知时间统计错误、完整记忆导入静默去重风险、扩展重新激活缺少摘要复验、Compose profile 漏清理 Worker、Linux 0600 媒体备份无法被镜像默认 UID 读取。修复后重跑对应流程成功，未改备份文件为公开可读，未删除原开发库。
+
+本次未重新验证 Windows 执行、真实 Resend/OAuth/R2 服务、GitHub CI 或公网可访问性。恢复状态测试是持久阶段注入和停止容器，不是断电可靠性证明。浏览器数据均为合成数据；不以截图替代服务端正确性测试。
+
+
+## 外部集成本地接手（2026-10-07，Windows）
 
 环境：Windows、Node 24.12.0、Go 1.26.6、原生 PostgreSQL 17.11、系统 Chrome。迁移 009–012 新增外部标识、邮件任务、OAuth/同步任务及图片存储。以下为本轮实际验证，后续章节保留云端历史记录。
 

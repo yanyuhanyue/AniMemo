@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,14 +13,18 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"animemo.local/server/internal/accounts"
 	"animemo.local/server/internal/api"
 	"animemo.local/server/internal/bangumi"
+	"animemo.local/server/internal/buildinfo"
 	"animemo.local/server/internal/database"
 	"animemo.local/server/internal/external"
+	"animemo.local/server/internal/id"
+	"animemo.local/server/internal/jobs"
 	"animemo.local/server/internal/journal"
 	"animemo.local/server/internal/mailer"
 	"animemo.local/server/internal/mediastore"
@@ -35,6 +40,16 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		info, err := buildinfo.Current()
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(info)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "plugin-exec" {
+		return plugins.ServeProcess(os.Stdin, os.Stdout)
+	}
 	address := os.Getenv("LISTEN_ADDR")
 	if address == "" {
 		address = "127.0.0.1:18081"
@@ -77,10 +92,10 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
-	if err = plugins.Preflight(ctx, pool); err != nil {
-		return err
-	}
 	if len(os.Args) > 1 && os.Args[1] == "plugins-check" {
+		if err = plugins.Preflight(ctx, pool); err != nil {
+			return err
+		}
 		slog.Info("enabled plugin compatibility checked", "host_api", plugins.HostAPI)
 		return nil
 	}
@@ -117,7 +132,17 @@ func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "media-export" {
 		return storage.Export(context.Background(), os.Stdout)
 	}
-	if len(os.Args) > 1 && os.Args[1] != "serve" {
+	if len(os.Args) > 1 && os.Args[1] == "worker-health" {
+		state, err := jobs.New(pool).Status(ctx)
+		if err != nil {
+			return err
+		}
+		if !state.WorkerReady {
+			return errors.New("worker heartbeat unavailable")
+		}
+		return nil
+	}
+	if len(os.Args) > 1 && os.Args[1] != "serve" && os.Args[1] != "worker" {
 		return fmt.Errorf("unknown command %q; use serve, migrate, plugins-check, media-export or media-restore", os.Args[1])
 	}
 	var secretKey []byte
@@ -144,21 +169,64 @@ func run() error {
 	if err = externalService.ConfigureOAuth(oauth, secretKey, origin); err != nil {
 		return err
 	}
-	server := &http.Server{Addr: address, Handler: api.New(pool, api.Config{PublicOrigin: strings.TrimRight(origin, "/"), WebDir: os.Getenv("WEB_DIR"), SetupToken: os.Getenv("ANIMEMO_SETUP_TOKEN"), SecretKey: secretKey, Mail: mailClient, External: externalService, Storage: storage}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	stop, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	if len(os.Args) > 1 && os.Args[1] == "worker" {
+		service := jobs.New(pool)
+		workerID := id.New()
+		var wg sync.WaitGroup
+		tasks := []func(context.Context){journal.New(pool).RunImportWorker, journal.New(pool).RunMemoryWorker, mailService.RunMailWorker, externalService.RunSyncWorker, storage.Run}
+		for _, task := range tasks {
+			wg.Add(1)
+			go func(run func(context.Context)) { defer wg.Done(); run(stop) }(task)
+		}
+		if err = service.Heartbeat(stop, workerID); err != nil {
+			return err
+		}
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop.Done():
+				wg.Wait()
+				return nil
+			case <-ticker.C:
+				if err = service.Heartbeat(stop, workerID); err != nil {
+					slog.Error("worker.heartbeat_failed", "worker_id", workerID)
+				}
+				for n := 0; n < 32; n++ {
+					worked, e := service.ProcessNext(stop)
+					if e != nil {
+						slog.Error("worker.event_failed", "worker_id", workerID)
+						break
+					}
+					if !worked {
+						break
+					}
+				}
+			}
+		}
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err = plugins.EnsureBundled(ctx, pool, os.Getenv("ANIMEMO_BUNDLED_DIR"), executable); err != nil {
+		slog.Error("bundled extensions unavailable; core remains available", "error", err)
+		if _, err = pool.Exec(ctx, `UPDATE plugin_deployments SET enabled=false,health='quarantined',health_reason='随附扩展与当前发行不匹配，请检查安装包。',revision=revision+1 WHERE slug IN (SELECT slug FROM bundled_extensions)`); err != nil {
+			return err
+		}
+	}
+	if err = plugins.QuarantineInvalid(ctx, pool); err != nil {
+		return err
+	}
+	pluginService := plugins.New(pool)
+	pluginService.SetExecutor(plugins.ProcessExecutor(executable))
+	server := &http.Server{Addr: address, Handler: api.New(pool, api.Config{PublicOrigin: strings.TrimRight(origin, "/"), WebDir: os.Getenv("WEB_DIR"), SetupToken: os.Getenv("ANIMEMO_SETUP_TOKEN"), SecretKey: secretKey, Mail: mailClient, External: externalService, Storage: storage, Plugins: pluginService}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
 	}
-	stop, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-	workerDone := make(chan struct{})
-	go func() { defer close(workerDone); journal.New(pool).RunImportWorker(stop) }()
-	mailDone := make(chan struct{})
-	go func() { defer close(mailDone); mailService.RunMailWorker(stop) }()
-	syncDone := make(chan struct{})
-	go func() { defer close(syncDone); externalService.RunSyncWorker(stop) }()
-	mediaDone := make(chan struct{})
-	go func() { defer close(mediaDone); storage.Run(stop) }()
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -174,9 +242,5 @@ func run() error {
 		return err
 	}
 	<-shutdownDone
-	<-workerDone
-	<-mailDone
-	<-syncDone
-	<-mediaDone
 	return nil
 }

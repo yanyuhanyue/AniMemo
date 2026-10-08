@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"errors"
 
@@ -46,7 +47,7 @@ func (s *Service) changeCover(ctx context.Context, owner, entryID string, versio
 	if version < 1 {
 		return Entry{}, fault.Field("version", "缺少记录版本，请刷新后重试。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Entry{}, err
 	}

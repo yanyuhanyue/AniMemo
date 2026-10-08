@@ -199,15 +199,16 @@ func (s *Service) AdminUserAction(ctx context.Context, actor, target string, inp
 }
 
 type SiteSettings struct {
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	RegistrationOpen bool   `json:"registration_open"`
-	Version          int    `json:"version"`
+	HomepageOwnerSlug string `json:"homepage_owner_slug"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	RegistrationOpen  bool   `json:"registration_open"`
+	Version           int    `json:"version"`
 }
 
 func (s *Service) Site(ctx context.Context) (SiteSettings, error) {
 	var v SiteSettings
-	err := s.pool.QueryRow(ctx, `SELECT name,description,registration_open,version FROM site_settings`).Scan(&v.Name, &v.Description, &v.RegistrationOpen, &v.Version)
+	err := s.pool.QueryRow(ctx, `SELECT name,description,registration_open,version,coalesce((SELECT public_slug::text FROM users WHERE id=homepage_owner),'') FROM site_settings`).Scan(&v.Name, &v.Description, &v.RegistrationOpen, &v.Version, &v.HomepageOwnerSlug)
 	return v, err
 }
 func (s *Service) UpdateSite(ctx context.Context, actor string, input SiteSettings) (SiteSettings, error) {
@@ -224,7 +225,19 @@ func (s *Service) UpdateSite(ctx context.Context, actor string, input SiteSettin
 	if err = governance.Authorize(ctx, tx, actor); err != nil {
 		return input, err
 	}
-	err = tx.QueryRow(ctx, `UPDATE site_settings SET name=$1,description=$2,registration_open=$3,version=version+1 WHERE version=$4 RETURNING version`, input.Name, input.Description, input.RegistrationOpen, input.Version).Scan(&input.Version)
+	if input.HomepageOwnerSlug != "" {
+		if !id.Valid(input.HomepageOwnerSlug) {
+			return input, fault.Field("homepage_owner_slug", "请输入公开手账地址末尾的标识。")
+		}
+		var eligible bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE public_slug=$1 AND sharing_enabled AND public_state='published' AND NOT disabled)`, input.HomepageOwnerSlug).Scan(&eligible); err != nil {
+			return input, err
+		}
+		if !eligible {
+			return input, fault.Field("homepage_owner_slug", "该公开手账尚未发布或分享已关闭。")
+		}
+	}
+	err = tx.QueryRow(ctx, `UPDATE site_settings SET name=$1,description=$2,registration_open=$3,homepage_owner=(SELECT id FROM users WHERE public_slug=nullif($5,'')::uuid),version=version+1 WHERE version=$4 RETURNING version`, input.Name, input.Description, input.RegistrationOpen, input.Version, input.HomepageOwnerSlug).Scan(&input.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return input, fault.New("version_conflict", "站点设置已更新，请刷新。")
 	}

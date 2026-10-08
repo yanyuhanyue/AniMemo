@@ -30,6 +30,7 @@ import (
 const cookieName = "animemo_session"
 
 type Config struct {
+	Plugins                          *plugins.Service
 	Storage                          *mediastore.Store
 	OAuth                            bangumi.OAuthConfig
 	External                         *external.Service
@@ -55,6 +56,9 @@ type API struct {
 
 func New(pool *pgxpool.Pool, config Config) http.Handler {
 	a := &API{accounts: accounts.New(pool), journal: journal.New(pool), plugins: plugins.New(pool), pool: pool, config: config, limiter: &authLimiter{buckets: map[string]bucket{}}, coverSlots: make(chan struct{}, 2), transferSlots: make(chan struct{}, 1)}
+	if config.Plugins != nil {
+		a.plugins = config.Plugins
+	}
 	if err := a.accounts.ConfigureEncryption(config.SecretKey); err != nil {
 		panic(err)
 	}
@@ -75,6 +79,9 @@ func New(pool *pgxpool.Pool, config Config) http.Handler {
 		}
 	}
 	mux := http.NewServeMux()
+	a.libraryRoutes(mux)
+	a.achievementRoutes(mux)
+	a.memorySharingRoutes(mux)
 	mux.HandleFunc("GET /api/v1/openapi.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Write(apicontract.Document)
@@ -151,6 +158,8 @@ func New(pool *pgxpool.Pool, config Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/entries/{id}/cover/{revision}", a.require(a.cover))
 	mux.HandleFunc("PUT /api/v1/entries/{id}/cover", a.require(a.setCover))
 	mux.HandleFunc("DELETE /api/v1/entries/{id}/cover", a.require(a.deleteCover))
+	mux.HandleFunc("GET /api/v1/entries/{id}/revisions", a.require(a.revisions))
+	mux.HandleFunc("GET /api/v1/admin/runtime", a.admin(a.runtimeStatus))
 	mux.HandleFunc("GET /api/v1/entries/{id}/history", a.require(a.history))
 	mux.HandleFunc("POST /api/v1/entries/{id}/history", a.require(a.record))
 	mux.HandleFunc("GET /api/v1/history", a.require(a.history))
@@ -196,6 +205,7 @@ func New(pool *pgxpool.Pool, config Config) http.Handler {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, fault.New("not_found", "接口不存在。")) })
 	if config.WebDir != "" {
 		mux.Handle("GET /assets/", http.FileServer(http.Dir(config.WebDir)))
+		mux.Handle("GET /images/", http.FileServer(http.Dir(config.WebDir)))
 		mux.HandleFunc("GET /favicon.svg", func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, filepath.Join(config.WebDir, "favicon.svg"))
 		})
@@ -210,7 +220,7 @@ func New(pool *pgxpool.Pool, config Config) http.Handler {
 			http.ServeFile(w, r, filepath.Join(config.WebDir, "index.html"))
 		})
 	}
-	return a.protect(mux)
+	return observe(a.protect(mux))
 }
 
 func currentUser(r *http.Request) accounts.User { return r.Context().Value(userKey{}).(accounts.User) }

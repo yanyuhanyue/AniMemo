@@ -2,11 +2,13 @@
   "schema": 1,
   "slug": "watch-history-text",
   "name": "TXT 观看记录导入",
-  "version": "1.0.0",
-  "description": "解析带年份文件名的月日记录，或日期、标题、话数以制表符分隔的文本。保留观看日期和刷次；先预览，确认后才导入。仅接收你选择的 UTF-8 文件，不读取已有手账。",
+  "version": "1.1.1",
+  "description": "解析月日或制表符格式的观看文本，保留日期、刷次、笔记及来源行号；由核心预览选择新建作品或匹配已有作品追加。只读取所选 UTF-8 文件。",
   "protocol": 1,
-  "host_api_min": 1,
-  "host_api_max": 1,
-  "capabilities": ["import.convert"],
+  "host_api_min": 2,
+  "host_api_max": 2,
+  "capabilities": [
+    "import.convert"
+  ],
   "module_sha256": ""
 }

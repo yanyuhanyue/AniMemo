@@ -10,17 +10,22 @@ import (
 
 	"animemo.local/server/internal/fault"
 	"animemo.local/server/internal/governance"
+	"animemo.local/server/internal/id"
 	"animemo.local/server/pkg/pluginproto"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Service struct {
-	pool  *pgxpool.Pool
-	slots chan struct{}
+	execute Executor
+	pool    *pgxpool.Pool
+	slots   chan struct{}
 }
 
-func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, slots: make(chan struct{}, 2)} }
+func New(pool *pgxpool.Pool) *Service {
+	return &Service{pool: pool, execute: Execute, slots: make(chan struct{}, 2)}
+}
+func (s *Service) SetExecutor(executor Executor) { s.execute = executor }
 func (s *Service) acquire() (func(), error) {
 	select {
 	case s.slots <- struct{}{}:
@@ -31,16 +36,21 @@ func (s *Service) acquire() (func(), error) {
 }
 
 type Release struct {
-	Manifest    pluginproto.Manifest `json:"manifest"`
-	Digest      string               `json:"digest"`
-	Active      bool                 `json:"active"`
-	Enabled     bool                 `json:"enabled"`
-	Revision    int64                `json:"revision"`
-	InstalledAt time.Time            `json:"installed_at"`
+	PublisherID    string               `json:"publisher_id"`
+	Distribution   string               `json:"distribution"`
+	InstallationID string               `json:"installation_id"`
+	Health         string               `json:"health"`
+	HealthReason   string               `json:"health_reason"`
+	Manifest       pluginproto.Manifest `json:"manifest"`
+	Digest         string               `json:"digest"`
+	Active         bool                 `json:"active"`
+	Enabled        bool                 `json:"enabled"`
+	Revision       int64                `json:"revision"`
+	InstalledAt    time.Time            `json:"installed_at"`
 }
 
 func (s *Service) List(ctx context.Context, all bool) ([]Release, error) {
-	rows, err := s.pool.Query(ctx, `SELECT r.manifest,r.digest,r.version=d.active_version,d.enabled,d.revision,r.installed_at FROM plugin_releases r JOIN plugin_deployments d USING(slug) WHERE $1 OR (d.enabled AND d.active_version=r.version) ORDER BY r.slug,r.installed_at DESC`, all)
+	rows, err := s.pool.Query(ctx, `SELECT r.manifest,r.digest,r.version=d.active_version,d.enabled,d.revision,r.installed_at,r.publisher_id,r.distribution,d.installation_id,d.health,d.health_reason FROM plugin_releases r JOIN plugin_deployments d USING(slug) WHERE $1 OR (d.enabled AND d.active_version=r.version) ORDER BY r.slug,r.installed_at DESC`, all)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +58,7 @@ func (s *Service) List(ctx context.Context, all bool) ([]Release, error) {
 	out := []Release{}
 	for rows.Next() {
 		var r Release
-		if err := rows.Scan(&r.Manifest, &r.Digest, &r.Active, &r.Enabled, &r.Revision, &r.InstalledAt); err != nil {
+		if err := rows.Scan(&r.Manifest, &r.Digest, &r.Active, &r.Enabled, &r.Revision, &r.InstalledAt, &r.PublisherID, &r.Distribution, &r.InstallationID, &r.Health, &r.HealthReason); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -114,7 +124,7 @@ type Action struct {
 }
 
 func (s *Service) Change(ctx context.Context, actor, slug string, input Action) error {
-	if !slugPattern.MatchString(slug) || (input.Action != "activate" && input.Action != "disable") || input.Revision < 1 {
+	if !slugPattern.MatchString(slug) || (input.Action != "activate" && input.Action != "disable" && input.Action != "uninstall") || input.Revision < 1 {
 		return invalid("插件操作无效。")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -135,9 +145,30 @@ func (s *Service) Change(ctx context.Context, actor, slug string, input Action) 
 	if revision != input.Revision {
 		return fault.New("version_conflict", "插件状态已变更，请刷新后重试。")
 	}
+	if input.Action == "uninstall" {
+		var bundled bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bundled_extensions WHERE slug=$1)`, slug).Scan(&bundled); err != nil {
+			return err
+		}
+		if bundled {
+			return invalid("随附扩展属于当前发行基线，请使用停用。")
+		}
+		if _, err = tx.Exec(ctx, `DELETE FROM plugin_deployments WHERE slug=$1`, slug); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `DELETE FROM plugin_releases WHERE slug=$1`, slug); err != nil {
+			return err
+		}
+		if err = governance.Audit(ctx, tx, actor, "plugin.uninstall", "plugin", slug, input); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	if input.Action == "activate" {
 		var m pluginproto.Manifest
-		if err := tx.QueryRow(ctx, `SELECT manifest FROM plugin_releases WHERE slug=$1 AND version=$2`, slug, input.Version).Scan(&m); err != nil {
+		var module []byte
+		var digest string
+		if err := tx.QueryRow(ctx, `SELECT manifest,module,digest FROM plugin_releases WHERE slug=$1 AND version=$2`, slug, input.Version).Scan(&m, &module, &digest); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fault.New("not_found", "插件版本不存在。")
 			}
@@ -146,7 +177,14 @@ func (s *Service) Change(ctx context.Context, actor, slug string, input Action) 
 		if err := Compatible(m); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE plugin_deployments SET active_version=$2,enabled=true,revision=revision+1,updated_at=now() WHERE slug=$1`, slug, input.Version)
+		canonical, _ := json.Marshal(m)
+		if fmt.Sprintf("%x", sha256.Sum256(canonical)) != digest || fmt.Sprintf("%x", sha256.Sum256(module)) != m.ModuleSHA256 {
+			return invalid("扩展完整性检查失败，请重新安装已审阅的包。")
+		}
+		if err := ValidateModule(ctx, module); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE plugin_deployments SET health='ready',health_reason='',active_version=$2,enabled=true,revision=revision+1,updated_at=now() WHERE slug=$1`, slug, input.Version)
 	} else {
 		_, err = tx.Exec(ctx, `UPDATE plugin_deployments SET enabled=false,revision=revision+1,updated_at=now() WHERE slug=$1`, slug)
 	}
@@ -159,8 +197,10 @@ func (s *Service) Change(ctx context.Context, actor, slug string, input Action) 
 	return tx.Commit(ctx)
 }
 
-func (s *Service) Convert(ctx context.Context, slug string, input pluginproto.Request) (pluginproto.Response, error) {
-	var out pluginproto.Response
+func (s *Service) Convert(ctx context.Context, actor, slug string, input pluginproto.Request) (out pluginproto.Response, err error) {
+	if !id.Valid(actor) {
+		return out, fault.New("unauthorized", "缺少调用者身份。")
+	}
 	if !slugPattern.MatchString(slug) {
 		return out, fault.New("not_found", "插件不存在。")
 	}
@@ -172,7 +212,8 @@ func (s *Service) Convert(ctx context.Context, slug string, input pluginproto.Re
 	var module []byte
 	var m pluginproto.Manifest
 	var revision int64
-	err = s.pool.QueryRow(ctx, `SELECT r.module,r.manifest,d.revision FROM plugin_deployments d JOIN plugin_releases r ON r.slug=d.slug AND r.version=d.active_version WHERE d.slug=$1 AND d.enabled`, slug).Scan(&module, &m, &revision)
+	var installation, digest string
+	err = s.pool.QueryRow(ctx, `SELECT r.module,r.manifest,d.revision,d.installation_id,r.digest FROM plugin_deployments d JOIN plugin_releases r ON r.slug=d.slug AND r.version=d.active_version WHERE d.slug=$1 AND d.enabled`, slug).Scan(&module, &m, &revision, &installation, &digest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return out, fault.New("not_found", "插件未启用。")
 	}
@@ -182,7 +223,20 @@ func (s *Service) Convert(ctx context.Context, slug string, input pluginproto.Re
 	if err := Compatible(m); err != nil {
 		return out, err
 	}
-	out, err = Execute(ctx, module, input)
+	callID := id.New()
+	if _, err = s.pool.Exec(ctx, `INSERT INTO plugin_invocations(id,actor_id,installation_id,package_digest,capability) VALUES($1,$2,$3,$4,'import.convert')`, callID, actor, installation, digest); err != nil {
+		return out, err
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		outcome := "done"
+		if err != nil {
+			outcome = "failed"
+		}
+		_, _ = s.pool.Exec(cleanup, `UPDATE plugin_invocations SET outcome=$2,finished_at=now() WHERE id=$1`, callID, outcome)
+	}()
+	out, err = s.execute(ctx, module, input)
 	if err != nil {
 		return out, err
 	}

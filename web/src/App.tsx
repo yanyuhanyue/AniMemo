@@ -1,3 +1,5 @@
+import { MemoryWorkspace, Universe, SharedMemoryPage, SiteHomepage } from './memory/Memory';
+import { Button } from './components/ui/Button';
 import { MyColumns, FeaturedColumns, ReadColumn } from './columns/Columns';
 import { Explore, PublicJournal, SharedEntry, PageShell } from './public/Public';
 import { Admin, Setup } from './admin/Admin';
@@ -12,6 +14,9 @@ import { Journal } from './journal/Journal';
 export function App() {
   const path = window.location.pathname;
   if (path === '/verify-email' || path === '/reset-password') return <EmailConfirmation purpose={path === '/verify-email' ? 'verify' : 'reset'} />;
+  if (path === '/home') return <SiteHomepage />;
+  const memoryShare = path.match(/^\/memory-share\/([a-f0-9]{64})$/);
+  if (memoryShare?.[1]) return <SharedMemoryPage token={memoryShare[1]} />;
   if (path === '/explore') return <Explore />;
   if (path === '/catalog') return <PublicJournal />;
   if (path === '/featured') return <FeaturedColumns />;
@@ -20,7 +25,7 @@ export function App() {
   if (path === '/setup') return <Setup />;
   const publicRoute = path.match(/^\/(u|s)\/([a-f0-9-]{36})$/i);
   if (publicRoute?.[2]) return publicRoute[1] === 'u' ? <PublicJournal slug={publicRoute[2]} /> : <SharedEntry slug={publicRoute[2]} />;
-  if (path !== '/' && path !== '/admin' && path !== '/my-columns' && path !== '/connections') return <PageShell title="这一页不存在"><a href="/">返回我的手账</a></PageShell>;
+  if (path !== '/' && path !== '/admin' && path !== '/my-columns' && path !== '/connections' && path !== '/memory' && path !== '/universe') return <PageShell title="这一页不存在"><a href="/">返回我的手账</a></PageShell>;
   return <PrivateApp admin={path === '/admin'} columns={path === '/my-columns'} connections={path === '/connections'} />;
 }
 function PrivateApp({ admin, columns, connections }: { admin: boolean; columns: boolean; connections: boolean }) {
@@ -35,10 +40,12 @@ function PrivateApp({ admin, columns, connections }: { admin: boolean; columns: 
   });
   const logout = useMutation({ mutationFn: () => result(client.POST('/api/v1/auth/logout')), onSuccess: () => changeAccount(cache, null) });
   if (session.isPending) return <main className="opening-screen" role="status"><span className="wordmark">AniMemo.</span><span className="spinner" />正在打开你的记忆库…</main>;
-  if (session.isError) return <main className="opening-screen"><span className="wordmark">AniMemo.</span><h1>暂时无法连接</h1><p role="alert">{errorMessage(session.error)}</p><button className="button primary" onClick={() => session.refetch()}>重新连接</button></main>;
+  if (session.isError) return <main className="opening-screen"><span className="wordmark">AniMemo.</span><h1>暂时无法连接</h1><p role="alert">{errorMessage(session.error)}</p><Button className="button primary" onClick={() => session.refetch()}>重新连接</Button></main>;
   if (!session.data) return <Auth onAuthenticated={user => changeAccount(cache, user)} />;
+  if (location.pathname === '/memory') return <MemoryWorkspace key={session.data.id} user={session.data} />;
+  if (location.pathname === '/universe') return <Universe key={session.data.id} user={session.data} />;
   if (columns) return <MyColumns userID={session.data.id} />;
   if (connections) return <Connections userID={session.data.id} />;
-  if (admin) return session.data.is_admin ? <Admin /> : <PageShell title="需要管理员权限"><a href="/">返回我的手账</a></PageShell>;
+  if (admin) return session.data.is_admin ? <Admin displayName={session.data.display_name} /> : <PageShell title="需要管理员权限"><a href="/">返回我的手账</a></PageShell>;
   return <>{logout.isError && <div className="global-error" role="alert">退出失败：{errorMessage(logout.error)}</div>}<Journal key={session.data.id} user={session.data} onLogout={() => logout.mutate()} loggingOut={logout.isPending} /></>;
 }

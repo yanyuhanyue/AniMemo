@@ -57,12 +57,13 @@ func (a *API) newImport(w http.ResponseWriter, r *http.Request) {
 }
 func (a *API) importAction(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Action string `json:"action"`
+		Action    string                    `json:"action"`
+		Selection []journal.ImportSelection `json:"selection"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	job, err := a.journal.ImportAction(r.Context(), currentUser(r).ID, r.PathValue("id"), input.Action)
+	job, err := a.journal.ImportActionSelected(r.Context(), currentUser(r).ID, r.PathValue("id"), input.Action, input.Selection)
 	if err != nil {
 		fail(w, err)
 		return

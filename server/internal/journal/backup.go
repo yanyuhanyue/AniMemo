@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -20,7 +21,7 @@ func (s *Service) Backup(ctx context.Context, owner string) ([]byte, error) {
 		return nil, err
 	}
 	defer release()
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +35,7 @@ func (s *Service) Backup(ctx context.Context, owner string) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > MaxJournalBytes {
-		return nil, fault.New("export_too_large", "手账文字数据超过 64 MiB，请使用实例备份。")
+		return nil, fault.New("export_too_large", "手账文字数据超过 144 MiB，请使用实例备份。")
 	}
 	var buffer bytes.Buffer
 	archive := zip.NewWriter(&buffer)
@@ -99,7 +100,7 @@ func (s *Service) Backup(ctx context.Context, owner string) ([]byte, error) {
 		return nil, err
 	}
 	if buffer.Len() > MaxImportBytes {
-		return nil, fault.New("export_too_large", "备份超过 160 MiB，请使用实例备份。")
+		return nil, fault.New("export_too_large", "备份超过 256 MiB，请使用实例备份。")
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err

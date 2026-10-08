@@ -21,35 +21,65 @@ import (
 	"animemo.local/server/internal/media"
 )
 
-const MaxImportBytes = 160 * 1024 * 1024
-const MaxJournalBytes = 64 * 1024 * 1024
+const MaxImportBytes = 256 * 1024 * 1024
+const MaxJournalBytes = 144 * 1024 * 1024
 const MaxCSVBytes = 2 * 1024 * 1024
 
 type ImportItem struct {
-	Entry     Entry         `json:"entry"`
-	History   []RecordInput `json:"history"`
-	CoverPath string        `json:"cover_path,omitempty"`
+	Duplicate     bool           `json:"duplicate"`
+	TargetID      string         `json:"target_id,omitempty"`
+	TargetVersion int            `json:"target_version,omitempty"`
+	Sources       []ImportSource `json:"sources,omitempty"`
+	HistoryIDs    []string       `json:"history_ids,omitempty"`
+	Entry         Entry          `json:"entry"`
+	History       []RecordInput  `json:"history"`
+	CoverPath     string         `json:"cover_path,omitempty"`
 }
 type ImportDocument struct {
-	Items []ImportItem `json:"items"`
+	Library        *LibraryBundle   `json:"library,omitempty"`
+	CompleteMemory bool             `json:"complete_memory"`
+	Resources      []AnimeResource  `json:"resources,omitempty"`
+	Revisions      []MemoryRevision `json:"revisions,omitempty"`
+	Items          []ImportItem     `json:"items"`
+}
+type ImportSource struct {
+	Line     int    `json:"line"`
+	Filename string `json:"filename"`
+}
+type ImportCandidate struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Version int    `json:"version"`
+}
+type ImportChoice struct {
+	Index           int                   `json:"index"`
+	Title           string                `json:"title"`
+	DefaultSelected bool                  `json:"default_selected"`
+	Candidates      []ImportCandidate     `json:"candidates"`
+	History         []ImportRecordPreview `json:"history"`
 }
 type ImportPreview struct {
-	Total      int                   `json:"total"`
-	Ready      int                   `json:"ready"`
-	Duplicates int                   `json:"duplicates"`
-	Records    int                   `json:"records"`
-	Covers     int                   `json:"covers"`
-	Warnings   []string              `json:"warnings"`
-	Titles     []string              `json:"titles"`
-	History    []ImportRecordPreview `json:"history"`
+	CompleteMemory bool                  `json:"complete_memory"`
+	Choices        []ImportChoice        `json:"choices"`
+	Total          int                   `json:"total"`
+	Ready          int                   `json:"ready"`
+	Duplicates     int                   `json:"duplicates"`
+	Records        int                   `json:"records"`
+	Covers         int                   `json:"covers"`
+	Warnings       []string              `json:"warnings"`
+	Titles         []string              `json:"titles"`
+	History        []ImportRecordPreview `json:"history"`
 }
 type ImportRecordPreview struct {
-	Title       string `json:"title"`
-	WatchedOn   string `json:"watched_on"`
-	EpisodeFrom int    `json:"episode_from"`
-	EpisodeTo   int    `json:"episode_to"`
-	Rewatch     int    `json:"rewatch"`
-	Note        string `json:"note"`
+	SourceLine     int    `json:"source_line"`
+	SourceFilename string `json:"source_filename"`
+	TimePrecision  string `json:"time_precision"`
+	Title          string `json:"title"`
+	WatchedOn      string `json:"watched_on"`
+	EpisodeFrom    int    `json:"episode_from"`
+	EpisodeTo      int    `json:"episode_to"`
+	Rewatch        int    `json:"rewatch"`
+	Note           string `json:"note"`
 }
 type BundleManifest struct {
 	Schema string            `json:"schema"`
@@ -99,7 +129,7 @@ func readBundle(ctx context.Context, data []byte) (map[string][]byte, error) {
 		}
 		total += int64(file.UncompressedSize64)
 		if total > MaxImportBytes {
-			return nil, fault.New("validation_error", "备份解压后超过 160 MiB。")
+			return nil, fault.New("validation_error", "备份解压后超过 256 MiB。")
 		}
 		stream, err := file.Open()
 		if err != nil {
@@ -134,7 +164,7 @@ func readBundle(ctx context.Context, data []byte) (map[string][]byte, error) {
 
 func parseImport(ctx context.Context, format string, data []byte) (ImportDocument, map[string][]byte, error) {
 	if len(data) > MaxImportBytes {
-		return ImportDocument{}, nil, fault.New("import_too_large", "文件超过 160 MiB。")
+		return ImportDocument{}, nil, fault.New("import_too_large", "文件超过 256 MiB。")
 	}
 	files := map[string][]byte{}
 	if format == "zip" {
@@ -157,19 +187,35 @@ func parseImport(ctx context.Context, format string, data []byte) (ImportDocumen
 		}
 	} else {
 		if len(data) > MaxJournalBytes {
-			return ImportDocument{}, nil, fault.New("import_too_large", "JSON 最多 64 MiB。")
+			return ImportDocument{}, nil, fault.New("import_too_large", "JSON 最多 144 MiB。")
 		}
 		if err := decodeTransfer(data, &exported); err != nil {
 			return ImportDocument{}, nil, err
 		}
-		if exported.Schema != "animemo.journal/v1" {
-			return ImportDocument{}, nil, fault.New("validation_error", "仅支持本项目 animemo.journal/v1 数据格式。")
+		if exported.Schema != "animemo.journal/v1" && exported.Schema != "animemo.journal/v2" && exported.Schema != "animemo.journal/v3" {
+			return ImportDocument{}, nil, fault.New("validation_error", "仅支持本项目 animemo.journal/v1、v2 或 v3 数据格式。")
 		}
+	}
+	if exported.Schema != "animemo.journal/v2" && exported.Schema != "animemo.journal/v3" && (len(exported.Resources) > 0 || len(exported.Revisions) > 0) {
+		return ImportDocument{}, nil, fault.New("validation_error", "历史格式不能附带未声明的记忆数据。")
 	}
 	if len(exported.Entries) > 5000 || len(exported.History) > 20000 {
 		return ImportDocument{}, nil, fault.New("validation_error", "最多导入 5000 部番剧和 20000 条观看记录。")
 	}
-	out := ImportDocument{Items: make([]ImportItem, 0, len(exported.Entries))}
+	if exported.Library != nil && exported.Schema != "animemo.journal/v3" {
+		return ImportDocument{}, nil, fault.New("validation_error", "记忆库必须声明 v3 格式，不能静默忽略。")
+	}
+	if exported.Schema == "animemo.journal/v3" {
+		if err := validateLibrary(exported.Library, exported.Resources); err != nil {
+			return ImportDocument{}, nil, err
+		}
+	}
+	if exported.Schema == "animemo.journal/v2" || exported.Schema == "animemo.journal/v3" {
+		if err := validateMemory(exported); err != nil {
+			return ImportDocument{}, nil, err
+		}
+	}
+	out := ImportDocument{Library: exported.Library, CompleteMemory: exported.Schema == "animemo.journal/v2" || exported.Schema == "animemo.journal/v3", Resources: exported.Resources, Revisions: exported.Revisions, Items: make([]ImportItem, 0, len(exported.Entries))}
 	index := map[string]int{}
 	for i, e := range exported.Entries {
 		if err := ctx.Err(); err != nil {
@@ -185,7 +231,7 @@ func parseImport(ctx context.Context, format string, data []byte) (ImportDocumen
 			e.Format = "tv"
 		}
 		if e.Status == "" {
-			e.Status = "planned"
+			e.Status = "recorded"
 		}
 		if e.Accent == "" {
 			e.Accent = "violet"
@@ -223,7 +269,7 @@ func parseImport(ctx context.Context, format string, data []byte) (ImportDocumen
 			return out, nil, fault.New("validation_error", "观看记录关联无效或重复。")
 		}
 		seenRecords[r.ID] = true
-		input := RecordInput{WatchedOn: r.WatchedOn, EpisodeFrom: r.EpisodeFrom, EpisodeTo: r.EpisodeTo, Note: r.Note, Rewatch: r.Rewatch, RequestID: id.New()}
+		input := RecordInput{TimePrecision: r.TimePrecision, WatchedOn: r.WatchedOn, EpisodeFrom: r.EpisodeFrom, EpisodeTo: r.EpisodeTo, Note: r.Note, Rewatch: r.Rewatch, RequestID: id.New()}
 		if err := input.Validate(); err != nil {
 			return out, nil, err
 		}
@@ -234,7 +280,12 @@ func parseImport(ctx context.Context, format string, data []byte) (ImportDocumen
 		if r.EpisodeTo > e.WatchedEpisodes {
 			return out, nil, fault.New("validation_error", "导入进度少于观看记录中的最远话数。")
 		}
+		if r.SourceLine < 0 || r.SourceLine > 1000000 || !libraryText(r.SourceFilename, 255) {
+			return out, nil, fault.Field("source_line", "来源行号或文件名无效。")
+		}
+		out.Items[i].Sources = append(out.Items[i].Sources, ImportSource{Line: r.SourceLine, Filename: r.SourceFilename})
 		out.Items[i].History = append(out.Items[i].History, input)
+		out.Items[i].HistoryIDs = append(out.Items[i].HistoryIDs, r.ID)
 	}
 	for name := range files {
 		if strings.HasPrefix(name, "covers/") {

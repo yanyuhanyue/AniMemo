@@ -22,13 +22,15 @@ type entry struct {
 	Watched int    `json:"watched_episodes"`
 }
 type record struct {
-	ID      string `json:"id"`
-	EntryID string `json:"entry_id"`
-	Date    string `json:"watched_on"`
-	From    int    `json:"episode_from"`
-	To      int    `json:"episode_to"`
-	Rewatch int    `json:"rewatch"`
-	Note    string `json:"note"`
+	SourceLine     int    `json:"source_line"`
+	SourceFilename string `json:"source_filename"`
+	ID             string `json:"id"`
+	EntryID        string `json:"entry_id"`
+	Date           string `json:"watched_on"`
+	From           int    `json:"episode_from"`
+	To             int    `json:"episode_to"`
+	Rewatch        int    `json:"rewatch"`
+	Note           string `json:"note"`
 }
 
 var yearRE = regexp.MustCompile(`(?:19|20)[0-9]{2}`)
@@ -134,9 +136,9 @@ func convert(in pluginproto.Request) (string, error) {
 		if to > entries[at].Watched {
 			entries[at].Watched = to
 		}
-		rid := stableID(fmt.Sprintf("%s:%s:%d:%d:%d", key, date, from, to, rewatch))
+		rid := stableID(fmt.Sprintf("%s:%s:%d:%d:%d", key, date, from, to, rewatch) + ":" + note)
 		if !seen[rid] {
-			records = append(records, record{ID: rid, EntryID: entries[at].ID, Date: date, From: from, To: to, Rewatch: rewatch, Note: note})
+			records = append(records, record{SourceLine: line, SourceFilename: in.Filename, ID: rid, EntryID: entries[at].ID, Date: date, From: from, To: to, Rewatch: rewatch, Note: note})
 			seen[rid] = true
 		}
 		if len(entries) > 500 || len(records) > 2000 {
