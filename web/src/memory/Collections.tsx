@@ -5,16 +5,20 @@ import type { components } from "../api/schema";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
+import { Icon } from "../components/ui/Icon";
+import { CollectionReader } from "./CollectionReader";
 import { Problem } from "../public/Public";
 import {
   ShareMemory,
   Visibility,
   useMemoryRefresh,
+  visibilityLabels,
   type Collection,
 } from "./shared";
 type Item = components["schemas"]["CollectionItem"];
 export function Collections({ userID }: { userID: string }) {
   const [editor, setEditor] = useState<Collection | null | undefined>();
+  const [reading, setReading] = useState("");
   const [share, setShare] = useState("");
   const [remove, setRemove] = useState<Collection | null>(null);
   const refresh = useMemoryRefresh(userID);
@@ -35,6 +39,7 @@ export function Collections({ userID }: { userID: string }) {
       await refresh();
     },
   });
+  const readingCollection = q.data?.items.find(c => c.id === reading);
   return (
     <>
       <header className="memory-section-heading">
@@ -53,25 +58,16 @@ export function Collections({ userID }: { userID: string }) {
         <Problem error={q.error} />
       ) : (
         <div className="memory-collection-grid">
-          {q.data.items.map((c) => (
-            <article className="memory-collection" key={c.id}>
-              <p className="memory-meta">{c.items.length} 段收藏</p>
-              <h3>{c.title}</h3>
-              <p className="memory-excerpt">{c.description}</p>
-              <div className="memory-actions">
-                <Button className="text-button" onClick={() => setEditor(c)}>
-                  翻开与编辑
-                </Button>
-                <Button className="text-button" onClick={() => setShare(c.id)}>
-                  分享
-                </Button>
-                <Button
-                  className="text-button danger-text"
-                  onClick={() => setRemove(c)}
-                >
-                  移除
-                </Button>
-              </div>
+          {q.data.items.map((c, index) => (
+            <article className="memory-collection" key={c.id} data-paper={index % 3}>
+              <Button className="collection-cover" aria-label={`翻开 ${c.title}`} onClick={() => setReading(c.id)}>
+                <span className="collection-edition"><Icon name="book" />私人选集<span>{String(index + 1).padStart(2, '0')}</span></span>
+                <span className="collection-cover-mark" aria-hidden="true"><Icon name="sparkle" /></span>
+                <h3>{c.title}</h3>
+                <span className="memory-excerpt">{c.description || '把喜欢的故事，放在一起。'}</span>
+                <span className="collection-cover-foot">{c.items.length} 段收藏<Icon name="arrow" /></span>
+              </Button>
+              <div className="collection-shelf-caption"><span>{visibilityLabels[c.visibility]}</span><Button className="text-button" aria-label={`编辑 ${c.title}`} onClick={() => setEditor(c)}><Icon name="edit" />编辑小册</Button></div>
             </article>
           ))}
           {!q.data.items.length && (
@@ -79,6 +75,15 @@ export function Collections({ userID }: { userID: string }) {
           )}
         </div>
       )}
+      {readingCollection && <CollectionReader
+        key={readingCollection.id}
+        userID={userID}
+        collection={readingCollection}
+        onClose={() => setReading('')}
+        onEdit={() => { setReading(''); setEditor(readingCollection); }}
+        onShare={() => { setReading(''); setShare(readingCollection.id); }}
+        onRemove={() => { setReading(''); setRemove(readingCollection); }}
+      />}
       {editor !== undefined && (
         <CollectionEditor
           userID={userID}
@@ -205,7 +210,7 @@ function CollectionEditor({
     });
   }
   return (
-    <Dialog title={c ? "翻开收藏小册" : "新建收藏小册"} onClose={onClose} wide>
+    <Dialog title={c ? "编辑收藏小册" : "新建收藏小册"} onClose={onClose} wide>
       <form
         className="memory-form"
         onSubmit={(e) => {
@@ -275,6 +280,7 @@ function CollectionEditor({
           </div>
           {q.error && <Problem error={q.error} />}
           <h3>小册顺序 · {items.length} 项</h3>
+          {refs.data?.items.some(item => !item.available) && <p className="field-hint">有内容已不在记忆库中。保存前，请从下方移出对应的失效项目。</p>}
           <ol className="memory-selected-items">
             {items.map((item, index) => (
               <li key={item.kind + item.id}>

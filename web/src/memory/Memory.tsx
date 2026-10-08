@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Menu } from "@base-ui/react/menu";
 import { client, result, type User } from "../api/client";
 import { Button } from "../components/ui/Button";
 import { Icon } from "../components/ui/Icon";
@@ -14,7 +15,7 @@ import { Achievements } from "./Achievements";
 import { MemorySearch } from "./Search";
 import { AnimeSelect, useAnimeReference } from "./shared";
 import { Rating } from "../components/Rating";
-import { SiteCard, useSite } from "../components/SiteIdentity";
+import { SiteBrand, SiteCard, useSite } from "../components/SiteIdentity";
 import "./memory.css";
 const tabs = {
   search: "找回记忆",
@@ -47,20 +48,17 @@ export function MemoryWorkspace({ user }: { user: User }) {
   const reference = useAnimeReference(user.id, anime);
   const animeTitle = reference.data?.available ? reference.data.title : undefined;
   const scoped = !!anime && ["notes", "moment", "episodes", "search"].includes(tab);
-  const [showTools, setShowTools] = useState(() =>
-    extraTabs.includes(currentTab()) && !(anime && currentTab() === "episodes"),
-  );
+  const activeTool = extraTabs.includes(tab) && !(anime && tab === "episodes");
   const character =
     new URLSearchParams(location.search).get("character_id") ?? "";
   useEffect(() => {
     const changed = () => {
       const next = currentTab();
       setTab(next);
-      if (extraTabs.includes(next) && !(anime && next === "episodes")) setShowTools(true);
     };
     addEventListener("hashchange", changed);
     return () => removeEventListener("hashchange", changed);
-  }, [anime]);
+  }, []);
   function changeAnime(id: string) {
     const url = new URL(location.href);
     if (id) url.searchParams.set("anime_id", id); else url.searchParams.delete("anime_id");
@@ -79,12 +77,7 @@ export function MemoryWorkspace({ user }: { user: User }) {
       </a>
       <header className="site-header">
         <div className="header-inner">
-          <a className="brand" href="/">
-            <span className="brand-mark">
-              <Icon name="play" />
-            </span>
-            AniMemo<span className="brand-dot">.</span>
-          </a>
+          <SiteBrand />
           <nav className="main-nav" aria-label="主要导航">
             <a href="/">
               <Icon name="book" />
@@ -109,47 +102,43 @@ export function MemoryWorkspace({ user }: { user: User }) {
         </div>
       </header>
       <main className="memory-main" id="memory-main">
-        <section className="memory-intro">
+        <section className="memory-intro memory-masthead">
           <div className="memory-breadcrumb"><a href="/">我的番剧</a><Icon name="chevron" /><span>{scoped ? "作品记忆" : "记忆库"}</span></div>
           <div className="memory-context-heading"><div><h1>{scoped ? animeTitle || (reference.isPending ? "正在读取作品…" : "作品记忆") : "我的记忆库"}</h1><p>{scoped ? "与这部作品有关的文字、片段和观看记忆。" : "把看过的故事，写进自己的记忆。"}</p></div>{scoped && <div className="memory-context-actions"><Button className="button secondary" aria-expanded={choosingAnime} onClick={() => setChoosingAnime(!choosingAnime)}>更换作品</Button><a href={`/memory#${tab}`}>查看全部记忆<Icon name="arrow" /></a></div>}</div>
           {scoped && choosingAnime && <div className="memory-context-picker"><AnimeSelect userID={user.id} value={anime} onChange={changeAnime} required /></div>}
           {reference.error && <Problem error={reference.error} />}
         </section>
-        <div className="memory-workspace">
-        <aside className="memory-sidebar" aria-label="记忆导航">
-        <nav className="memory-tabs" aria-label="记忆分类">
+        <div className="memory-navigation">
+        <nav className="memory-sections" aria-label="记忆分类">
           {(anime ? ["notes", "moment", "episodes", "collections", "yearly", "search"] as Tab[] : primaryTabs).map((key) => (
             <Button
               key={key}
               aria-current={tab === key ? "page" : undefined}
               onClick={() => navigate(key as Tab)}
             >
-              <Icon name={key === "notes" ? "book" : key === "moment" ? "sparkle" : key === "episodes" ? "play" : key === "collections" ? "tag" : key === "yearly" ? "clock" : "search"} />
-              {tabs[key]}
+              <span>{tabs[key]}</span>
             </Button>
           ))}
         </nav>
-        <details
-          className="memory-organize"
-          open={showTools}
-          onToggle={(e) => setShowTools(e.currentTarget.open)}
-        >
-          <summary>
-            更多整理工具
-          </summary>
-          <nav className="memory-tabs" aria-label="更多整理工具">
+        <Menu.Root>
+          <Menu.Trigger className="memory-more" aria-label="更多整理工具" data-active={activeTool || undefined}>
+            {activeTool ? tabs[tab] : "更多"}<Icon name="chevron" />
+          </Menu.Trigger>
+          <Menu.Portal><Menu.Positioner sideOffset={8} align="end" className="memory-more-positioner">
+          <Menu.Popup className="memory-more-menu" aria-label="更多整理工具">
             {extraTabs.filter(key => !anime || key !== "episodes").map((key) => (
-              <Button
+              <Menu.Item
                 key={key}
                 aria-current={tab === key ? "page" : undefined}
                 onClick={() => navigate(key)}
               >
                 {tabs[key]}
-              </Button>
+              </Menu.Item>
             ))}
-          </nav>
-        </details>
-        </aside>
+          </Menu.Popup>
+          </Menu.Positioner></Menu.Portal>
+        </Menu.Root>
+        </div>
         <div className="memory-content">
         {tab === "search" && (
           <MemorySearch userID={user.id} anime={anime} character={character} />
@@ -175,7 +164,6 @@ export function MemoryWorkspace({ user }: { user: User }) {
         {tab === "yearly" && <Yearlies userID={user.id} />}
         {tab === "achievements" && <Achievements userID={user.id} />}{" "}
         {tab === "media" && <MemoryMediaManager userID={user.id} />}
-        </div>
         </div>
         <footer className="site-footer">
           <span>AniMemo.</span>

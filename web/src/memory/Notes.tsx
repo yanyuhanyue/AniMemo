@@ -5,6 +5,7 @@ import type { components } from "../api/schema";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
+import { NoteBody } from "./NoteBody";
 import { Icon } from "../components/ui/Icon";
 import { Pager, Problem } from "../public/Public";
 import { TagField } from "../journal/ManageTools";
@@ -212,6 +213,7 @@ export function NoteEditor({
       }
       onClose={onClose}
       wide
+      className="note-composer"
     >
       <form
         className="memory-form note-editor"
@@ -221,8 +223,9 @@ export function NoteEditor({
         }}
       >
         <fieldset disabled={save.isPending || upload.isPending}>
-          <label>
-            记忆标题
+          <div className="composer-caption"><Icon name="edit" /><span>{note ? "重读，也为回忆添上一笔" : "写给未来的自己"}</span><span>{visibilityLabels[form.visibility ?? 'private']}</span></div>
+          <label className="composer-title">
+            <span className="sr-only">记忆标题</span>
             <Input
               data-initial-focus={animeTitle ? undefined : true}
               value={form.title}
@@ -232,8 +235,8 @@ export function NoteEditor({
               placeholder="那时的自己，想留下什么？"
             />
           </label>
-          <label>
-            记忆正文
+          <label className="composer-body">
+            <span className="sr-only">记忆正文</span>
             <textarea
               data-initial-focus={animeTitle ? true : undefined}
               value={form.body}
@@ -714,7 +717,7 @@ export function Notes({
             }
           >
             {q.data.items.map((n) => (
-              <article className="memory-note-card" key={n.id}>
+              <article className="memory-note-card" key={n.id} data-highlight={n.highlight || undefined}>
                 {kind === "moment" && n.media_ids[0] && !n.spoiler && (
                   <MemoryImage id={n.media_ids[0]} small />
                 )}
@@ -775,7 +778,7 @@ export function Notes({
         />
       )}
       {opened && (
-        <Dialog title={opened.title} onClose={() => setOpened(null)} wide>
+        <Dialog title={opened.title} onClose={() => setOpened(null)} wide className="note-reader">
           <div className="memory-reading note-reading">
             <p className="memory-meta">
               {opened.occurred_on || "不记日期"} ·{" "}
@@ -844,25 +847,5 @@ export function Notes({
         <ShareMemory kind="note" id={sharing} onClose={() => setSharing("")} />
       )}
     </section>
-  );
-}
-function NoteBody({ note }: { note: Note }) {
-  return (
-    <>
-      <p className="memory-prose">{note.body}</p>
-      {note.anchor.quote && <blockquote>{note.anchor.quote}</blockquote>}
-      {note.anchor.scene && <p className="muted">{note.anchor.scene}</p>}
-      {note.anchor.timestamp_seconds !== null && (
-        <p>
-          定位：{Math.floor(note.anchor.timestamp_seconds / 60)}:
-          {String(note.anchor.timestamp_seconds % 60).padStart(2, "0")}
-        </p>
-      )}
-      <div className="memory-reading-photos">
-        {note.media_ids.map((id) => (
-          <MemoryImage key={id} id={id} />
-        ))}
-      </div>
-    </>
   );
 }

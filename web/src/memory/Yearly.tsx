@@ -57,6 +57,7 @@ export function Yearlies({ userID }: { userID: string }) {
         <div className="memory-year-grid">
           {q.data.items.map((y) => (
             <article className="memory-year-card" key={y.id}>
+              <span className="yearbook-label">ANIMEMO · 年度记忆册</span>
               <span className="memory-year-number">{y.year}</span>
               <h3>{y.title}</h3>
               <p className="memory-excerpt">{y.introduction}</p>
@@ -81,6 +82,7 @@ export function Yearlies({ userID }: { userID: string }) {
           title={detail.data?.title ?? "年度记忆"}
           onClose={() => setReading("")}
           wide
+          className="yearbook-reader"
         >
           <div className="memory-reading">
             {detail.error ? (
