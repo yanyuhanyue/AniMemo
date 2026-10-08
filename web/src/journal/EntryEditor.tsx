@@ -90,12 +90,24 @@ export function EntryEditor({
     setSource(choice);
     setPicking(false);
   }
+  const personalFields = <div className="form-row personal-fields">
+    <label>我的评分
+      <Input name="score" type="number" min="0" max="10" step="0.1" defaultValue={values?.score || ""} placeholder="未评分" data-initial-focus={entry ? true : undefined} />
+      <span className="field-hint">1–10 分；留空或填 0 表示未评分。</span>
+    </label>
+    <label>观看情况
+      <select name="status" aria-label="观看情况" defaultValue={values?.status || "recorded"}>
+        {statuses.filter(value => value !== "planned" || values?.status === "planned").map(value => <option key={value} value={value}>{statusLabels[value]}</option>)}
+      </select>
+    </label>
+  </div>;
   if (picking) return <SourcePicker entry={null} initialQuery={draft?.title} onClose={() => setPicking(false)} onSaved={onSaved} onPick={choose} />;
   return (
     <Dialog
       title={entry ? "编辑番剧记录" : "加入番剧"}
       onClose={onClose}
-      wide={!entry}
+      wide
+      className={entry ? "entry-editor" : ""}
     >
       <p className="editor-introduction muted">
         {entry
@@ -124,9 +136,10 @@ export function EntryEditor({
               defaultValue={values?.title}
               required
               maxLength={160}
-              data-initial-focus
+              data-initial-focus={!entry ? true : undefined}
             />
           </label>{!entry && !source && <Button type="button" className="button secondary source-start" onClick={openPicker}><Icon name="search" />搜索 Bangumi</Button>}</div>
+          {entry && personalFields}
           <label>
             留一点感想 <span className="optional">选填</span>
             <textarea
@@ -138,41 +151,11 @@ export function EntryEditor({
             />
           </label>
           <details className="extra-fields">
-            <summary>补充评分、状态与作品资料</summary>
-            <p className="field-hint">
+            <summary>{entry ? "作品资料与标签" : "补充评分、状态与作品资料"}</summary>
+            {!entry && <p className="field-hint">
               不填写细节也能保存；选择“看过”不会生成观看日期或逐集记录。
-            </p>
-            <div className="form-row">
-              <label>
-                观看情况
-                <select
-                  name="status"
-                  aria-label="观看情况"
-                  defaultValue={values?.status || "recorded"}
-                >
-                  {statuses.filter(value => value !== "planned" || values?.status === "planned").map((value) => (
-                    <option key={value} value={value}>
-                      {statusLabels[value]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                我的评分
-                <Input
-                  name="score"
-                  type="number"
-                  min="0"
-                  max="10"
-                  step="0.1"
-                  defaultValue={values?.score || ""}
-                  placeholder="未评分"
-                />
-                <span className="field-hint">
-                  1–10 分；留空或填 0 表示未评分。
-                </span>
-              </label>
-            </div>
+            </p>}
+            {!entry && personalFields}
             <label>
               标签 <span className="optional">选填</span>
               <Input

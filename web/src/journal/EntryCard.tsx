@@ -10,6 +10,7 @@ import { Rating } from "../components/Rating";
 export function EntryCard({
   entry,
   onOpen,
+  onEdit,
   onMemory,
   selected,
   onSelect,
@@ -18,6 +19,7 @@ export function EntryCard({
   selected?: boolean;
   onSelect?: () => void;
   onOpen: (entry: Entry) => void;
+  onEdit: (entry: Entry) => void;
   onMemory: (entry: Entry) => void;
 }) {
   return (
@@ -28,6 +30,7 @@ export function EntryCard({
           选择 {entry.title}
         </label>
       )}
+      <div className="entry-summary">
       <Button
         className="entry-cover entry-cover-summary"
         onClick={() => onOpen(entry)}
@@ -40,7 +43,6 @@ export function EntryCard({
         <div className="entry-cover-copy">
         <div className="cover-heading">
           <span>{formatLabels[entry.format]}</span>
-          {entry.score !== null && <Rating score={entry.score} variant="badge" />}
         </div>
         <div className="cover-title">
           <h3>{entry.title}</h3>
@@ -52,6 +54,10 @@ export function EntryCard({
         </span>
         </div>
       </Button>
+      <Button className="entry-rating-trigger" onClick={() => onEdit(entry)} aria-label={`修改 ${entry.title} 的评分`} title="修改评分">
+        <Rating score={entry.score} variant="badge" />
+      </Button>
+      </div>
       <div className="entry-body">
         {entry.tags.length > 0 && <div className="entry-tags">{entry.tags.slice(0, 3).map(tag => <TagChip key={tag} name={tag} />)}</div>}
         {entry.notes && <p className="entry-memory-preview">{entry.notes}</p>}
@@ -61,6 +67,8 @@ export function EntryCard({
             <Icon name="plus" />
             留点回忆
           </Button>
+          <div className="entry-action-links">
+          <Button className="text-button" onClick={() => onEdit(entry)} aria-label={`修改 ${entry.title} 的记录`}><Icon name="edit" />修改</Button>
           <Button
             className="icon-button entry-open"
             onClick={() => onOpen(entry)}
@@ -68,6 +76,7 @@ export function EntryCard({
           >
             <Icon name="arrow" />
           </Button>
+          </div>
         </div>
       </div>
     </article>
