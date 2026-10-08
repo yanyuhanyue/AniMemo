@@ -4,6 +4,11 @@ name: Release
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      previous_release:
+        description: 'Verified release tag to upgrade from (1.3 RC2 API or newer); blank uses ANIMEMO_PREVIOUS_RELEASE repository variable'
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -59,15 +64,37 @@ jobs:
           GOBIN="$GITHUB_WORKSPACE/.local/tools/age" go install filippo.io/age/cmd/age@v1.2.1 filippo.io/age/cmd/age-keygen@v1.2.1
       - name: Build one candidate
         run: npm run release -- build --output .local/output/release --image animemo-release:candidate
+      - name: Select a verified upgrade baseline
+        env:
+          PREVIOUS_RELEASE: ${{ inputs.previous_release || vars.ANIMEMO_PREVIOUS_RELEASE }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$PREVIOUS_RELEASE" ]; then
+            echo 'No published upgrade baseline selected; checking first installation and restore only.'
+            echo 'ANIMEMO_PREVIOUS_IMAGE=animemo-release:candidate' >> "$GITHUB_ENV"
+          else
+            node --input-type=module -e 'if (!/^v\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(process.env.PREVIOUS_RELEASE) || process.env.PREVIOUS_RELEASE === process.env.RELEASE_TAG) throw Error("Select a different published release tag")'
+            gh release download "$PREVIOUS_RELEASE" --dir .local/output/previous-release --pattern release.json --pattern animemo-image.tar --pattern attestations.jsonl
+            node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+          import { loadVerifiedRelease } from './tooling/release.mjs';
+          const previous = await loadVerifiedRelease('.local/output/previous-release');
+          if (previous.tag !== process.env.PREVIOUS_RELEASE) throw Error('Downloaded baseline tag mismatch');
+          const current = JSON.parse(readFileSync('.local/output/release/release.json'));
+          if (previous.image === current.image) throw Error('Upgrade baseline and candidate are the same image');
+          appendFileSync(process.env.GITHUB_ENV, `ANIMEMO_PREVIOUS_IMAGE=${previous.local_image}\n`);
+          writeFileSync('.local/output/release/upgrade-baseline.json', JSON.stringify({ tag: previous.tag, revision: previous.revision, image: previous.image }, null, 2) + '\n');
+          NODE
+          fi
       - name: Validate candidate lifecycle and extensions
         env:
-          ANIMEMO_PREVIOUS_IMAGE: animemo-release:candidate
           ANIMEMO_CANDIDATE_IMAGE: animemo-release:candidate
         run: |
           npm run test:instance
+          node tooling/memory-instance-smoke.mjs
           npm run test:stage3
           node tooling/recovery-smoke.mjs
-          cp .local/output/instance-smoke.json .local/output/stage3-smoke.json .local/output/recovery-smoke.json .local/output/release/
+          cp .local/output/instance-smoke.json .local/output/memory-instance-smoke.json .local/output/stage3-smoke.json .local/output/recovery-smoke.json .local/output/release/
       - uses: actions/attest-build-provenance@v2
         id: attest
         with:
@@ -105,6 +132,7 @@ jobs:
           name: release-validation
           path: |
             .local/output/instance-smoke.json
+            .local/output/memory-instance-smoke.json
             .local/output/stage3-smoke.json
             .local/output/recovery-smoke.json
             .local/output/release-smoke.json

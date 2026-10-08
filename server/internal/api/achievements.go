@@ -1,11 +1,47 @@
 package api
 
 import (
+	"animemo.local/server/internal/fault"
 	"animemo.local/server/internal/journal"
+	"animemo.local/server/internal/media"
+	"io"
 	"net/http"
 )
 
 func (a *API) achievementRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/v1/admin/achievements/images", a.admin(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case a.coverSlots <- struct{}{}:
+			defer func() { <-a.coverSlots }()
+		default:
+			fail(w, fault.New("media_busy", "正在处理其他图片，请稍后重试。"))
+			return
+		}
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, media.MaxBytes))
+		if err != nil {
+			fail(w, fault.Field("badge_image_id", "图案需为不超过 2 MiB 的 PNG 或 JPG 图片。"))
+			return
+		}
+		out, err := a.journal.UploadAchievementImage(r.Context(), currentUser(r).ID, r.Header.Get("Content-Type"), data)
+		libraryReply(w, 201, out, err)
+	}))
+	mux.HandleFunc("GET /api/v1/memory/achievement-images/{id}", a.require(func(w http.ResponseWriter, r *http.Request) {
+		im, err := a.journal.AchievementImage(r.Context(), currentUser(r).ID, r.PathValue("id"))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "private, no-cache")
+		w.Header().Set("ETag", `"`+im.ID+`"`)
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		if r.Header.Get("If-None-Match") == `"`+im.ID+`"` {
+			w.WriteHeader(304)
+			return
+		}
+		w.Write(im.Data)
+	}))
 	mux.HandleFunc("GET /api/v1/memory/achievements", a.require(func(w http.ResponseWriter, r *http.Request) {
 		out, err := a.journal.Achievements(r.Context(), currentUser(r).ID)
 		libraryReply(w, 200, out, err)

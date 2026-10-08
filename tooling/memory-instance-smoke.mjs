@@ -84,7 +84,8 @@ export async function memoryInstanceSmoke({ image, previousImage = image }) {
       image: previousImage,
       port: await port(),
     });
-    const cfg = await config(names[0]);
+    let cfg = await config(names[0]);
+    report.previous_image = cfg.image;
     const credentials = {
       email: `memory-probe-${randomUUID()}@example.test`,
       password: `test-${randomUUID()}`,
@@ -114,16 +115,6 @@ export async function memoryInstanceSmoke({ image, previousImage = image }) {
       },
       201,
     );
-    if (previousImage !== image) {
-      await updateInstance(names[0], image);
-      call = client(first.origin);
-      await call("POST", "/api/v1/auth/login", credentials);
-      assert.equal(
-        (await call("GET", "/api/v1/entries")).items[0].watched_episodes,
-        3,
-      );
-      mark("candidate upgrade preserves the existing journal");
-    }
     const remembered = await call(
       "POST",
       "/api/v1/entries",
@@ -206,6 +197,68 @@ export async function memoryInstanceSmoke({ image, previousImage = image }) {
       },
       201,
     );
+    // Seed the complete library on the old image, not after the upgrade.
+    // This baseline requires the 1.3 RC2 (or newer) recording API.
+    let beforeUpgrade;
+    for (let n = 0; n < 100; n++) {
+      beforeUpgrade = await call("GET", "/api/v1/export");
+      if (beforeUpgrade.library.achievements.unlocks.length >= 2) break;
+      assert.ok(n < 99, "baseline worker did not award the seeded memories");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (previousImage !== image) {
+      const previousConfig = cfg;
+      await updateInstance(names[0], image);
+      cfg = await config(names[0]);
+      assert.notEqual(cfg.image, previousConfig.image, "upgrade baseline must be a different image");
+      call = client(first.origin);
+      await call("POST", "/api/v1/auth/login", credentials);
+      const upgraded = await call("GET", "/api/v1/export");
+      assert.deepEqual(upgraded.entries, beforeUpgrade.entries);
+      for (const key of Object.keys(beforeUpgrade.library)) {
+        if (key !== "achievements")
+          assert.deepEqual(upgraded.library[key], beforeUpgrade.library[key], `upgrade changed ${key}`);
+      }
+      for (const unlock of beforeUpgrade.library.achievements.unlocks) {
+        // RC2 omitted this field; RC4 explicitly represents built-in art as "".
+        const expected = structuredClone(unlock);
+        expected.rule.badge_image_id ??= "";
+        assert.deepEqual(upgraded.library.achievements.unlocks.find((u) => u.unlock_id === unlock.unlock_id), expected);
+      }
+      assert.deepEqual(await call("GET", `/api/v1/memory/media/${media.id}`), png);
+      mark("different-image upgrade preserves existing records, full memory library, private image bytes and historical achievement revisions");
+    } else {
+      mark("first-release installation baseline; no cross-version upgrade claimed");
+    }
+    report.image = cfg.image;
+    const art = await call("POST", "/api/v1/admin/achievements/images", png, 201, true);
+    const artBytes = await call("GET", `/api/v1/memory/achievement-images/${art.id}`);
+    const customRule = await call("PUT", "/api/v1/admin/achievements/rules", {
+      series_id: `restore-art-${randomUUID().slice(0, 8)}`,
+      series_title: "恢复验收图案",
+      tier: 3,
+      title: "升级后自动获得的纪念",
+      description: "合成恢复验证",
+      badge: "book",
+      badge_image_id: art.id,
+      metric: "recorded_anime",
+      threshold: 1,
+      active: true,
+    });
+    // Wait before starting manual backfill: publication itself must wake the
+    // already-qualified idle account through the real worker.
+    for (let n = 0; n < 100; n++) {
+      const awarded = (await call("GET", "/api/v1/export")).library.achievements.unlocks.find((u) => u.rule.id === customRule.id);
+      if (awarded) {
+        assert.equal(awarded.source, "automatic");
+        assert.equal(awarded.rule.badge_image_id, art.id);
+        await call("PUT", "/api/v1/memory/achievements/showcase", { unlock_ids: [awarded.unlock_id] }, 204);
+        break;
+      }
+      assert.ok(n < 99, "new image rule did not automatically award an existing user");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    mark("publishing an uploaded badge automatically awards an idle eligible account and preserves its showcase selection");
     const backfill = await call(
       "POST",
       "/api/v1/admin/achievements/backfills",
@@ -276,6 +329,7 @@ export async function memoryInstanceSmoke({ image, previousImage = image }) {
     await read("POST", "/api/v1/auth/login", credentials);
     const after = await read("GET", "/api/v1/export");
     assert.deepEqual(after.library, original.library);
+    assert.deepEqual(await read("GET", `/api/v1/memory/achievement-images/${art.id}`), artBytes);
     const rememberedAfter = after.entries.find((e) => e.id === remembered.id);
     assert.equal(rememberedAfter.status, "recorded");
     assert.equal(rememberedAfter.notes, "高中时看过");

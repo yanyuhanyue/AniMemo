@@ -34,18 +34,19 @@ type PortableAchievementProgress struct {
 type AchievementBundle struct {
 	Unlocks  []PortableAchievement         `json:"unlocks"`
 	Progress []PortableAchievementProgress `json:"progress"`
+	Images   []AchievementImage            `json:"images,omitempty"`
 }
 
 func exportAchievements(ctx context.Context, tx pgx.Tx, owner string) (AchievementBundle, error) {
 	out := AchievementBundle{Unlocks: []PortableAchievement{}, Progress: []PortableAchievementProgress{}}
-	rows, err := tx.Query(ctx, `SELECT t.id,t.series_id,s.title,t.tier,r.revision,r.title,r.description,r.badge,r.metric,r.threshold,t.active,u.id,u.source,u.value,u.unlocked_at,g.active,g.notified,coalesce(g.showcase_slot,0) FROM achievement_unlocks u JOIN achievement_tiers t ON t.id=u.tier_id JOIN achievement_series s ON s.id=t.series_id JOIN achievement_rule_revisions r ON r.tier_id=t.id AND r.revision=u.rule_revision JOIN achievement_grants g ON g.unlock_id=u.id WHERE u.owner_id=$1 ORDER BY u.unlocked_at,u.id`, owner)
+	rows, err := tx.Query(ctx, `SELECT t.id,t.series_id,s.title,t.tier,r.revision,r.title,r.description,r.badge,r.metric,r.threshold,t.active,coalesce(r.badge_image_id,''),u.id,u.source,u.value,u.unlocked_at,g.active,g.notified,coalesce(g.showcase_slot,0) FROM achievement_unlocks u JOIN achievement_tiers t ON t.id=u.tier_id JOIN achievement_series s ON s.id=t.series_id JOIN achievement_rule_revisions r ON r.tier_id=t.id AND r.revision=u.rule_revision JOIN achievement_grants g ON g.unlock_id=u.id WHERE u.owner_id=$1 ORDER BY u.unlocked_at,u.id`, owner)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		var a PortableAchievement
 		r := &a.Rule
-		if err = rows.Scan(&r.ID, &r.SeriesID, &r.SeriesTitle, &r.Tier, &r.Revision, &r.Title, &r.Description, &r.Badge, &r.Metric, &r.Threshold, &r.Active, &a.UnlockID, &a.Source, &a.Value, &a.UnlockedAt, &a.Granted, &a.Notified, &a.ShowcaseSlot); err != nil {
+		if err = rows.Scan(&r.ID, &r.SeriesID, &r.SeriesTitle, &r.Tier, &r.Revision, &r.Title, &r.Description, &r.Badge, &r.Metric, &r.Threshold, &r.Active, &r.BadgeImageID, &a.UnlockID, &a.Source, &a.Value, &a.UnlockedAt, &a.Granted, &a.Notified, &a.ShowcaseSlot); err != nil {
 			rows.Close()
 			return out, err
 		}
@@ -67,7 +68,7 @@ func exportAchievements(ctx context.Context, tx pgx.Tx, owner string) (Achieveme
 			return out, err
 		}
 	}
-	rows, err = tx.Query(ctx, `SELECT t.id,t.series_id,s.title,t.tier,r.revision,r.title,r.description,r.badge,r.metric,r.threshold,t.active,p.value,p.updated_at FROM achievement_progress p JOIN achievement_tiers t ON t.id=p.tier_id JOIN achievement_series s ON s.id=t.series_id JOIN achievement_rule_revisions r ON r.tier_id=t.id AND r.revision=p.rule_revision WHERE p.owner_id=$1 ORDER BY t.id`, owner)
+	rows, err = tx.Query(ctx, `SELECT t.id,t.series_id,s.title,t.tier,r.revision,r.title,r.description,r.badge,r.metric,r.threshold,t.active,coalesce(r.badge_image_id,''),p.value,p.updated_at FROM achievement_progress p JOIN achievement_tiers t ON t.id=p.tier_id JOIN achievement_series s ON s.id=t.series_id JOIN achievement_rule_revisions r ON r.tier_id=t.id AND r.revision=p.rule_revision WHERE p.owner_id=$1 ORDER BY t.id`, owner)
 	if err != nil {
 		return out, err
 	}
@@ -75,19 +76,34 @@ func exportAchievements(ctx context.Context, tx pgx.Tx, owner string) (Achieveme
 	for rows.Next() {
 		var p PortableAchievementProgress
 		r := &p.Rule
-		if err = rows.Scan(&r.ID, &r.SeriesID, &r.SeriesTitle, &r.Tier, &r.Revision, &r.Title, &r.Description, &r.Badge, &r.Metric, &r.Threshold, &r.Active, &p.Value, &p.UpdatedAt); err != nil {
+		if err = rows.Scan(&r.ID, &r.SeriesID, &r.SeriesTitle, &r.Tier, &r.Revision, &r.Title, &r.Description, &r.Badge, &r.Metric, &r.Threshold, &r.Active, &r.BadgeImageID, &p.Value, &p.UpdatedAt); err != nil {
 			return out, err
 		}
 		out.Progress = append(out.Progress, p)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return out, err
+	}
+	out.Images, err = collectLibrary(ctx, tx, `SELECT DISTINCT i.id,i.width,i.height,i.data FROM achievement_images i JOIN achievement_rule_revisions r ON r.badge_image_id=i.id WHERE EXISTS(SELECT 1 FROM achievement_unlocks u WHERE u.owner_id=$1 AND u.tier_id=r.tier_id AND u.rule_revision=r.revision) OR EXISTS(SELECT 1 FROM achievement_progress p WHERE p.owner_id=$1 AND p.tier_id=r.tier_id AND p.rule_revision=r.revision) ORDER BY i.id`, owner, func(row pgx.Row) (AchievementImage, error) {
+		var im AchievementImage
+		err := row.Scan(&im.ID, &im.Width, &im.Height, &im.Data)
+		return im, err
+	})
+	return out, err
 }
 func validateAchievementBundle(b AchievementBundle) error {
 	bad := fault.New("validation_error", "成就备份包含无效或重复的规则、解锁或授予历史。")
 	if len(b.Unlocks) > 2000 || len(b.Progress) > 2000 {
 		return bad
 	}
+	images, err := validateAchievementImages(b.Images)
+	if err != nil {
+		return err
+	}
 	rules := map[string]AchievementRule{}
+	usedImages := map[string]bool{}
 	unlocks := map[string]bool{}
 	tiers := map[string]bool{}
 	slots := map[int]bool{}
@@ -95,14 +111,13 @@ func validateAchievementBundle(b AchievementBundle) error {
 		if !id.Valid(r.ID) || r.SeriesID == "" || !libraryText(r.SeriesID, 100) || r.SeriesTitle == "" || !libraryText(r.SeriesTitle, 80) || r.Tier < 1 || r.Tier > 20 || r.Revision < 1 || r.Revision > 100000 || r.Title == "" || !libraryText(r.Title, 100) || !libraryText(r.Description, 1000) || r.Threshold < 1 || r.Threshold > 1000000 {
 			return false
 		}
-		switch r.Badge {
-		case "spark", "moon", "orbit", "flower", "book":
-		default:
+		if !achievementBadgeValid(r.Badge) || (r.BadgeImageID != "" && !images[r.BadgeImageID]) {
 			return false
 		}
-		switch r.Metric {
-		case "watch_records", "distinct_anime", "completed_anime", "watched_episodes", "memory_notes":
-		default:
+		if r.BadgeImageID != "" {
+			usedImages[r.BadgeImageID] = true
+		}
+		if !achievementMetricValid(r.Metric) {
 			return false
 		}
 		key := r.ID + ":" + strconv.Itoa(r.Revision)
@@ -137,9 +152,17 @@ func validateAchievementBundle(b AchievementBundle) error {
 		}
 		progress[p.Rule.ID] = true
 	}
+	if len(usedImages) != len(images) {
+		return bad
+	}
 	return nil
 }
 func restoreAchievements(ctx context.Context, tx pgx.Tx, owner string, b AchievementBundle) error {
+	for _, im := range b.Images {
+		if err := saveAchievementImage(ctx, tx, owner, im); err != nil {
+			return err
+		}
+	}
 	// Imported rules can preserve a personal award, but can never activate a site rule.
 	mapping := map[string]string{}
 	byTier := map[string]map[int]AchievementRule{}
@@ -163,7 +186,7 @@ func restoreAchievements(ctx context.Context, tx pgx.Tx, owner string, b Achieve
 			var err error
 			for _, required := range byTier[r.ID] {
 				var same bool
-				err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM achievement_tiers t JOIN achievement_series s ON s.id=t.series_id JOIN achievement_rule_revisions r ON r.tier_id=t.id WHERE t.id=$1 AND t.series_id=$2 AND s.title=$3 AND t.tier=$4 AND r.revision=$5 AND r.title=$6 AND r.description=$7 AND r.badge=$8 AND r.metric=$9 AND r.threshold=$10)`, required.ID, required.SeriesID, required.SeriesTitle, required.Tier, required.Revision, required.Title, required.Description, required.Badge, required.Metric, required.Threshold).Scan(&same)
+				err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM achievement_tiers t JOIN achievement_series s ON s.id=t.series_id JOIN achievement_rule_revisions r ON r.tier_id=t.id WHERE t.id=$1 AND t.series_id=$2 AND s.title=$3 AND t.tier=$4 AND r.revision=$5 AND r.title=$6 AND r.description=$7 AND r.badge=$8 AND r.metric=$9 AND r.threshold=$10 AND coalesce(r.badge_image_id,'')=$11)`, required.ID, required.SeriesID, required.SeriesTitle, required.Tier, required.Revision, required.Title, required.Description, required.Badge, required.Metric, required.Threshold, required.BadgeImageID).Scan(&same)
 				if err != nil {
 					return "", err
 				}
@@ -195,13 +218,13 @@ func restoreAchievements(ctx context.Context, tx pgx.Tx, owner string, b Achieve
 		old, err = scanRule(tx.QueryRow(ctx, `SELECT `+ruleColumns+` FROM achievement_tiers t JOIN achievement_series s ON s.id=t.series_id JOIN achievement_rule_revisions r ON r.tier_id=t.id WHERE t.id=$1 AND r.revision=$2`, target, r.Revision))
 		var missing *fault.Error
 		if errors.As(err, &missing) && missing.Code == "not_found" {
-			_, err = tx.Exec(ctx, `INSERT INTO achievement_rule_revisions(tier_id,revision,title,description,badge,metric,threshold) VALUES($1,$2,$3,$4,$5,$6,$7)`, target, r.Revision, r.Title, r.Description, r.Badge, r.Metric, r.Threshold)
+			_, err = tx.Exec(ctx, `INSERT INTO achievement_rule_revisions(tier_id,revision,title,description,badge,metric,threshold,badge_image_id) VALUES($1,$2,$3,$4,$5,$6,$7,nullif($8,''))`, target, r.Revision, r.Title, r.Description, r.Badge, r.Metric, r.Threshold, r.BadgeImageID)
 			return target, err
 		}
 		if err != nil {
 			return "", err
 		}
-		if old.Title != r.Title || old.Description != r.Description || old.Metric != r.Metric || old.Badge != r.Badge || old.Threshold != r.Threshold {
+		if old.Title != r.Title || old.Description != r.Description || old.Metric != r.Metric || old.Badge != r.Badge || old.BadgeImageID != r.BadgeImageID || old.Threshold != r.Threshold {
 			return "", fault.New("validation_error", "目标实例存在同编号但内容不同的成就修订，未恢复任何内容。")
 		}
 		return target, nil

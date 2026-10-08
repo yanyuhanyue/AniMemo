@@ -5891,6 +5891,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/achievements/images": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload PNG/JPEG center artwork (2 MiB); normalize to a PNG up to 256px */
+        post: operations["uploadAchievementImage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/achievement-images/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read artwork visible to the current account */
+        get: operations["getAchievementImage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -7078,11 +7112,13 @@ export interface components {
             title: string;
             description: string;
             /** @enum {string} */
-            badge: "spark" | "moon" | "orbit" | "flower" | "book";
+            badge: "spark" | "moon" | "orbit" | "flower" | "book" | "ticket" | "shelf" | "album";
             /** @enum {string} */
-            metric: "watch_records" | "distinct_anime" | "completed_anime" | "watched_episodes" | "memory_notes";
+            metric: "watch_records" | "distinct_anime" | "completed_anime" | "watched_episodes" | "memory_notes" | "recorded_anime" | "memory_collections" | "yearly_albums";
             threshold: number;
             active: boolean;
+            /** @description Immutable uploaded center artwork; empty uses the built-in motif. */
+            badge_image_id: string;
         };
         Achievement: {
             id: string;
@@ -7093,9 +7129,9 @@ export interface components {
             title: string;
             description: string;
             /** @enum {string} */
-            badge: "spark" | "moon" | "orbit" | "flower" | "book";
+            badge: "spark" | "moon" | "orbit" | "flower" | "book" | "ticket" | "shelf" | "album";
             /** @enum {string} */
-            metric: "watch_records" | "distinct_anime" | "completed_anime" | "watched_episodes" | "memory_notes";
+            metric: "watch_records" | "distinct_anime" | "completed_anime" | "watched_episodes" | "memory_notes" | "recorded_anime" | "memory_collections" | "yearly_albums";
             threshold: number;
             active: boolean;
             value: number;
@@ -7105,6 +7141,8 @@ export interface components {
             granted: boolean;
             notified: boolean;
             showcase_slot: number;
+            /** @description Immutable uploaded center artwork; empty uses the built-in motif. */
+            badge_image_id: string;
         };
         AchievementBackfill: {
             id: string;
@@ -7215,6 +7253,11 @@ export interface components {
             yearlies: components["schemas"]["YearlyMemory"][];
             revisions: components["schemas"]["LibraryRevision"][];
         };
+        AchievementImage: {
+            id: string;
+            width: number;
+            height: number;
+        };
     };
     responses: {
         /** @description Success */
@@ -7233,4 +7276,167 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    uploadAchievementImage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "image/png": string;
+                "image/jpeg": string;
+            };
+        };
+        responses: {
+            /** @description Immutable uploaded artwork */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AchievementImage"];
+                };
+            };
+            /** @description Request rejected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request rejected */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request rejected */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request rejected */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported image format */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request rejected */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Image processing busy */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getAchievementImage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Normalized PNG */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                };
+            };
+            /** @description Unchanged */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Request rejected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request rejected */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request rejected */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request rejected */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request rejected */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+}

@@ -2,7 +2,7 @@
 
 本项目按新实例开发，不迁移 Django / SQLite / 旧版 Docker 布局。运维工具运行在部署主机，应用进程没有 Docker socket、系统命令或更新权限。Linux + Docker 是首批部署基线；当前运维工具需要 Node.js 24.12+ 和 Docker Compose 2.24.4+。Windows 保留 Docker Desktop Linux 容器下的本地开发与接手用法，不据此承诺原生生产支持。
 
-本文描述 1.1 候选的当前可执行能力。实施范围见 [1.1 交付记录](v1.1-delivery.md)，官方身份验证与发行接手见 [发行说明](release.md)。本地 `--image` 安装只固定镜像身份；`--release` 才验证官方来源。
+本文描述沿用到 1.3 RC4 的实例操作能力。当前产品与容量范围见 [1.3 交付记录](v1.3-delivery.md)，官方身份验证与发行接手见 [发行说明](release.md)。本地 `--image` 安装只固定镜像身份；`--release` 才验证官方来源。
 
 ## 安装与服务配置
 

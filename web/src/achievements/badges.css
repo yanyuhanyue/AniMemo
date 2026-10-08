@@ -1,0 +1,296 @@
+.achievement-badge {
+  --badge-paper: #fffdf7;
+  --badge-metal: #cda36c;
+  --badge-metal-light: #f9e5b4;
+  --badge-metal-edge: #9f7448;
+  display: inline-block;
+  flex: none;
+  line-height: 0;
+  vertical-align: middle;
+}
+.achievement-badge[data-badge="spark"] {
+  --badge-ink: #855032;
+  --badge-color: #e5a553;
+  --badge-light: #ffe4a0;
+  --badge-tint: #f8e8c9;
+}
+.achievement-badge[data-badge="moon"] {
+  --badge-ink: #504c88;
+  --badge-color: #9e9ce0;
+  --badge-light: #e5deff;
+  --badge-tint: #e9e5fb;
+}
+.achievement-badge[data-badge="orbit"] {
+  --badge-ink: #346a70;
+  --badge-color: #76b7b0;
+  --badge-light: #c9ece3;
+  --badge-tint: #e0f0e9;
+}
+.achievement-badge[data-badge="flower"] {
+  --badge-ink: #96566c;
+  --badge-color: #dc98ab;
+  --badge-light: #ffe0e6;
+  --badge-tint: #f9e3e7;
+}
+.achievement-badge[data-badge="book"] {
+  --badge-ink: #6c518e;
+  --badge-color: #b69cd5;
+  --badge-light: #e8dcf6;
+  --badge-tint: #eee5f5;
+}
+.achievement-badge[data-badge="ticket"] {
+  --badge-ink: #805233;
+  --badge-color: #db9a65;
+  --badge-light: #ffe4ba;
+  --badge-tint: #f9e8d1;
+}
+.achievement-badge[data-badge="shelf"] {
+  --badge-ink: #386d63;
+  --badge-color: #77b8a2;
+  --badge-light: #d2efdd;
+  --badge-tint: #e8f4ec;
+}
+.achievement-badge[data-badge="album"] {
+  --badge-ink: #475d89;
+  --badge-color: #91addc;
+  --badge-light: #dce7ff;
+  --badge-tint: #eaf0fc;
+}
+.achievement-badge[data-grade="bronze"] {
+  --badge-metal: #b77a4d;
+  --badge-metal-light: #f5d8b4;
+  --badge-metal-edge: #885435;
+}
+.achievement-badge[data-grade="silver"] {
+  --badge-metal: #9aafc4;
+  --badge-metal-light: #f1f7ff;
+  --badge-metal-edge: #647d97;
+}
+.achievement-badge[data-grade="gold"] {
+  --badge-metal: #d7a32c;
+  --badge-metal-light: #fff0a7;
+  --badge-metal-edge: #956c1c;
+}
+.achievement-badge[data-grade="platinum"] {
+  --badge-metal: #83bdbd;
+  --badge-metal-light: #ecffff;
+  --badge-metal-edge: #447f87;
+  --badge-jewel: #91d8e6;
+}
+.achievement-badge[data-grade="prismatic"] {
+  --badge-metal: #b593df;
+  --badge-metal-light: #fff0ba;
+  --badge-metal-edge: #7862ad;
+  --badge-jewel: #91dace;
+}
+.achievement-badge[data-state="locked"],
+.achievement-badge[data-state="revoked"] {
+  --badge-paper: #fcfafc;
+  --badge-ink: #7b7088;
+  --badge-color: #c9bfd4;
+  --badge-light: #eae4ed;
+  --badge-tint: #f0ebf2;
+  filter: saturate(0.45);
+}
+.achievement-badge svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.badge-size-small {
+  width: 48px;
+}
+.badge-size-medium {
+  width: 88px;
+}
+.badge-size-large {
+  width: 120px;
+}
+.badge-size-small text {
+  font-size: 16px;
+}
+.badge-option-group {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.badge-option-group legend {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.badge-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.badge-options .badge-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px 3px;
+  border: 1px solid var(--am-border);
+  border-radius: 10px;
+  cursor: pointer;
+  background: var(--am-paper);
+  font-size: 11px;
+  text-align: center;
+}
+.badge-option input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+}
+.badge-option .achievement-badge {
+  width: min(72px, 100%);
+}
+.badge-option:has(input:checked) {
+  background: #f1eaf8;
+  border-color: #8261aa;
+  box-shadow: inset 0 0 0 1px #8261aa;
+}
+.badge-option:has(input:focus-visible) {
+  outline: 3px solid var(--am-focus);
+  outline-offset: 3px;
+}
+.badge-option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.65;
+}
+.badge-rule-preview {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--am-border);
+  border-radius: 14px;
+  background: linear-gradient(130deg, #fbf5eb, #f2ecfa);
+}
+.badge-rule-preview > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.badge-rule-preview strong {
+  display: block;
+  font-size: 17px;
+}
+.badge-rule-preview p {
+  margin: 5px 0;
+  font-size: 12px;
+  color: var(--am-muted);
+  line-height: 1.7;
+}
+.badge-rule-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.badge-rule-cell > div {
+  min-width: 0;
+}
+.badge-rule-cell small {
+  display: block;
+  margin-top: 4px;
+  color: var(--am-muted);
+  font-size: 11px;
+}
+.achievement-rule-form .achievement-rule-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+.achievement-rule-fields
+  > :is(
+    .badge-rule-preview,
+    .badge-grade-guide,
+    .badge-upload,
+    .badge-option-group,
+    .achievement-rule-description,
+    .achievement-rule-active,
+    .button
+  ) {
+  grid-column: 1 / -1;
+}
+.badge-grade-guide {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  margin: 0;
+  padding: 12px;
+  background: #f7f3fb;
+  border-radius: 12px;
+}
+.badge-grade-guide > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+  color: #695674;
+}
+.badge-grade-guide .achievement-badge {
+  width: min(88px, 100%);
+}
+.badge-upload {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px dashed var(--am-border);
+  border-radius: 12px;
+}
+.badge-upload p {
+  font-size: 12px;
+  color: var(--am-muted);
+  line-height: 1.7;
+  margin: 0;
+}
+.badge-upload input[type="file"] {
+  max-width: 100%;
+  min-width: 0;
+}
+.achievement-rule-fields > .achievement-rule-active {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+.achievement-rule-form .achievement-rule-active input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+}
+.achievement-rule-form .badge-option-group {
+  display: block;
+}
+@media (max-width: 600px) {
+  .achievement-rule-form .achievement-rule-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 380px) {
+  .badge-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .badge-rule-preview {
+    padding: 12px;
+    gap: 12px;
+  }
+}
+@media (forced-colors: active) {
+  .badge-option:has(input:checked) {
+    outline: 2px solid Highlight;
+  }
+  .achievement-badge {
+    forced-color-adjust: none;
+  }
+}

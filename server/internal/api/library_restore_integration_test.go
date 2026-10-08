@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -107,7 +108,7 @@ func memoryLibraryPortableRoundTrip(t *testing.T, format string) {
 	if after.Entries[0].Status != "recorded" || after.Entries[0].WatchedEpisodes != 0 || len(after.History) != 0 {
 		t.Fatal("portable restore invented a completion state or episode history")
 	}
-	if b == nil || len(b.Notes) != 1 || len(b.Characters) != 2 || len(b.Yearlies) != 1 || len(b.Media) != 1 || len(b.Achievements.Unlocks) != 1 {
+	if b == nil || len(b.Notes) != 1 || len(b.Characters) != 2 || len(b.Yearlies) != 1 || len(b.Media) != 1 || len(b.Achievements.Unlocks) != 4 {
 		t.Fatalf("missing restored content %+v", b)
 	}
 	got := b.Notes[0]
@@ -138,8 +139,23 @@ func memoryLibraryPortableRoundTrip(t *testing.T, format string) {
 	if b.Collections[0].Items[0].ID != canonical.ID || b.Collections[0].Items[1].ID != got.ID || b.Collections[0].Visibility != "unlisted" {
 		t.Fatal("collection ordering or visibility changed")
 	}
-	if b.Achievements.Unlocks[0].ShowcaseSlot != 1 || b.Achievements.Unlocks[0].Rule.Revision != 1 || !b.Achievements.Unlocks[0].UnlockedAt.Equal(before.Library.Achievements.Unlocks[0].UnlockedAt) {
-		t.Fatal("achievement history changed")
+	originalAwards := map[string]journal.PortableAchievement{}
+	for _, a := range before.Library.Achievements.Unlocks {
+		originalAwards[a.Rule.ID] = a
+	}
+	for _, a := range b.Achievements.Unlocks {
+		original, ok := originalAwards[a.Rule.ID]
+		if !ok || a.UnlockID == original.UnlockID {
+			t.Fatal("achievement identity was not remapped")
+		}
+		a.UnlockID = original.UnlockID
+		if !reflect.DeepEqual(a, original) {
+			t.Fatalf("achievement history changed for %s", a.Rule.Metric)
+		}
+	}
+	var pending int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM achievement_pending WHERE owner_id=$1`, bu.ID).Scan(&pending); err != nil || pending != 0 {
+		t.Fatal("restoration queued a recomputation of preserved history", err)
 	}
 	for _, r := range b.Revisions {
 		if r.Kind == "moment" && r.ResourceID != got.ID {

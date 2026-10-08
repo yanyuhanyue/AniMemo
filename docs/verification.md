@@ -1,6 +1,111 @@
 # 开发验收记录
 
-## 当前：1.3 RC2 本机交接（2026-10-08，Windows + Docker Desktop）
+## 当前：1.3 RC4 本机交接（2026-10-08，Windows + Docker Desktop）
+
+已核验新交接包的 332 项文件，并接入 `E:\番剧记录\animemo-next`。原 ZIP SHA-256 为 `d2489c2ded480e174d815a83867b3cc87a07868993326c0e3ac2cdd9faf354ad`。从本机 RC2 提交 `b61a63b` 应用累计补丁得到的 Git tree 与包内源码提交 `12755de` 的 tree 一致，均为 `58e0ae608e26a3e67e97688f37cf9339bd3f6fba`；合并冲突按这一完整结果核对，295 项源码逐一校验通过，保留两边提交历史。
+
+应用仍使用包内 `8942721` 对应的原始 RC4 镜像，没有因本机验收脚本或文档修正重新构建。配置摘要为 `sha256:46b712f5cfe0c54552690993b6e360e7f204af5d766604eeafe0b5a344698055`，本机 containerd 标识为 `sha256:9e89de37b6caead780d399e7e41c537e5e68900bbc59a5f7e90b38607b6be4f0`，归档摘要与下方云端记录一致；开发加载明确返回 `trust_verified: false`。
+
+环境：Windows PowerShell、Node 24.12.0、Go 1.26.6、Docker Linux engine 29.7.2、Compose 5.5.0、PostgreSQL 17.11、age 1.2.1、本机 Chrome。
+
+| 检查 | 本机实际结果 |
+| --- | --- |
+| 静态与单元 | `npm run check` PASS，13.5 秒；TypeScript、OpenAPI 生成一致性、Go vet、模块边界通过；16 项 Node 检查全部通过，Go 单元包含在下方集成运行中 |
+| PostgreSQL 全量回归 | `npm run test:api` PASS，97.1 秒；Windows Go 连接独立 PostgreSQL 容器，涵盖新成就规则、并发发布、上传权限和 JSON/ZIP 图片历史恢复；本机未启用 race |
+| RC2 → RC4 完整记忆恢复 | 5 项 PASS，101.1 秒；不同镜像升级保留记录、完整记忆关系、原图和旧成就修订；新发布图片成就自动授予，展示槽和图片经完整快照恢复；错误镜像拒绝 |
+| 实例生命周期 | 12 项 PASS，269.6 秒；实际 19 → 21 迁移、配置与中断恢复、age 加密转移、错误密钥/损坏包拒绝、独立恢复、更新数据库副本、显式回滚、救援快照和坏候选自动恢复 |
+| 真实浏览器 | 四套共 20 项 PASS：记录主链 7、记录成就 4、展示/撤回/编辑器 6、自定义图案和自动授予 3；全部使用最终镜像、真实 API/Worker 与隔离合成账号 |
+| 布局与可访问性 | 成就页面/编辑器共 16 个宽度检查，覆盖 320/390/768/1440 px；记录主链另检查手机宽度；共 12 次 axe 扫描无检出、0 页面异常。已实际查看五档边框和上传后的获得卡片截图 |
+| 用户实例升级 | `local-review` 原地址 `http://127.0.0.1:18082` 已升级 RC4，21 项迁移，doctor PASS，app/worker/db healthy；比较旧库与新库，原账号、密码、权限、条目、札记和观看记录保留。自动备份及旧库保留；需要使用原账号重新登录 |
+
+两套旧成就浏览器脚本沿用开发页面的内联脚本注入方式；本次与已有记录/图片脚本统一，通过浏览器调试接口运行 axe，实际在最终容器上通过，生产 CSP 未改动。README 同步 RC4 版本及 v3 图片导出范围，交接指南修正备用端口。没有新增应用功能或生产依赖。
+
+证据：`.local/output/rc4-package-verification.json`、`rc4-loaded.json`、`rc4-test-api.{json,log}`、`rc4-memory-instance-smoke.json`、`rc4-instance-smoke.json`、`rc4-browser.json`、`rc4-local-review-{update,doctor}.json`；浏览器截图与报告位于 `.local/output/browser/rc4-windows-{recording,achievement-content,achievement,achievement-art}/`。隔离验收实例及其数据卷已清理，用户实例继续运行。
+
+源码通过既有 GitHub `codex/animemo-next` 分支交接，提交及远端 CI 以分支记录为准。未创建版本标签、签发证明或发布 Release。包内没有新增真实服务凭据；邮件收件、OAuth、R2、域名/TLS 仍未验收，继续默认关闭。VM、长时负载和 Safari 未运行；下方云端证据保留原环境范围。
+
+## 历史：1.3 RC4 发行收尾（2026-10-08，云端 Linux）
+
+应用源码已冻结为提交 `89427216c4c873ba9614d39c14c2366b83d7e2ae`，版本 `1.3.0-rc.4`，21 个迁移。本轮不扩张功能；补充发行基线选择、真实跨版本记忆库验收及交接文档。镜像仅构建一次，后续探针/文档修正不改变应用或构建输入，不重复构建。
+
+镜像 `sha256:46b712f5cfe0c54552690993b6e360e7f204af5d766604eeafe0b5a344698055`；归档 29,877,248 字节，SHA-256 `55390dc099059a2fb55c6efea2aaf0f20c3d8c12ae824f7a5ec6cfc15eb325ed`。清单在 `.local/output/release-v13-rc4/release.json`，绑定干净源码提交，但仍明确标记 `development: true`，没有正式来源证明。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 完整 PostgreSQL 回归 | 同一应用源码在发布评估时执行 `npm run test:api`，PASS，63.4 秒；包含 Go 单元与真实数据库集成，不启用真实外部服务/浏览器夹具，不冒充全量 race |
+| 收尾工具与文档 | 16 项 Node 检查 PASS；修改后的 JS、发行 YAML 和 Bash 语法、文档链接检查通过；既有 RC4 静态、构建、专项 race 和浏览器证据按下节范围保留 |
+| RC2 → RC4 完整记忆 | PASS，69.9 秒。先在旧镜像建立记录、札记、角色/集数、原图、收藏、年度册与旧成就，再升级；内容、图片字节及旧解锁修订保留；新上传徽章无需用户继续操作即可自动授予，展示槽与图案随完整实例快照恢复 |
+| 实例生命周期 | 12 项 PASS，175.8 秒；确认不同镜像与 19 → 21 迁移，真实 age 加密往返、错误密钥/损坏包拒绝、配置失败恢复、更新新数据库、显式回滚、升级后写入救援和坏候选自动回退 |
+| Worker / 随附扩展 | 5 项 PASS，86.0 秒；真实 WASI 子进程确认导入、停 Worker 后持久排队与续跑、恢复副本默认停用扩展、中断更新恢复、坏包隔离且核心仍可用 |
+| 操作中断恢复 | 2 组 PASS；恢复中断在新数据库重试，已启动后的新写入保留；回滚中断恢复原数据库，回滚侧新写入保存在救援快照 |
+| 原验收站升级 | `stage3-review` 已切换到上述 RC4 镜像，doctor PASS，app/worker/db healthy；原有 7 条记录、完整记忆库和 3 条历史成就核对保留，更新前快照与回滚镜像保留 |
+| 最终容器浏览器 | 记录与回忆 7 项、成就图片上传/自动授予 3 项 PASS；记录页 320/390/768 px、成就编辑器 320/390/768/1440 px 布局通过，6 次 axe 扫描无检出，0 页面异常；使用合成数据，新增测试管理员结束后撤权停用，测试规则停用 |
+
+完整记忆探针最初因 RC2 没有 `badge_image_id` 而 RC4 显式返回空字符串导致断言失败；第二次合成系列名超过既有 40 字符约束。只修正探针的空字段兼容和夹具名称，最终上述完整流程通过；没有修改应用来迁就测试，也没有隐藏首次失败。所有探针容器及其数据库卷均已清理。
+
+发行流程现在消费显式选择且验证过的前版 Release，并执行完整记忆恢复。首个正式 Release 没有前版时只声明新安装/恢复；后续支持旧版升级需配置 `previous_release` 或仓库变量，不能将同镜像测试称为跨版本升级。云端 RC2 未签发基线仅用于本地真实升级证明。
+
+证据：`.local/logs/rc4-release-assessment-api.log`、`rc4-closeout-{node,memory-instance,instance,stage3,recovery,recording-browser,art-browser}.log`；`.local/output/release-v13-rc4/` 中的四份实例报告；`.local/output/rc4-closeout-review-{update,doctor}.json` 与 `.local/output/browser/rc4-closeout-{recording,art}/`。首次失败日志和回执保留在 `.local/logs/rc4-closeout-memory-instance-{first,second}.log` 及 `.local/output/rc4-closeout-memory-instance-{first,second}.json`。
+
+图案脚本首次在生产容器的 CSP 下被禁止注入内联 axe 脚本；改为与记录脚本一致的浏览器调试接口执行后通过，没有放松生产 CSP。既有验收站管理员不符合该脚本的 `@example.test` 合成账号约束，改用专门注册、短暂授予权限、最终撤权停用的测试账号。初次验收站回执误读 `revision` 字段，已使用真实 `source_revision` 和实际迁移表复核；实例升级与数据比较成功，没有重复执行升级。上述检查器修正均不改变镜像内应用。
+
+验收站仍仅监听云端 `127.0.0.1:18082`，不是公网链接；用户侧通过端口转发或在本地启动本包访问。旧 RC2 包保持不变；新完整交接包包含当前源码、镜像、Git bundle、两种基线补丁及选定证据，不包含云端数据库或凭据。
+
+云端 GitHub CLI 授权检查实际失败，提示 `GH_TOKEN` 无效；环境未配置可用的外部服务凭据/身份，HTTP 允许列表仍不包含全部 GitHub API/Sigstore 服务。未推送、打远端标签、签发证明或发布 Release。邮件真实收件、OAuth、R2、公网域名/TLS 不计为已验证；默认关闭的外部能力不阻塞核心候选。Windows RC4、Safari、VM、长时负载未执行；后两项仍可选。下一步及本地启动/升级命令见 [本地交接](local-package-handoff.md)、[发行说明](release.md)。
+
+## 历史：1.3 RC4 自定义图案、等级边框与自动授予（2026-10-08，云端 Linux）
+
+源码及 OpenAPI 版本 `1.3.0-rc.4`，迁移 021。后台可上传 PNG/JPG 中心主图（2 MiB），规范化为最大 256px 的 PNG；8 种内置主图，青铜/白银/黄金/铂金/幻彩五档边框及月桂、冠饰、宝石，前后台共享。详情见 [成就内容](achievement-content.md)。没有新增生产依赖。
+
+发布、重启用及修改统计门槛会自动把已有正常账号加入原队列；Worker 每轮最多评估 10 个账号，文案/图案调整不重算全站。先锁队列代次、后读取规则，修复发布与 Worker 并发时可能使用旧规则消费新任务的问题。旧授予不重复，撤回不重授。
+
+| 检查 | 本轮实际结果 |
+| --- | --- |
+| 静态、单元、构建 | `npm run check` PASS；Go 单元与 16 项 Node 检查 PASS（2.8 秒）；Vite 生产构建 PASS（0.42 秒），仍有既有单包超过 500 kB 的提示 |
+| PostgreSQL 与 race | `TestAchievementPublicationDuringWorkerRead`、`TestAchievementArtPublicationAndPortableHistory`、`TestRecordingAchievement*`、`TestMemoryAchievementsAndSearch`、`TestMemoryLibraryPortableRoundTrip` 组合 PASS（63.8 秒），包含两个格式子用例；不是数据库全量回归 |
+| 上传与权限 | 普通用户/匿名上传拒绝；SVG、坏图片、超过限制的请求拒绝；规范 PNG、重复去重、未发布预览隔离、历史拥有者读取旧图、非拥有者拒绝、图片元信息响应通过 |
+| 自动授予 | 先记录、后启用规则的空闲用户自动获得；直接发布新等级、降低门槛、重新启用评估通过；纯图案编辑不入队；四 Worker 不重复授予；专门用数据库查询屏障复现发布/读取时序，确认不漏算 |
+| 历史与恢复 | 修改主图不覆盖旧解锁；JSON/ZIP 携带两份历史图片，在另一随机 schema 恢复后字节、修订、获得日期、展示槽不变，陌生规则保持停用；篡改图片备份拒绝；超过一天但被历史引用的图片在清理时保留 |
+| 真实浏览器 | 图案编辑器实际上传、保存，已有达标用户无需再写记录即可自动获得带自定义图片的成就；8 个内置主图、5 种不同边框及等级纹饰检查通过，合成规则在结束时停用 |
+| 布局与可访问性 | 图案编辑器在 320/390/768/1440 px 无横向溢出，桌面和手机 axe 无检出；此前图鉴/内容、纪念架、撤回恢复、键盘操作两套脚本在 RC4 再次通过；共 8 次 axe 扫描无检出、0 页面异常 |
+
+证据：`.local/logs/achievement-custom-api-final.log`、`achievement-art-cleanup-test.log`、`achievement-art-check-final.log`、`achievement-custom-unit.log`、`achievement-custom-build.log`、`achievement-art-browser.log`、`achievement-custom-{content,polish}-browser.log`。截图和报告在 `.local/output/browser/achievement-art/`、`achievement-custom-content/`、`achievement-custom-polish/`。已实际查看五档边框、八种图案和上传后的用户成就截图。
+
+首次上传浏览器检查遇到 Chromium inspector 响应体缓存被回收；改为核对真实界面中的图片 ID，并通过 API 重新读取已保存规则和图片后通过，没有替换成模拟接口。增加引用/清理事务协调后，对上传与跨实例恢复再次定向验证。
+
+本轮为源码和开发服务交付，未推送远端或重建旧 RC2 镜像/交接 ZIP。未重复全量集成、Windows、Docker 镜像升级/回滚、Safari、VM 或长时负载。数据库迁移与跨 schema 恢复结果不冒充容器实例升级证明。
+
+## 历史：1.3 RC3 记录与回顾成就（2026-10-08，云端 Linux）
+
+源码及 OpenAPI 版本 `1.3.0-rc.3`，迁移 19 → 20。新增 7 枚默认成就（共 6 系列、12 枚）、3 种统计条件，图鉴优先展示记录与回顾系列，增加筛选和条件说明；沿用五种 SVG 纪念章、纪念架及后台图案预览。完整口径见 [成就内容](achievement-content.md)。没有新增生产依赖。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 静态、单元、构建 | `npm run check` PASS（8.8 秒）；Go 单元及 16 项 Node 检查 PASS（2.9 秒）；最终 `check:web` PASS（7.6 秒）；Vite 生产构建 PASS（0.36 秒），仍有既有单包超过 500 kB 的提示 |
+| PostgreSQL 专项与 race | `npm run test:api -- -race -run 'TestRecordingAchievement\|TestMemoryAchievementsAndSearch\|TestMemoryLibraryPortableRoundTrip'` PASS（38.7 秒）；随机 schema 隔离并清理 |
+| 统计与历史 | 仅作品名、未知日期、按作品身份去重、想看分类排除、空收藏/空册排除、重复修订不累加、阈值 5/20/10/3、删除后更新当前值但保留获得历史、软删除/恢复触发、账号隔离均通过 |
+| 并发与补算 | 四 Worker 并发不重复解锁/授予事件；新收藏条件支持冻结补算，后续规则编辑不改变已冻结的修订；撤回不重授 |
+| 19 → 20 升级 | 在真实 PostgreSQL 应用前 19 个迁移、建立记录与旧成就及自定义等级，再执行 020；已有内容自动得到新纪念，旧解锁不变，自定义等级不覆盖，重复迁移通过 |
+| JSON / ZIP 恢复 | 两种格式均保留四类成就的规则、值、日期、授予、通知、展示槽及事件，未知观看事实不变；年度恢复触发器不产生重算队列 |
+| 浏览器内容链路 | 真实 Worker 自动解锁：作品名＋未知日期回忆获得两枚，收藏＋年度选材获得另两枚；12 枚图鉴、四个记录系列筛选、单位和说明、重复保存保留原解锁均通过 |
+| 图标和后台回归 | 既有脚本 6 项流程通过；通知、展示增删、撤回/恢复、5 图案实时预览、20 级、停用规则保存、键盘及关闭焦点返回通过 |
+| 布局与可访问性 | 内容页 4 种宽度，图鉴/编辑器另各 4 种宽度（320/390/768/1440）通过；共 6 次桌面/手机 axe 扫描无检出，0 页面异常；已查看桌面与手机截图 |
+
+首轮新增夹具误用了不含图片的“瞬间”和未存入数据库的系列名，已按真实模型修正，最终专项全部通过。浏览器夹具也改为只提交可写的收藏字段；发现系列选择器的可访问名称不稳定后补了明确名称并复测。
+
+证据：`.local/logs/achievement-content-{check,unit,api-final,check-web-final,build-web-final,browser,polish}.log`；`.local/output/browser/achievement-content/report.json`、`catalog-1440.png`、`catalog-390.png`、`recording-keepsakes.png`；图案与后台回归在 `.local/output/browser/achievement-content-polish/`。所有浏览器数据均为合成账号，后台只新增停用的合成规则。
+
+本轮更新的是源码和 `5177` 开发服务（API `18083`）。旧 RC2 ZIP、镜像与独立 `18082` 容器保留原版，没有推送 GitHub 或发布新镜像。未重复全量集成、Windows/Docker Desktop、实例镜像升级恢复、Safari、VM 或长时负载；上述数据库升级证据不等同于新容器镜像验收。
+
+## 历史：1.3 RC2 成就展示打磨（2026-10-08，云端 Linux）
+
+核对远端 `b61a63b` 并接入本机运维修复后，调整五种徽章、状态、纪念架及后台图案预览。产品版本仍为 `1.3.0-rc.2`；本轮为其后的未提交前端改动，不改变数据库/API 或默认成就规则，尚未进入原交接镜像。进度、截图审查与剩余内容缺口见 [成就审查](achievement-design-review.md)。
+
+`npm run check:web` PASS（8.8 秒），模块边界检查 PASS。真实浏览器通过新账号未获得状态、领取通知、展示添加/移除、撤回与恢复、五种图案预览、20 级显示、停用规则保存、键盘选择及关闭焦点返回。图鉴/编辑器各 4 种宽度（320/390/768/1440）无横向溢出；4 次桌面/手机 axe 扫描无检出、0 页面异常。首次标签对比度问题已修正后复测。检查只使用合成账号和停用测试规则。
+
+Vite 生产前端打包通过；后台表格修订换行检查及追加 axe 扫描通过。证据：`.local/logs/achievement-check-web.log`、`achievement-browser.log`、`achievement-build-web.log`，`.local/output/browser/achievement-polish/report.json`、`admin-table-check.json` 和同目录截图；审查前截图在 `.local/output/browser/achievement-audit/`。本轮未重新进行 Windows、Safari、全量数据库、VM 或长时负载验收；不以既有通过记录代替本轮执行。
+
+## 1.3 RC2 本机交接（2026-10-08，Windows + Docker Desktop）
 
 已在 `E:\番剧记录\animemo-next` 接入交接包：包内 305 项文件校验通过，完整补丁基线为 `4eb8b88732a5dc25bfb58bbc0008886fc624afe0`，应用源码与包内 279 项源码清单一致；本机新增改动仅涉及运维工具、验收脚本和交接文档。原 ZIP SHA-256 为 `014cd4bc6c133e86f90bedc20f24ca7a2be3442bc55018fd29b3311f8072c74b`。
 

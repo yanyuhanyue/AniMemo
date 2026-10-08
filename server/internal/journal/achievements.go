@@ -13,17 +13,18 @@ import (
 )
 
 type AchievementRule struct {
-	ID          string `json:"id"`
-	SeriesID    string `json:"series_id"`
-	SeriesTitle string `json:"series_title"`
-	Tier        int    `json:"tier"`
-	Revision    int    `json:"revision"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Badge       string `json:"badge"`
-	Metric      string `json:"metric"`
-	Threshold   int    `json:"threshold"`
-	Active      bool   `json:"active"`
+	ID           string `json:"id"`
+	SeriesID     string `json:"series_id"`
+	SeriesTitle  string `json:"series_title"`
+	Tier         int    `json:"tier"`
+	Revision     int    `json:"revision"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Badge        string `json:"badge"`
+	BadgeImageID string `json:"badge_image_id"`
+	Metric       string `json:"metric"`
+	Threshold    int    `json:"threshold"`
+	Active       bool   `json:"active"`
 }
 type Achievement struct {
 	AchievementRule
@@ -38,16 +39,19 @@ type AchievementCenter struct {
 	Items []Achievement `json:"items"`
 }
 
-const ruleColumns = `t.id,t.series_id,s.title,t.tier,r.revision,r.title,r.description,r.badge,r.metric,r.threshold,t.active`
+const ruleColumns = `t.id,t.series_id,s.title,t.tier,r.revision,r.title,r.description,r.badge,r.metric,r.threshold,t.active,coalesce(r.badge_image_id,'')`
 const ruleFrom = ` FROM achievement_tiers t JOIN achievement_series s ON s.id=t.series_id JOIN achievement_rule_revisions r ON r.tier_id=t.id AND r.revision=t.current_revision`
+const achievementRulesQuery = `SELECT ` + ruleColumns + ruleFrom + ` WHERE NOT t.archived ORDER BY t.series_id,t.tier`
 
 func scanRule(row pgx.Row) (AchievementRule, error) {
 	var a AchievementRule
-	err := row.Scan(&a.ID, &a.SeriesID, &a.SeriesTitle, &a.Tier, &a.Revision, &a.Title, &a.Description, &a.Badge, &a.Metric, &a.Threshold, &a.Active)
+	err := row.Scan(&a.ID, &a.SeriesID, &a.SeriesTitle, &a.Tier, &a.Revision, &a.Title, &a.Description, &a.Badge, &a.Metric, &a.Threshold, &a.Active, &a.BadgeImageID)
 	return a, libraryMissing(err)
 }
 func (s *Service) AchievementRules(ctx context.Context) ([]AchievementRule, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+ruleColumns+ruleFrom+` WHERE NOT t.archived ORDER BY t.series_id,t.tier`)
+	return collectAchievementRules(s.pool.Query(ctx, achievementRulesQuery))
+}
+func collectAchievementRules(rows pgx.Rows, err error) ([]AchievementRule, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -64,29 +68,52 @@ func (s *Service) AchievementRules(ctx context.Context) ([]AchievementRule, erro
 }
 func (s *Service) Achievements(ctx context.Context, owner string) (AchievementCenter, error) {
 	out := AchievementCenter{Items: []Achievement{}}
-	rows, err := s.pool.Query(ctx, `SELECT t.id,t.series_id,s.title,t.tier,r.revision,r.title,r.description,r.badge,r.metric,r.threshold,t.active,coalesce(p.value,0),coalesce(u.id::text,''),u.unlocked_at,coalesce(g.active,false),coalesce(g.notified,true),coalesce(g.showcase_slot,0) FROM achievement_tiers t JOIN achievement_series s ON s.id=t.series_id LEFT JOIN achievement_unlocks u ON u.tier_id=t.id AND u.owner_id=$1 JOIN achievement_rule_revisions r ON r.tier_id=t.id AND r.revision=coalesce(u.rule_revision,t.current_revision) LEFT JOIN achievement_progress p ON p.tier_id=t.id AND p.owner_id=$1 LEFT JOIN achievement_grants g ON g.unlock_id=u.id WHERE t.active OR u.id IS NOT NULL OR (t.archived AND p.owner_id IS NOT NULL) ORDER BY t.series_id,t.tier`, owner)
+	rows, err := s.pool.Query(ctx, `SELECT t.id,t.series_id,s.title,t.tier,r.revision,r.title,r.description,r.badge,r.metric,r.threshold,t.active,coalesce(r.badge_image_id,''),coalesce(p.value,0),coalesce(u.id::text,''),u.unlocked_at,coalesce(g.active,false),coalesce(g.notified,true),coalesce(g.showcase_slot,0) FROM achievement_tiers t JOIN achievement_series s ON s.id=t.series_id LEFT JOIN achievement_unlocks u ON u.tier_id=t.id AND u.owner_id=$1 JOIN achievement_rule_revisions r ON r.tier_id=t.id AND r.revision=coalesce(u.rule_revision,t.current_revision) LEFT JOIN achievement_progress p ON p.tier_id=t.id AND p.owner_id=$1 LEFT JOIN achievement_grants g ON g.unlock_id=u.id WHERE t.active OR u.id IS NOT NULL OR (t.archived AND p.owner_id IS NOT NULL) ORDER BY t.series_id,t.tier`, owner)
 	if err != nil {
 		return out, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var a Achievement
-		if err = rows.Scan(&a.ID, &a.SeriesID, &a.SeriesTitle, &a.Tier, &a.Revision, &a.Title, &a.Description, &a.Badge, &a.Metric, &a.Threshold, &a.Active, &a.Value, &a.UnlockID, &a.UnlockedAt, &a.Granted, &a.Notified, &a.ShowcaseSlot); err != nil {
+		if err = rows.Scan(&a.ID, &a.SeriesID, &a.SeriesTitle, &a.Tier, &a.Revision, &a.Title, &a.Description, &a.Badge, &a.Metric, &a.Threshold, &a.Active, &a.BadgeImageID, &a.Value, &a.UnlockID, &a.UnlockedAt, &a.Granted, &a.Notified, &a.ShowcaseSlot); err != nil {
 			return out, err
 		}
 		out.Items = append(out.Items, a)
 	}
 	return out, rows.Err()
 }
+func achievementMetricValid(metric string) bool {
+	switch metric {
+	case "watch_records", "distinct_anime", "completed_anime", "watched_episodes", "memory_notes", "recorded_anime", "memory_collections", "yearly_albums":
+		return true
+	default:
+		return false
+	}
+}
+
 func metricValues(ctx context.Context, tx pgx.Tx, owner string) (map[string]int, error) {
 	values := map[string]int{}
-	var records, anime, completed, episodes, notes int
-	err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1),(SELECT count(DISTINCT e.anime_id) FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1),(SELECT count(*) FROM entries WHERE user_id=$1 AND status='completed' AND deleted_at IS NULL),(SELECT coalesce(sum(w.episode_to-w.episode_from+1),0) FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1),(SELECT count(*) FROM memory_notes WHERE owner_id=$1 AND deleted_at IS NULL)`, owner).Scan(&records, &anime, &completed, &episodes, &notes)
+	var records, anime, completed, episodes, notes, recorded, collections, albums int
+	err := tx.QueryRow(ctx, `SELECT
+ (SELECT count(*) FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1),
+ (SELECT count(DISTINCT e.anime_id) FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1),
+ (SELECT count(*) FROM entries WHERE user_id=$1 AND status='completed' AND deleted_at IS NULL),
+ (SELECT coalesce(sum(w.episode_to-w.episode_from+1),0) FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1),
+ (SELECT count(*) FROM memory_notes WHERE owner_id=$1 AND deleted_at IS NULL),
+ (SELECT count(DISTINCT anime_id) FROM entries WHERE user_id=$1 AND deleted_at IS NULL AND status<>'planned'),
+ (SELECT count(*) FROM memory_collections WHERE owner_id=$1 AND jsonb_array_length(items)>0),
+ (SELECT count(*) FROM yearly_memories y JOIN LATERAL
+   (SELECT items FROM yearly_revisions WHERE yearly_id=y.id ORDER BY revision DESC LIMIT 1) r
+   ON jsonb_array_length(r.items)>0 WHERE y.owner_id=$1)`, owner).
+		Scan(&records, &anime, &completed, &episodes, &notes, &recorded, &collections, &albums)
 	values["watch_records"] = records
 	values["distinct_anime"] = anime
 	values["completed_anime"] = completed
 	values["watched_episodes"] = episodes
 	values["memory_notes"] = notes
+	values["recorded_anime"] = recorded
+	values["memory_collections"] = collections
+	values["yearly_albums"] = albums
 	return values, err
 }
 func evaluateAchievements(ctx context.Context, tx pgx.Tx, owner string, rules []AchievementRule) (int, error) {
@@ -134,10 +161,6 @@ func evaluateAchievements(ctx context.Context, tx pgx.Tx, owner string, rules []
 	return granted, nil
 }
 func (s *Service) ProcessAchievements(ctx context.Context) (bool, error) {
-	rules, err := s.AchievementRules(ctx)
-	if err != nil {
-		return false, err
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -151,6 +174,12 @@ func (s *Service) ProcessAchievements(ctx context.Context) (bool, error) {
 	}
 	if err != nil {
 		return false, err
+	}
+	// Lock the queued generation before loading rules. A concurrent publication
+	// either becomes visible here or leaves a new queued generation after commit.
+	rules, err := collectAchievementRules(tx.Query(ctx, achievementRulesQuery))
+	if err != nil {
+		return true, err
 	}
 	if _, err = evaluateAchievements(ctx, tx, owner, rules); err != nil {
 		return true, err
@@ -200,14 +229,10 @@ func (s *Service) SaveAchievementRule(ctx context.Context, actor string, in Achi
 	if (in.ID != "" && !id.Valid(in.ID)) || !seriesPattern.MatchString(in.SeriesID) || in.SeriesTitle == "" || !libraryText(in.SeriesTitle, 80) || in.Title == "" || !libraryText(in.Title, 100) || !libraryText(in.Description, 1000) || in.Tier < 1 || in.Tier > 20 || in.Threshold < 1 || in.Threshold > 1000000 {
 		return in, fault.Field("title", "请检查系列、等级、标题与阈值。")
 	}
-	switch in.Metric {
-	case "watch_records", "distinct_anime", "completed_anime", "watched_episodes", "memory_notes":
-	default:
+	if !achievementMetricValid(in.Metric) {
 		return in, fault.Field("metric", "只允许内置的统计规则。")
 	}
-	switch in.Badge {
-	case "spark", "moon", "orbit", "flower", "book":
-	default:
+	if !achievementBadgeValid(in.Badge) {
 		return in, fault.Field("badge", "请选择内置徽章图案。")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -218,6 +243,23 @@ func (s *Service) SaveAchievementRule(ctx context.Context, actor string, in Achi
 	if err = governance.Authorize(ctx, tx, actor); err != nil {
 		return in, err
 	}
+	if in.BadgeImageID != "" {
+		if !achievementImageID.MatchString(in.BadgeImageID) {
+			return in, fault.Field("badge_image_id", "请选择已上传的成就图案。")
+		}
+		// Serialize linking a preview with cleanup of abandoned uploaded art.
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(718226055)`); err != nil {
+			return in, err
+		}
+		var exists bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM achievement_images WHERE id=$1)`, in.BadgeImageID).Scan(&exists); err != nil {
+			return in, err
+		}
+		if !exists {
+			return in, fault.Field("badge_image_id", "图案已失效，请重新上传。")
+		}
+	}
+	queueExisting := in.Active && in.ID == ""
 	if in.ID == "" {
 		in.ID = id.New()
 		in.Revision = 1
@@ -232,9 +274,13 @@ func (s *Service) SaveAchievementRule(ctx context.Context, actor string, in Achi
 		if old.SeriesID != in.SeriesID || old.Tier != in.Tier {
 			return in, fault.Field("tier", "已有层级不能迁移系列；请新增规则。")
 		}
+		queueExisting = in.Active && (!old.Active || old.Metric != in.Metric || old.Threshold != in.Threshold)
 		in.Revision++
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO achievement_series(id,title) VALUES($1,$2) ON CONFLICT(id) DO NOTHING`, in.SeriesID, in.SeriesTitle); err != nil {
+		return in, err
+	}
+	if err = tx.QueryRow(ctx, `SELECT title FROM achievement_series WHERE id=$1`, in.SeriesID).Scan(&in.SeriesTitle); err != nil {
 		return in, err
 	}
 	var occupied bool
@@ -247,11 +293,18 @@ func (s *Service) SaveAchievementRule(ctx context.Context, actor string, in Achi
 	if _, err = tx.Exec(ctx, `INSERT INTO achievement_tiers(id,series_id,tier,current_revision,active) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET current_revision=excluded.current_revision,active=excluded.active`, in.ID, in.SeriesID, in.Tier, in.Revision, in.Active); err != nil {
 		return in, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO achievement_rule_revisions(tier_id,revision,title,description,badge,metric,threshold) VALUES($1,$2,$3,$4,$5,$6,$7)`, in.ID, in.Revision, in.Title, in.Description, in.Badge, in.Metric, in.Threshold); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO achievement_rule_revisions(tier_id,revision,title,description,badge,metric,threshold,badge_image_id) VALUES($1,$2,$3,$4,$5,$6,$7,nullif($8,''))`, in.ID, in.Revision, in.Title, in.Description, in.Badge, in.Metric, in.Threshold, in.BadgeImageID); err != nil {
 		return in, err
 	}
 	if err = governance.Audit(ctx, tx, actor, "achievement-rule", "achievement", in.ID, map[string]any{"revision": in.Revision, "active": in.Active}); err != nil {
 		return in, err
+	}
+	// Publishing, re-enabling or editing an active rule evaluates existing users
+	// asynchronously; the request never scans their journal or waits for awards.
+	if queueExisting {
+		if _, err = tx.Exec(ctx, `INSERT INTO achievement_pending(owner_id) SELECT id FROM users WHERE NOT disabled ORDER BY id ON CONFLICT(owner_id) DO UPDATE SET generation=achievement_pending.generation+1,updated_at=now()`); err != nil {
+			return in, err
+		}
 	}
 	return in, tx.Commit(ctx)
 }
@@ -334,8 +387,17 @@ func (s *Service) RunMemoryWorker(ctx context.Context) {
 				slog.Error("private media cleanup failed", "error_type", "database_failure")
 			}
 		case <-ticker.C:
-			if _, err := s.ProcessAchievements(ctx); err != nil && ctx.Err() == nil {
-				slog.Error("achievement projection failed", "error_type", "database_or_task_failure")
+			for n := 0; n < 10; n++ {
+				worked, err := s.ProcessAchievements(ctx)
+				if err != nil {
+					if ctx.Err() == nil {
+						slog.Error("achievement projection failed", "error_type", "database_or_task_failure")
+					}
+					break
+				}
+				if !worked {
+					break
+				}
 			}
 			if _, err := s.ProcessAchievementBackfill(ctx); err != nil && ctx.Err() == nil {
 				slog.Error("achievement backfill failed", "error_type", "database_or_task_failure")

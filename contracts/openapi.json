@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "AniMemo API",
-    "version": "1.3.0-rc.2",
+    "version": "1.3.0-rc.4",
     "description": "AniMemo 新项目 API。写请求必须携带与 PUBLIC_ORIGIN 完全一致的 Origin；登录使用 HttpOnly Cookie。所有 API 响应不缓存。详情见 docs/api.md。管理路径需要当前账号仍有管理权限，版本冲突为 409。"
   },
   "servers": [
@@ -5497,6 +5497,194 @@
           }
         }
       }
+    },
+    "/api/v1/admin/achievements/images": {
+      "post": {
+        "operationId": "uploadAchievementImage",
+        "summary": "Upload PNG/JPEG center artwork (2 MiB); normalize to a PNG up to 256px",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Immutable uploaded artwork",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AchievementImage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported image format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Image processing busy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/achievement-images/{id}": {
+      "get": {
+        "operationId": "getAchievementImage",
+        "summary": "Read artwork visible to the current account",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Normalized PNG",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged"
+          },
+          "400": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -10531,7 +10719,10 @@
               "moon",
               "orbit",
               "flower",
-              "book"
+              "book",
+              "ticket",
+              "shelf",
+              "album"
             ]
           },
           "metric": {
@@ -10541,7 +10732,10 @@
               "distinct_anime",
               "completed_anime",
               "watched_episodes",
-              "memory_notes"
+              "memory_notes",
+              "recorded_anime",
+              "memory_collections",
+              "yearly_albums"
             ]
           },
           "threshold": {
@@ -10549,6 +10743,11 @@
           },
           "active": {
             "type": "boolean"
+          },
+          "badge_image_id": {
+            "type": "string",
+            "pattern": "^([a-f0-9]{64})?$",
+            "description": "Immutable uploaded center artwork; empty uses the built-in motif."
           }
         },
         "required": [
@@ -10562,7 +10761,8 @@
           "badge",
           "metric",
           "threshold",
-          "active"
+          "active",
+          "badge_image_id"
         ]
       },
       "Achievement": {
@@ -10597,7 +10797,10 @@
               "moon",
               "orbit",
               "flower",
-              "book"
+              "book",
+              "ticket",
+              "shelf",
+              "album"
             ]
           },
           "metric": {
@@ -10607,7 +10810,10 @@
               "distinct_anime",
               "completed_anime",
               "watched_episodes",
-              "memory_notes"
+              "memory_notes",
+              "recorded_anime",
+              "memory_collections",
+              "yearly_albums"
             ]
           },
           "threshold": {
@@ -10637,6 +10843,11 @@
           },
           "showcase_slot": {
             "type": "integer"
+          },
+          "badge_image_id": {
+            "type": "string",
+            "pattern": "^([a-f0-9]{64})?$",
+            "description": "Immutable uploaded center artwork; empty uses the built-in motif."
           }
         },
         "required": [
@@ -10656,7 +10867,8 @@
           "unlocked_at",
           "granted",
           "notified",
-          "showcase_slot"
+          "showcase_slot",
+          "badge_image_id"
         ]
       },
       "AchievementBackfill": {
@@ -11129,6 +11341,27 @@
           "collections",
           "yearlies",
           "revisions"
+        ]
+      },
+      "AchievementImage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "width",
+          "height"
         ]
       }
     },

@@ -6,7 +6,14 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
 import { Problem } from "../public/Public";
-import { badgeMarks, metricNames } from "../memory/Achievements";
+import { AchievementBadge } from "../achievements/Badge";
+import {
+  badgeOptions,
+  metricNames,
+  badgeGrade,
+  badgeGrades,
+  metricDescriptions,
+} from "../achievements/presentation";
 type Rule = components["schemas"]["AchievementRule"];
 const blank: Rule = {
   id: "",
@@ -17,7 +24,8 @@ const blank: Rule = {
   title: "",
   description: "",
   badge: "spark",
-  metric: "watch_records",
+  badge_image_id: "",
+  metric: "recorded_anime",
   threshold: 1,
   active: true,
 };
@@ -115,8 +123,18 @@ export function AdminAchievements() {
                       {r.series_title} / {r.tier}
                     </td>
                     <td>
-                      {badgeMarks[r.badge]} {r.title}
-                      <small>修订 {r.revision}</small>
+                      <div className="badge-rule-cell">
+                        <AchievementBadge
+                          imageID={r.badge_image_id}
+                          badge={r.badge}
+                          tier={r.tier}
+                          size="small"
+                        />
+                        <div>
+                          {r.title}
+                          <small>修订 {r.revision}</small>
+                        </div>
+                      </div>
                     </td>
                     <td>
                       {metricNames[r.metric]} ≥ {r.threshold}
@@ -236,7 +254,10 @@ export function AdminAchievements() {
           </Button>
         </div>
         {jobs.data?.items.map((j) => (
-          <article className="admin-panel-body admin-section-divider" key={j.id}>
+          <article
+            className="admin-panel-body admin-section-divider"
+            key={j.id}
+          >
             <h3>
               {j.state === "preview"
                 ? "待确认预览"
@@ -285,6 +306,7 @@ export function AdminAchievements() {
       </section>
       {editing && (
         <RuleEditor
+          rules={rules.data?.items ?? []}
           value={editing}
           onClose={() => setEditing(null)}
           onSaved={refresh}
@@ -294,10 +316,12 @@ export function AdminAchievements() {
   );
 }
 function RuleEditor({
+  rules,
   value,
   onClose,
   onSaved,
 }: {
+  rules: Rule[];
   value: Rule;
   onClose: () => void;
   onSaved: () => Promise<unknown>;
@@ -313,19 +337,68 @@ function RuleEditor({
       onClose();
     },
   });
+  const upload = useMutation({
+    mutationFn: (file: File) =>
+      result(
+        client.POST("/api/v1/admin/achievements/images", {
+          body: "",
+          bodySerializer: () => file,
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+        }),
+      ),
+    onSuccess: (image) => set("badge_image_id", image.id),
+  });
+  const family = rules.find(
+    (r) => r.series_id === form.series_id && r.id !== form.id,
+  );
   return (
     <Dialog
       title={value.id ? "创建规则新修订" : "新增成就规则"}
       onClose={onClose}
+      wide
     >
       <form
-        className="editor-form"
+        className="editor-form achievement-rule-form"
         onSubmit={(e) => {
           e.preventDefault();
           save.mutate();
         }}
       >
-        <fieldset disabled={save.isPending}>
+        <fieldset
+          className="achievement-rule-fields"
+          disabled={save.isPending || upload.isPending}
+        >
+          <div className="badge-rule-preview" aria-label="徽章实时预览">
+            <AchievementBadge
+              imageID={form.badge_image_id}
+              badge={form.badge}
+              tier={form.tier}
+            />
+            <div>
+              <p>
+                {form.series_title || "新的纪念系列"} ·{" "}
+                {badgeGrade(form.tier).label} · 第 {form.tier} 级
+              </p>
+              <strong>{form.title || "为这枚徽章起个名字"}</strong>
+              <p>{form.description || "选一个图案，留下它与故事的联系。"}</p>
+            </div>
+          </div>
+          <div className="badge-grade-guide" aria-label="徽章边框等级预览">
+            {badgeGrades.map((grade, index) => (
+              <div key={grade.id}>
+                <AchievementBadge
+                  badge={form.badge}
+                  imageID={form.badge_image_id}
+                  tier={index + 1}
+                  size="medium"
+                />
+                <span>
+                  {index + 1}
+                  {index === 4 ? "+" : ""} · {grade.label}
+                </span>
+              </div>
+            ))}
+          </div>
           <label>
             系列标识
             <Input
@@ -366,7 +439,7 @@ function RuleEditor({
               onChange={(e) => set("title", e.target.value)}
             />
           </label>
-          <label>
+          <label className="achievement-rule-description">
             说明
             <textarea
               value={form.description}
@@ -374,24 +447,79 @@ function RuleEditor({
               onChange={(e) => set("description", e.target.value)}
             />
           </label>
-          <label>
-            图案
-            <select
-              aria-label="图案"
-              value={form.badge}
-              onChange={(e) => set("badge", e.target.value as Rule["badge"])}
-            >
-              {Object.entries(badgeMarks).map(([k, v]) => (
-                <option key={k} value={k}>
-                  {v} {k}
-                </option>
+          <fieldset className="badge-option-group">
+            <legend>徽章图案</legend>
+            <div className="badge-options">
+              {badgeOptions.map((option) => (
+                <label className="badge-option" key={option.value}>
+                  <input
+                    type="radio"
+                    name="achievement-badge"
+                    value={option.value}
+                    checked={form.badge === option.value}
+                    onChange={() => set("badge", option.value)}
+                  />
+                  <AchievementBadge
+                    badge={option.value}
+                    tier={form.tier}
+                    size="medium"
+                  />
+                  <span>{option.label}</span>
+                </label>
               ))}
-            </select>
-          </label>
+            </div>
+          </fieldset>
+          <div className="badge-upload">
+            <label>
+              上传系列主图
+              <Input
+                type="file"
+                accept="image/png,image/jpeg"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) upload.mutate(file);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            <p>
+              PNG / JPG，最多 2 MiB。建议使用方形透明
+              PNG；图片作为徽章中心，等级边框会自动保留。此图案将展示给能查看该成就的用户。
+            </p>
+            {upload.isPending && <p role="status">正在处理图案…</p>}
+            {form.badge_image_id && (
+              <Button
+                type="button"
+                className="button secondary"
+                onClick={() => set("badge_image_id", "")}
+              >
+                使用内置图案
+              </Button>
+            )}
+            {family && (
+              <Button
+                type="button"
+                className="button secondary"
+                onClick={() =>
+                  setForm((p) => ({
+                    ...p,
+                    badge: family.badge,
+                    badge_image_id: family.badge_image_id,
+                    series_title: family.series_title,
+                    metric: family.metric,
+                  }))
+                }
+              >
+                沿用本系列图案与统计条件
+              </Button>
+            )}
+            {upload.error && <Problem error={upload.error} />}
+          </div>
           <label>
             统计条件
             <select
               aria-label="统计条件"
+              aria-describedby="achievement-metric-description"
               value={form.metric}
               onChange={(e) => set("metric", e.target.value as Rule["metric"])}
             >
@@ -413,7 +541,13 @@ function RuleEditor({
               onChange={(e) => set("threshold", Number(e.target.value))}
             />
           </label>
-          <label>
+          <p
+            id="achievement-metric-description"
+            className="achievement-rule-description memory-meta"
+          >
+            {metricDescriptions[form.metric]}
+          </p>
+          <label className="achievement-rule-active">
             <Input
               type="checkbox"
               checked={form.active}
@@ -421,6 +555,9 @@ function RuleEditor({
             />
             启用规则
           </label>
+          <p className="achievement-rule-description memory-meta">
+            发布、重新启用或调整解锁门槛后，会自动为已有用户评估；由后台逐步完成，无需用户再次记录。同系列建议保持主图与统计条件一致，按门槛递增设置等级。
+          </p>
           <Button className="button primary">保存规则修订</Button>
         </fieldset>
         {save.error && <Problem error={save.error} />}
