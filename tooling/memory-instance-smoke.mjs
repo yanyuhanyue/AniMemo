@@ -219,8 +219,12 @@ export async function memoryInstanceSmoke({ image, previousImage = image }) {
         if (key !== "achievements")
           assert.deepEqual(upgraded.library[key], beforeUpgrade.library[key], `upgrade changed ${key}`);
       }
-      for (const unlock of beforeUpgrade.library.achievements.unlocks)
-        assert.deepEqual(upgraded.library.achievements.unlocks.find((u) => u.unlock_id === unlock.unlock_id), unlock);
+      for (const unlock of beforeUpgrade.library.achievements.unlocks) {
+        // RC2 omitted this field; RC4 explicitly represents built-in art as "".
+        const expected = structuredClone(unlock);
+        expected.rule.badge_image_id ??= "";
+        assert.deepEqual(upgraded.library.achievements.unlocks.find((u) => u.unlock_id === unlock.unlock_id), expected);
+      }
       assert.deepEqual(await call("GET", `/api/v1/memory/media/${media.id}`), png);
       mark("different-image upgrade preserves existing records, full memory library, private image bytes and historical achievement revisions");
     } else {
@@ -230,7 +234,7 @@ export async function memoryInstanceSmoke({ image, previousImage = image }) {
     const art = await call("POST", "/api/v1/admin/achievements/images", png, 201, true);
     const artBytes = await call("GET", `/api/v1/memory/achievement-images/${art.id}`);
     const customRule = await call("PUT", "/api/v1/admin/achievements/rules", {
-      series_id: `restore-art-${randomUUID()}`,
+      series_id: `restore-art-${randomUUID().slice(0, 8)}`,
       series_title: "恢复验收图案",
       tier: 3,
       title: "升级后自动获得的纪念",

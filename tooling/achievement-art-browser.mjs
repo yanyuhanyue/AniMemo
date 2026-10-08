@@ -179,9 +179,10 @@ try {
     );
     report.layouts.push({ width, fits: true });
     if (width === 1440 || width === 390) {
-      await admin.addScriptTag({
-        path: ".local/tools/browser/node_modules/axe-core/axe.min.js",
-      });
+      // Debugger evaluation keeps the production ban on inline scripts intact.
+      await admin.evaluate(
+        await readFile(".local/tools/browser/node_modules/axe-core/axe.min.js", "utf8"),
+      );
       const scan = await admin.evaluate(() =>
         window.axe.run(document, {
           runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21aa"] },
