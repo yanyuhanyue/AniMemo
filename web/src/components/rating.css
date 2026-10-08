@@ -1,0 +1,18 @@
+.rating { --rating-ink: #111; --rating-star: #c89120; display: inline-flex; align-items: center; gap: 4px; color: var(--rating-ink); font-family: var(--am-font-latin); font-variant-numeric: tabular-nums; white-space: nowrap; vertical-align: middle; line-height: 1.3; }
+.rating .rating-value { font-size: 1em; font-weight: 900; color: var(--rating-ink); }
+.rating > svg { width: 14px; height: 14px; color: var(--rating-star); fill: currentColor; flex-shrink: 0; }
+.rating > small { color: #766f7f; font-family: var(--am-font-body); font-size: 10px; font-weight: 400; }
+/* Original black → orange → red → pink/purple/indigo spectrum, with readable small text. */
+.rating--orange-red { --rating-ink: #bc4b08; --rating-star: #ea580c; }
+.rating--red { --rating-ink: #dc2626; --rating-star: #ea580c; }
+.rating--rainbow { --rating-ink: #8544b2; --rating-star: #a855f7; }
+.rating--rainbow .rating-value { background: linear-gradient(90deg,#bb2874,#8544b2 50%,#4f53bc); background-clip: text; -webkit-background-clip: text; color: transparent; }
+.rating--unrated { --rating-ink: #766f7f; font-family: var(--am-font-body); font-size: 12px; }
+.entry-cover-summary .rating { font-size: 19px; }
+.detail-badges .rating { font-size: 17px; }
+.universe-shell .rating--black { --rating-ink: #f6effb; }
+.universe-shell .rating--orange-red { --rating-ink: #ffb36d; }
+.universe-shell .rating--red { --rating-ink: #ff9292; }
+.universe-shell .rating--rainbow .rating-value { background-image: linear-gradient(90deg,#ff9acb,#d2a2ff 50%,#a9b2ff); }
+.universe-shell .rating > small { color: #c8bdd4; }
+@media (forced-colors: active) { .rating .rating-value { color: CanvasText; background: none; -webkit-text-fill-color: CanvasText; } }

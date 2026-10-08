@@ -5,6 +5,7 @@ import type { components } from "../api/schema";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
+import { Icon } from "../components/ui/Icon";
 import { Pager, Problem } from "../public/Public";
 import {
   AnimeSelect,
@@ -13,6 +14,7 @@ import {
   ShareMemory,
   Visibility,
   useMemoryRefresh,
+  useAnimeReference,
   visibilityLabels,
   type Note,
 } from "./shared";
@@ -66,7 +68,9 @@ export function NoteEditor({
     ...initialNote(note, kind, anime),
     ...(!note && animeTitle ? { title: animeTitle } : {}),
   }));
-  const [extras, setExtras] = useState(!animeTitle);
+  const [extras, setExtras] = useState(false);
+  const linkedAnime = useAnimeReference(userID, form.anime_id ?? "");
+  const linkedTitle = linkedAnime.data?.available ? linkedAnime.data.title : form.anime_id === anime ? animeTitle : undefined;
   const [references, setReferences] = useState(false);
   const [characterSearch, setCharacterSearch] = useState("");
   const [episodeSearch, setEpisodeSearch] = useState("");
@@ -209,7 +213,7 @@ export function NoteEditor({
       wide
     >
       <form
-        className="memory-form"
+        className="memory-form note-editor"
         onSubmit={(e) => {
           e.preventDefault();
           save.mutate();
@@ -238,9 +242,9 @@ export function NoteEditor({
               placeholder="一个片段、一句台词，或那天的心情…"
             />
           </label>
-          {animeTitle && (
+          {form.anime_id && (
             <p className="field-hint">
-              关联《{animeTitle}》 ·{" "}
+              {linkedTitle ? `关联《${linkedTitle}》` : "已关联作品"} ·{" "}
               {visibilityLabels[form.visibility ?? "private"]}
               。不记得日期和集数，也能留下这份回忆。
             </p>
@@ -585,11 +589,13 @@ export function Notes({
   userID,
   kind = "note",
   anime = "",
+  animeTitle,
   character = "",
 }: {
   userID: string;
   kind?: "note" | "moment";
   anime?: string;
+  animeTitle?: string;
   character?: string;
 }) {
   const [search, setSearch] = useState("");
@@ -646,28 +652,24 @@ export function Notes({
     },
   });
   return (
-    <>
+    <section className="notes-page">
       <header className="memory-section-heading">
         <div>
-          <p className="eyebrow">
-            {kind === "moment"
-              ? "LITTLE SCENES, LASTING FEELINGS"
-              : "A PLACE FOR YOUR STORIES"}
-          </p>
           <h2>{kind === "moment" ? "值得留住的瞬间" : "记忆札记"}</h2>
           <p>
             {kind === "moment"
               ? "把那一帧和当时的心情放在一起。"
-              : "不只记住看过什么，也记住那时的自己。"}
+              : "留下一段感想，也留住当时的自己。"}
           </p>
         </div>
         <Button className="button primary" onClick={() => setEditor(null)}>
+          <Icon name="plus" />
           {kind === "moment" ? "收藏瞬间" : "写一页记忆"}
         </Button>
       </header>
-      <div className="memory-filters">
-        <label>
-          查找记忆
+      <div className="memory-filters notes-filters">
+        <label className="notes-search">
+          <span className="sr-only">查找记忆</span><Icon name="search" />
           <Input
             type="search"
             value={search}
@@ -679,8 +681,8 @@ export function Notes({
             }}
           />
         </label>
-        <label>
-          年份
+        <label className="notes-year">
+          <span className="sr-only">年份</span>
           <Input
             type="number"
             min={1900}
@@ -693,7 +695,7 @@ export function Notes({
             }}
           />
         </label>
-        <label className="memory-check">
+        <label className="memory-check notes-highlight">
           <Input
             type="checkbox"
             checked={highlight}
@@ -702,7 +704,7 @@ export function Notes({
               setPage(1);
             }}
           />
-          只看珍藏
+          <Icon name="star" />只看珍藏
         </label>
       </div>
       {q.isPending ? (
@@ -711,6 +713,7 @@ export function Notes({
         <Problem error={q.error} />
       ) : (
         <>
+          <p className="notes-result-count">{q.data.total} {kind === "moment" ? "个瞬间" : "篇札记"}{(search || year || highlight) && " · 筛选结果"}</p>
           <div
             className={
               kind === "moment" ? "memory-gallery" : "memory-note-list"
@@ -722,12 +725,7 @@ export function Notes({
                   <MemoryImage id={n.media_ids[0]} small />
                 )}
                 <div>
-                  <p className="memory-meta">
-                    {n.occurred_on || "不记日期"}
-                    {n.time_precision === "approximate" ? " · 大约" : ""} ·{" "}
-                    {visibilityLabels[n.visibility]}
-                    {n.highlight ? " · 珍藏" : ""}
-                  </p>
+                  <div className="note-card-meta"><span><Icon name="clock" />{n.occurred_on || "日期未记"}{n.time_precision === "approximate" ? " · 大约" : ""}</span>{n.highlight ? <span className="note-highlight"><Icon name="star" />珍藏</span> : <span>{visibilityLabels[n.visibility]}</span>}</div>
                   <h3>
                     <Button
                       className="memory-title-button"
@@ -740,34 +738,36 @@ export function Notes({
                     </Button>
                   </h3>
                   {n.spoiler ? (
-                    <p className="muted">包含剧透，打开后可展开。</p>
+                    <p className="note-spoiler">包含剧透 · 打开后查看</p>
                   ) : (
                     <p className="memory-excerpt">
                       {n.body || "一帧画面，也是一段记忆。"}
                     </p>
                   )}
-                  <div className="entry-tags">
+                  <div className="note-card-footer"><div className="entry-tags">
                     {n.tags.map((t) => (
                       <span key={t}>{t}</span>
                     ))}
                   </div>
+                  <Button className="text-button note-read" aria-label={'阅读 ' + n.title} onClick={() => { setOpened(n); setConfirm(false); }}>阅读<Icon name="arrow" /></Button></div>
                 </div>
               </article>
             ))}
           </div>
           {!q.data.items.length && (
             <div className="memory-empty">
-              <span>✦</span>
-              <h3>这一页，等你写下</h3>
-              <p>新的记忆会留在这里，随时可以找回。</p>
+              <Icon name="book" />
+              <h3>{search || year || highlight ? "没有找到匹配的记忆" : animeTitle ? '写下关于《' + animeTitle + '》的第一份记忆' : "从一段想留下的回忆开始"}</h3>
+              <p>{search || year || highlight ? "试试其他关键词，或清除筛选条件。" : "一句感想、一个片段就可以。日期和集数可以以后再补。"}</p>
+              <Button className="button secondary" onClick={() => { if(search || year || highlight) { setSearch(''); setYear(''); setHighlight(false); setPage(1); } else setEditor(null); }}>{search || year || highlight ? "清除筛选" : "写下第一份记忆"}</Button>
             </div>
           )}
-          <Pager
+          {q.data.total > q.data.page_size && <Pager
             page={page}
             total={q.data.total}
             size={q.data.page_size}
             onChange={setPage}
-          />
+          />}
         </>
       )}
       {editor !== undefined && (
@@ -776,12 +776,13 @@ export function Notes({
           note={editor}
           kind={kind}
           anime={anime}
+          animeTitle={animeTitle}
           onClose={() => setEditor(undefined)}
         />
       )}
       {opened && (
         <Dialog title={opened.title} onClose={() => setOpened(null)} wide>
-          <div className="memory-reading">
+          <div className="memory-reading note-reading">
             <p className="memory-meta">
               {opened.occurred_on || "不记日期"} ·{" "}
               {visibilityLabels[opened.visibility]}
@@ -848,7 +849,7 @@ export function Notes({
       {sharing && (
         <ShareMemory kind="note" id={sharing} onClose={() => setSharing("")} />
       )}
-    </>
+    </section>
   );
 }
 function NoteBody({ note }: { note: Note }) {

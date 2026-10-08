@@ -45,6 +45,16 @@ export function useMemoryRefresh(userID: string) {
   const cache = useQueryClient();
   return () => cache.invalidateQueries({ queryKey: ["memory", userID] });
 }
+export function useAnimeReference(userID: string, anime: string) {
+  return useQuery({
+    queryKey: ["memory", userID, "anime-reference", anime],
+    enabled: !!anime,
+    queryFn: ({ signal }) => result(client.POST("/api/v1/memory/references", {
+      signal, body: { items: [{ kind: "anime", id: anime }] },
+    })),
+    select: data => data.items[0],
+  });
+}
 export function useAnimeOptions(userID: string, search = "") {
   return useQuery({
     queryKey: ["memory", userID, "anime-options", search],

@@ -5,20 +5,23 @@ import type { components } from "../api/schema";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
+import { Icon } from "../components/ui/Icon";
 import { Pager, Problem } from "../public/Public";
 import { AnimeSelect, useMemoryRefresh, type Episode } from "./shared";
 import { IdentityMerge } from "./Characters";
-const roles = { required: "必看", optional: "可选", excluded: "排除" };
+const roles = { required: "计入范围", optional: "可选", excluded: "不计入范围" };
 const kinds = { main: "正篇", special: "特别篇", ova: "OVA", movie: "剧场版" };
 export function Episodes({
   userID,
-  initialAnime = "",
+  anime = "",
+  onAnimeChange,
 }: {
   userID: string;
-  initialAnime?: string;
+  anime?: string;
+  onAnimeChange: (id: string) => void;
 }) {
   const [batch, setBatch] = useState(false);
-  const [anime, setAnime] = useState(initialAnime);
+  const [recording, setRecording] = useState(false);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [editor, setEditor] = useState<Episode | null | undefined>();
@@ -64,6 +67,7 @@ export function Episodes({
     onSuccess: async () => {
       setSelected([]);
       setNote("");
+      setRecording(false);
       await refresh();
     },
   });
@@ -78,222 +82,60 @@ export function Episodes({
     onSuccess: refresh,
   });
   return (
-    <>
+    <section className="episode-page" aria-label="集数整理">
       <header className="memory-section-heading">
-        <div>
-          <p className="eyebrow">EVERY CHAPTER HAS A PLACE</p>
-          <h2>长篇与集数</h2>
-          <p>正篇、特别篇与追平范围，分别记清楚。</p>
-        </div>
-        <Button
-          className="button primary"
-          disabled={!anime}
-          onClick={() => setEditor(null)}
-        >
-          添加集数
-        </Button>
-        <Button
-          className="button secondary"
-          disabled={!anime}
-          onClick={() => setBatch(true)}
-        >
-          批量建立目录
-        </Button>
+        <div><h2>集数目录</h2><p>整理篇章，为记忆找到具体的一集。</p></div>
+        {anime && <div className="memory-heading-actions">
+          <Button className="button secondary" onClick={() => setBatch(true)}>批量添加</Button>
+          <Button className="button primary" onClick={() => setEditor(null)}><Icon name="plus" />添加集数</Button>
+        </div>}
       </header>
-      <AnimeSelect
-        userID={userID}
-        value={anime}
-        onChange={(id) => {
-          setAnime(id);
-          setPage(1);
-          setSelected([]);
-        }}
-        required
-      />
-      {anime && (
-        <>
-          <div className="memory-filters">
-            <label>
-              搜索集数
-              <Input
-                value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
-              />
-            </label>
+      {!anime ? <section className="memory-panel episode-pick-work"><Icon name="book" /><h3>先选择一部作品</h3><p>打开这部作品的目录、观看范围和系列关系。</p><AnimeSelect userID={userID} value={anime} onChange={onAnimeChange} required /></section> : <div className="episode-workspace">
+        <section className="episode-catalog" aria-label="集数目录列表">
+          <div className="episode-catalog-toolbar">
+            <strong>{q.data ? q.data.total + ' 个集数' : '集数列表'}</strong>
+            <label className="episode-search"><Icon name="search" /><span className="sr-only">搜索集数</span><Input type="search" value={search} placeholder="查找集数标题" maxLength={160} onChange={e => { setSearch(e.target.value); setPage(1); }} /></label>
           </div>
-          {q.error ? (
-            <Problem error={q.error} />
-          ) : q.isPending ? (
-            <p role="status">读取集数目录…</p>
-          ) : (
-            <>
-              <div className="memory-episode-list">
-                {q.data.items.map((e) => (
-                  <article key={e.id}>
-                    <label className="memory-check">
-                      <Input
-                        type="checkbox"
-                        aria-label={`选择 ${e.title}`}
-                        disabled={
-                          !!e.redirect_id || e.progress_role === "excluded"
-                        }
-                        checked={selected.some((v) => v.id === e.id)}
-                        onChange={(event) =>
-                          setSelected((prev) =>
-                            event.target.checked
-                              ? [...prev, { id: e.id, version: e.version }]
-                              : prev.filter((v) => v.id !== e.id),
-                          )
-                        }
-                      />
-                      <span className="memory-episode-number">{e.number}</span>
-                    </label>
-                    <div>
-                      <h3>{e.title}</h3>
-                      <p className="memory-meta">
-                        {kinds[e.kind]} · {roles[e.progress_role]}
-                        {e.redirect_id ? " · 已归并" : ""}
-                      </p>
-                    </div>
-                    <div className="memory-row-actions">
-                      <Button
-                        className="text-button"
-                        onClick={() => setEditor(e)}
-                      >
-                        编辑
-                      </Button>
-                      <Button
-                        className="text-button"
-                        onClick={() => setMerge(e)}
-                      >
-                        归并
-                      </Button>
-                      {e.redirect_id && (
-                        <Button
-                          className="text-button"
-                          onClick={() => split.mutate(e)}
-                        >
-                          恢复独立身份
-                        </Button>
-                      )}
-                    </div>
-                  </article>
-                ))}
-              </div>
-              {!q.data.items.length && (
-                <p className="memory-empty">
-                  还没有正式集数目录，添加集数不会生成观看记录。
-                </p>
-              )}
-              <Pager
-                page={page}
-                size={q.data.page_size}
-                total={q.data.total}
-                onChange={setPage}
-              />
-            </>
-          )}
-          <section className="memory-panel">
-            <h3>保留一次进度表达</h3>
-            <p className="muted">
-              所选 {selected.length}{" "}
-              话会固定为当次范围。目录之后新增或调整，不会改变这个快照，也不会生成逐话观看记录。
-            </p>
-            <div className="memory-form-grid">
-              <label>
-                观看范围
-                <select
-                  aria-label="观看范围"
-                  value={scope}
-                  onChange={(e) => setScope(e.target.value as typeof scope)}
-                >
-                  <option value="custom">自定义</option>
-                  <option value="mainline">主线</option>
-                  <option value="all">全部类型</option>
-                </select>
-              </label>
-              <label>
-                进度精度
-                <select
-                  aria-label="进度精度"
-                  value={precision}
-                  onChange={(e) =>
-                    setPrecision(e.target.value as typeof precision)
-                  }
-                >
-                  <option value="exact">确定看到这里</option>
-                  <option value="approximate">大约看到这里</option>
-                  <option value="caught_up">当时已追平</option>
-                </select>
-              </label>
+          {recording && <div className="episode-selection-hint"><span>选择要记下的集数 · 已选 {selected.length} 话</span><Button className="text-button" onClick={() => setSelected([])}>清空选择</Button></div>}
+          {q.error ? <Problem error={q.error} /> : q.isPending ? <p className="memory-loading" role="status">正在读取集数目录…</p> : <>
+            <div className="memory-episode-list">
+              {q.data.items.map(e => <article key={e.id} data-selected={selected.some(v => v.id === e.id) || undefined}>
+                {recording && <label className="memory-check episode-select"><Input type="checkbox" aria-label={'选择 ' + e.title} disabled={!!e.redirect_id || e.progress_role === 'excluded'} checked={selected.some(v => v.id === e.id)} onChange={event => setSelected(prev => event.target.checked ? [...prev, {id: e.id, version: e.version}] : prev.filter(v => v.id !== e.id))} /></label>}
+                <span className="memory-episode-number"><small>{e.kind === 'main' ? 'EP' : e.kind === 'special' ? 'SP' : e.kind.toUpperCase()}</small>{String(e.number).padStart(2,'0')}</span>
+                <div className="episode-title"><h3>{e.title}</h3><p className="memory-meta"><span className={'episode-kind kind-' + e.kind}>{kinds[e.kind]}</span><span>{roles[e.progress_role]}</span>{e.redirect_id && <span>已归并</span>}</p></div>
+                <div className="memory-row-actions"><Button className="icon-button" aria-label={'编辑 ' + e.title} onClick={() => setEditor(e)}><Icon name="edit" /></Button><details className="episode-more"><summary aria-label={e.title + '的更多操作'}>更多</summary><div><Button className="text-button" onClick={() => setMerge(e)}>归并重复集数</Button>{e.redirect_id && <Button className="text-button" onClick={() => split.mutate(e)}>恢复独立身份</Button>}</div></details></div>
+              </article>)}
             </div>
-            <label>
-              补充说明
-              <Input
-                value={note}
-                maxLength={4000}
-                onChange={(e) => setNote(e.target.value)}
-              />
-            </label>
-            <Button
-              className="button primary"
-              disabled={!selected.length || assert.isPending}
-              onClick={() => assert.mutate()}
-            >
-              保存范围快照
-            </Button>
+            {!q.data.items.length && <div className="memory-empty episode-empty"><Icon name="book" /><h3>{search ? '没有找到这集' : '还没有集数目录'}</h3><p>{search ? '换个标题关键词试试。' : '可以逐集添加，也可以批量建立目录。\n添加目录不会生成观看记录。'}</p>{search ? <Button className="button secondary" onClick={() => setSearch('')}>清除搜索</Button> : <Button className="button secondary" onClick={() => setEditor(null)}>从第一集开始</Button>}</div>}
+            {q.data.total > q.data.page_size && <Pager page={page} size={q.data.page_size} total={q.data.total} onChange={setPage} />}
+          </>}
+        </section>
+        <aside className="episode-side">
+          <section className="episode-range-panel">
+            <div className="episode-panel-heading"><Icon name="check" /><h3>记下观看范围</h3></div>
+            {recording ? <>
+              <p className="episode-selected-count">已选择 <strong>{selected.length}</strong> 话</p>
+              <label>观看范围<select aria-label="观看范围" value={scope} onChange={e => setScope(e.target.value as typeof scope)}><option value="custom">自定义范围</option><option value="mainline">正篇主线</option><option value="all">包含全部类型</option></select></label>
+              <label>记得有多清楚<select aria-label="进度精度" value={precision} onChange={e => setPrecision(e.target.value as typeof precision)}><option value="exact">确定看过所选集数</option><option value="approximate">大约看到这里</option><option value="caught_up">当时已看到已播部分</option></select></label>
+              <label>补充说明<textarea value={note} rows={3} maxLength={4000} onChange={e => setNote(e.target.value)} placeholder="例如：那年暑假看到这里" /></label>
+              <p className="field-hint">保留本次选择的范围，不会生成逐话观看记录。</p>
+              <Button className="button primary" disabled={!selected.length || assert.isPending} onClick={() => assert.mutate()}>{assert.isPending ? '正在保存…' : '保存观看范围'}</Button>
+              <Button className="text-button" disabled={assert.isPending} onClick={() => { setRecording(false); setSelected([]); }}>取消选择</Button>
+            </> : <><p>记得看过哪些集数时，可以把范围留在这里。记不清，也可以只写一篇回忆。</p><Button className="button secondary" disabled={!q.data?.total} onClick={() => setRecording(true)}>选择集数并记录</Button></>}
             {assert.error && <Problem error={assert.error} />}
-            <details>
-              <summary>已保存的进度快照</summary>
-              {snapshots.data?.items.map((p) => (
-                <p key={p.id}>
-                  {new Date(p.created_at).toLocaleDateString("zh-CN")} ·{" "}
-                  {p.episode_ids.length} 话 ·{" "}
-                  {p.precision === "caught_up"
-                    ? "当时已追平"
-                    : p.precision === "approximate"
-                      ? "近似进度"
-                      : "精确范围"}{" "}
-                  {p.note}
-                </p>
-              ))}
-            </details>
           </section>
+          <details className="episode-saved-ranges"><summary>已保存的观看范围<span>{snapshots.data?.items.length ?? 0}</span></summary>{snapshots.data?.items.length ? snapshots.data.items.map(p => <article key={p.id}><strong>{p.episode_ids.length} 话 · {p.precision === 'caught_up' ? '当时看到已播部分' : p.precision === 'approximate' ? '大约的范围' : '确定看过'}</strong><small>记录于 {new Date(p.created_at).toLocaleDateString('zh-CN')}</small>{p.note && <p>{p.note}</p>}</article>) : <p className="muted">还没有保存过观看范围。</p>}</details>
           <Franchise userID={userID} anime={anime} />
-        </>
-      )}
-      {batch && (
-        <EpisodeBatch
-          userID={userID}
-          anime={anime}
-          onClose={() => setBatch(false)}
-        />
-      )}{" "}
-      {editor !== undefined && (
-        <EpisodeEditor
-          userID={userID}
-          anime={anime}
-          episode={editor}
-          onClose={() => setEditor(undefined)}
-        />
-      )}{" "}
-      {merge && (
-        <IdentityMerge
-          userID={userID}
-          kind="episode"
-          resource={merge}
-          onClose={() => setMerge(null)}
-        />
-      )}{" "}
-      {(split.error || snapshots.error) && (
-        <Problem error={split.error || snapshots.error} />
-      )}
-    </>
+        </aside>
+      </div>}
+      {batch && <EpisodeBatch userID={userID} anime={anime} onClose={() => setBatch(false)} />}
+      {editor !== undefined && <EpisodeEditor userID={userID} anime={anime} episode={editor} onClose={() => setEditor(undefined)} />}
+      {merge && <IdentityMerge userID={userID} kind="episode" resource={merge} onClose={() => setMerge(null)} />}
+      {(split.error || snapshots.error) && <Problem error={split.error || snapshots.error} />}
+    </section>
   );
 }
+
 function EpisodeEditor({
   userID,
   anime,
@@ -398,9 +240,9 @@ function EpisodeEditor({
             </select>
           </label>
           <label>
-            在观看范围中的角色
+                是否计入观看范围
             <select
-              aria-label="在观看范围中的角色"
+              aria-label="是否计入观看范围"
               value={role}
               onChange={(e) => setRole(e.target.value as typeof role)}
             >
@@ -540,10 +382,7 @@ function EpisodeBatch({
           save.mutate();
         }}
       >
-        <p>
-          将明确创建第 {from}–{to} 话，共 {Math.max(0, to - from + 1)}{" "}
-          个本地身份。不会自动记录观看；范围与已有同类型集数重叠时，整批拒绝。
-        </p>
+        <p className="field-hint">将添加第 {from}–{to} 话，共 {Math.max(0, to - from + 1)} 集。若编号与现有目录重复，请调整范围后再保存。建立目录不会记录观看。</p>
         <fieldset disabled={save.isPending}>
           <label>
             起始编号
@@ -580,9 +419,9 @@ function EpisodeBatch({
             </select>
           </label>
           <label>
-            观看角色
+            是否计入观看范围
             <select
-              aria-label="观看角色"
+              aria-label="是否计入观看范围"
               value={role}
               onChange={(e) =>
                 setRole(e.target.value as Episode["progress_role"])

@@ -12,6 +12,8 @@ import { Yearlies, YearlyItems } from "./Yearly";
 import { MemoryMediaManager } from "./Media";
 import { Achievements } from "./Achievements";
 import { MemorySearch } from "./Search";
+import { AnimeSelect, useAnimeReference } from "./shared";
+import { Rating } from "../components/Rating";
 import "./memory.css";
 const tabs = {
   search: "找回记忆",
@@ -39,21 +41,32 @@ function currentTab(): Tab {
 }
 export function MemoryWorkspace({ user }: { user: User }) {
   const [tab, setTab] = useState(currentTab);
+  const [anime, setAnime] = useState(() => new URLSearchParams(location.search).get("anime_id") ?? "");
+  const [choosingAnime, setChoosingAnime] = useState(false);
+  const reference = useAnimeReference(user.id, anime);
+  const animeTitle = reference.data?.available ? reference.data.title : undefined;
+  const scoped = !!anime && ["notes", "moment", "episodes", "search"].includes(tab);
   const [showTools, setShowTools] = useState(() =>
-    extraTabs.includes(currentTab()),
+    extraTabs.includes(currentTab()) && !(anime && currentTab() === "episodes"),
   );
-  const anime = new URLSearchParams(location.search).get("anime_id") ?? "";
   const character =
     new URLSearchParams(location.search).get("character_id") ?? "";
   useEffect(() => {
     const changed = () => {
       const next = currentTab();
       setTab(next);
-      if (extraTabs.includes(next)) setShowTools(true);
+      if (extraTabs.includes(next) && !(anime && next === "episodes")) setShowTools(true);
     };
     addEventListener("hashchange", changed);
     return () => removeEventListener("hashchange", changed);
-  }, []);
+  }, [anime]);
+  function changeAnime(id: string) {
+    const url = new URL(location.href);
+    if (id) url.searchParams.set("anime_id", id); else url.searchParams.delete("anime_id");
+    history.replaceState(null, "", url);
+    setAnime(id);
+    setChoosingAnime(false);
+  }
   function navigate(value: Tab) {
     location.hash = value;
     setTab(value);
@@ -96,19 +109,21 @@ export function MemoryWorkspace({ user }: { user: User }) {
       </header>
       <main className="memory-main" id="memory-main">
         <section className="memory-intro">
-          <p className="eyebrow">MY ANIME, MY MEMORIES</p>
-          <h1>
-            故事之外，<span>还有你。</span>
-          </h1>
-          <p>那些陪伴过你的作品、角色，和不想忘记的片刻。</p>
+          <div className="memory-breadcrumb"><a href="/">我的番剧</a><Icon name="chevron" /><span>{scoped ? "作品记忆" : "记忆库"}</span></div>
+          <div className="memory-context-heading"><div><h1>{scoped ? animeTitle || (reference.isPending ? "正在读取作品…" : "作品记忆") : "我的记忆库"}</h1><p>{scoped ? "与这部作品有关的文字、片段和观看记忆。" : "把看过的故事，写进自己的记忆。"}</p></div>{scoped && <div className="memory-context-actions"><Button className="button secondary" aria-expanded={choosingAnime} onClick={() => setChoosingAnime(!choosingAnime)}>更换作品</Button><a href={`/memory#${tab}`}>查看全部记忆<Icon name="arrow" /></a></div>}</div>
+          {scoped && choosingAnime && <div className="memory-context-picker"><AnimeSelect userID={user.id} value={anime} onChange={changeAnime} required /></div>}
+          {reference.error && <Problem error={reference.error} />}
         </section>
+        <div className="memory-workspace">
+        <aside className="memory-sidebar" aria-label="记忆导航">
         <nav className="memory-tabs" aria-label="记忆分类">
-          {primaryTabs.map((key) => (
+          {(anime ? ["notes", "moment", "episodes", "collections", "yearly", "search"] as Tab[] : primaryTabs).map((key) => (
             <Button
               key={key}
               aria-current={tab === key ? "page" : undefined}
               onClick={() => navigate(key as Tab)}
             >
+              <Icon name={key === "notes" ? "book" : key === "moment" ? "sparkle" : key === "episodes" ? "play" : key === "collections" ? "tag" : key === "yearly" ? "clock" : "search"} />
               {tabs[key]}
             </Button>
           ))}
@@ -119,13 +134,10 @@ export function MemoryWorkspace({ user }: { user: User }) {
           onToggle={(e) => setShowTools(e.currentTarget.open)}
         >
           <summary>
-            更多整理工具{extraTabs.includes(tab) ? ` · ${tabs[tab]}` : ""}
+            更多整理工具
           </summary>
-          <p className="field-hint">
-            角色、集数、图片管理和徽章按需使用，写回忆不需要先整理它们。
-          </p>
           <nav className="memory-tabs" aria-label="更多整理工具">
-            {extraTabs.map((key) => (
+            {extraTabs.filter(key => !anime || key !== "episodes").map((key) => (
               <Button
                 key={key}
                 aria-current={tab === key ? "page" : undefined}
@@ -136,34 +148,34 @@ export function MemoryWorkspace({ user }: { user: User }) {
             ))}
           </nav>
         </details>
-        {anime && (
-          <p className="memory-context">
-            正在查看一部作品的关联记忆 · <a href={`/memory#${tab}`}>查看全部</a>
-          </p>
-        )}
+        </aside>
+        <div className="memory-content">
         {tab === "search" && (
           <MemorySearch userID={user.id} anime={anime} character={character} />
         )}{" "}
         {tab === "notes" && (
-          <Notes userID={user.id} anime={anime} character={character} />
+          <Notes key={`notes:${anime}`} userID={user.id} anime={anime} animeTitle={animeTitle} character={character} />
         )}
         {tab === "moment" && (
           <Notes
-            key="moment"
+            key={`moment:${anime}`}
             userID={user.id}
             kind="moment"
             anime={anime}
+            animeTitle={animeTitle}
             character={character}
           />
         )}
         {tab === "characters" && <Characters userID={user.id} />}
         {tab === "episodes" && (
-          <Episodes userID={user.id} initialAnime={anime} />
+          <Episodes key={anime} userID={user.id} anime={anime} onAnimeChange={changeAnime} />
         )}
         {tab === "collections" && <Collections userID={user.id} />}
         {tab === "yearly" && <Yearlies userID={user.id} />}
         {tab === "achievements" && <Achievements userID={user.id} />}{" "}
         {tab === "media" && <MemoryMediaManager userID={user.id} />}
+        </div>
+        </div>
         <footer className="site-footer">
           <span>AniMemo.</span>
           <p>留住当时的心情，也给以后的自己。</p>
@@ -229,7 +241,7 @@ export function Universe({ user }: { user: User }) {
                   )}
                   <div>
                     <p>
-                      {e.score ? `${e.score} 分 · ` : ""}
+                      {e.score !== null && <><Rating score={e.score} /> · </>}
                       {e.original_title || "藏在心里的故事"}
                     </p>
                     <h2>{e.title}</h2>

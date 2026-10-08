@@ -1,3 +1,4 @@
+import { Rating } from '../components/Rating';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { useState } from 'react';
@@ -60,7 +61,7 @@ export function Connections({ userID }: { userID: string }) {
 
 function ValueSummary({ value, absent }: { value?: Value | null; absent: string }) {
   if (!value) return <p className="muted">{absent}</p>;
-  return <dl className="sync-values"><div><dt>状态</dt><dd>{statusLabels[value.status]}</dd></div><div><dt>评分</dt><dd>{value.score || '未评分'}</dd></div><div><dt>进度</dt><dd>{value.progress} 话</dd></div><div><dt>标签</dt><dd>{value.tags.join('、') || '无'}</dd></div><div><dt>短评</dt><dd>{value.notes || '无'}</dd></div></dl>;
+  return <dl className="sync-values"><div><dt>状态</dt><dd>{statusLabels[value.status]}</dd></div><div><dt>评分</dt><dd><Rating score={value.score || null} label="评分" /></dd></div><div><dt>进度</dt><dd>{value.progress} 话</dd></div><div><dt>标签</dt><dd>{value.tags.join('、') || '无'}</dd></div><div><dt>短评</dt><dd>{value.notes || '无'}</dd></div></dl>;
 }
 function SyncPreview({ job, busy, onApply }: { job: Job; busy: boolean; onApply: (choices: components['schemas']['SyncAction']['choices']) => void }) {
   const [choices, setChoices] = useState<Record<string, Action>>({});

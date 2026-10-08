@@ -1,6 +1,10 @@
 /* Internal product tokens, not a stable third-party theme interface. */
 :root {
   color-scheme: light;
+  /* Same self-hosted type families as the original AniMemo. */
+  --am-font-body: "Noto Sans SC", sans-serif;
+  --am-font-latin: "Arial Black", "Noto Sans SC", sans-serif;
+  --am-font-japanese: "Yu Gothic UI", "Meiryo", "Noto Sans SC", sans-serif;
   /* Foundation: palette and dimensions. */
   --am-violet-900: #342c50;
   --am-violet-600: #8062b8;

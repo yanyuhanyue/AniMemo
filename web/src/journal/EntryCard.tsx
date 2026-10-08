@@ -5,6 +5,7 @@ import { Icon } from "../components/ui/Icon";
 import { formatLabels, statusLabels } from "./labels";
 import { CoverImage } from "./CoverImage";
 import { TagChip } from "./ManageTools";
+import { Rating } from "../components/Rating";
 
 export function EntryCard({
   entry,
@@ -39,13 +40,7 @@ export function EntryCard({
         <div className="entry-cover-copy">
         <div className="cover-heading">
           <span>{formatLabels[entry.format]}</span>
-          {entry.score !== null && (
-            <span className="cover-score">
-              <Icon name="star" />
-              {entry.score}
-              <small>/10</small>
-            </span>
-          )}
+          {entry.score !== null && <Rating score={entry.score} />}
         </div>
         <div className="cover-title">
           <h3>{entry.title}</h3>

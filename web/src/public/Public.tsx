@@ -1,3 +1,4 @@
+import { Rating } from '../components/Rating';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { useState } from 'react';
@@ -20,7 +21,7 @@ export function PublicCard({ item, detail = false }: { item: PublicItem; detail?
   const { entry: e, owner } = item;
   return <article className={`public-card ${detail ? 'public-detail' : ''}`} data-accent={e.accent}>
     {e.cover_revision && <a href={`/s/${e.slug}`} tabIndex={detail ? -1 : 0}><img className="public-cover" src={`/api/v1/public/shared/${e.slug}/cover/${e.cover_revision}`} alt={`${e.title} 封面`} loading="lazy" /></a>}
-    <div className="public-card-body"><p className="eyebrow">{formatLabels[e.format]} · {statusLabels[e.status]}</p><h2>{detail ? e.title : <a href={`/s/${e.slug}`}>{e.title}</a>}</h2>{e.original_title && <p className="muted">{e.original_title}</p>}<p>已看 {e.watched_episodes} / {e.total_episodes || '—'} 话 {e.score !== null && ` · ${e.score} 分`}</p><div className="entry-tags">{e.tags.map(t => <span key={t}>{t}</span>)}</div>{e.notes && <p className={detail ? 'preserve-lines' : 'public-excerpt'}>{e.notes}</p>}{detail && <><p>{[e.details.studio, e.details.airing_period].filter(Boolean).join(' · ')}</p><p className="preserve-lines">{e.details.description}</p>{e.details.reference_url && <a href={e.details.reference_url} target="_blank" rel="noopener noreferrer">作品资料 ↗</a>}</>}<p className="muted">收藏于 <a href={`/u/${owner.slug}`}>{owner.name}</a> 的手账</p></div>
+    <div className="public-card-body"><p className="eyebrow">{formatLabels[e.format]} · {statusLabels[e.status]}</p><h2>{detail ? e.title : <a href={`/s/${e.slug}`}>{e.title}</a>}</h2>{e.original_title && <p className="muted">{e.original_title}</p>}<p>已看 {e.watched_episodes} / {e.total_episodes || '—'} 话 {e.score !== null && <> · <Rating score={e.score} /></>}</p><div className="entry-tags">{e.tags.map(t => <span key={t}>{t}</span>)}</div>{e.notes && <p className={detail ? 'preserve-lines' : 'public-excerpt'}>{e.notes}</p>}{detail && <><p>{[e.details.studio, e.details.airing_period].filter(Boolean).join(' · ')}</p><p className="preserve-lines">{e.details.description}</p>{e.details.reference_url && <a href={e.details.reference_url} target="_blank" rel="noopener noreferrer">作品资料 ↗</a>}</>}<p className="muted">收藏于 <a href={`/u/${owner.slug}`}>{owner.name}</a> 的手账</p></div>
   </article>;
 }
 export function Explore() {

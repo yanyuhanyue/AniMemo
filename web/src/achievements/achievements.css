@@ -69,7 +69,7 @@
   white-space: nowrap;
 }
 .achievement-showcase > header > p span {
-  font: 12px sans-serif;
+  font: 12px var(--am-font-body);
 }
 .achievement-showcase-help {
   color: #756578;
