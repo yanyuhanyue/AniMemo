@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { composeArguments, dockerEnvironment } from './docker.mjs';
 import { smokeContainers } from './container-smoke.mjs';
 import { parseIntegrations } from './integrations.mjs';
+import { sourceVersion, versionFlags } from './version.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const local = path.join(root, '.local');
@@ -117,7 +118,7 @@ function setupToken() {
 function compose(...args) {
   if (!config.databasePassword) throw new Error('Run npm run db:start first.');
   const environment = dockerEnvironment({ ...env, POSTGRES_PASSWORD: config.databasePassword, ANIMEMO_SETUP_TOKEN: setupToken(), ANIMEMO_SECRET_KEY: secretKey(), PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || 'http://127.0.0.1:18081' });
-  return run('docker', [...composeArguments(environment), ...args], { env: environment });
+  return run('docker', [...composeArguments(environment), '--profile', 'runtime-worker', ...args], { env: environment });
 }
 
 async function dbStop() {
@@ -162,10 +163,10 @@ async function checkAPI() {
 async function build() {
   await node('node_modules/typescript/bin/tsc', '--noEmit');
   await node('node_modules/vite/bin/vite.js', 'build', '--config', 'web/vite.config.ts');
-  await goRun('build', '-trimpath', '-o', executable, './cmd/animemo');
+  await goRun('build', '-trimpath', '-ldflags', versionFlags(await sourceVersion()), '-o', executable, './cmd/animemo');
 }
 
-function testNode() { return node('--test', 'tooling/ci-select.test.mjs', 'tooling/container-smoke.test.mjs', 'tooling/integrations.test.mjs', 'web/tests/session.test.mjs'); }
+function testNode() { return node('--test', 'tooling/*.test.mjs', 'web/tests/*.test.mjs'); }
 
 async function testAPI(...args) {
   env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || databaseURL();
@@ -185,8 +186,8 @@ async function dev() {
   env.PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || 'http://127.0.0.1:5177';
   env.LISTEN_ADDR = process.env.LISTEN_ADDR || '127.0.0.1:18081';
   env.ANIMEMO_API_PROXY = `http://${env.LISTEN_ADDR.replace('0.0.0.0', '127.0.0.1')}`;
-  await goRun('build', '-o', executable, './cmd/animemo');
-  const children = [launch(executable, ['serve']), launch(process.execPath, ['node_modules/vite/bin/vite.js', '--config', 'web/vite.config.ts'])];
+  await goRun('build', '-ldflags', versionFlags(await sourceVersion()), '-o', executable, './cmd/animemo');
+  const children = [launch(executable, ['serve']), launch(executable, ['worker']), launch(process.execPath, ['node_modules/vite/bin/vite.js', '--config', 'web/vite.config.ts'])];
   let closing = false;
   function close() { if (closing) return; closing = true; for (const child of children) child.kill('SIGTERM'); }
   process.on('SIGINT', close); process.on('SIGTERM', close);

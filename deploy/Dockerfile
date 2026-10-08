@@ -17,15 +17,33 @@ RUN --mount=type=secret,id=build_ca \
     if [ -f /run/secrets/build_ca ]; then export SSL_CERT_FILE=/run/secrets/build_ca; fi; \
     go mod download
 COPY server ./
+ARG ANIMEMO_VERSION=development
+ARG ANIMEMO_REVISION=unknown
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/animemo ./cmd/animemo
+    GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X animemo.local/server/internal/buildinfo.Version=${ANIMEMO_VERSION} -X animemo.local/server/internal/buildinfo.Revision=${ANIMEMO_REVISION}" -o /out/animemo ./cmd/animemo
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags="-s -w" -o /out/watch-history-text.wasm ./examples/watch-history-text
+
+FROM node:24.12.0-bookworm-slim AS extensions
+WORKDIR /build
+COPY --from=api /out/ /build/
+COPY server/examples/watch-history-text/manifest.json /build/manifest.json
+COPY tooling/bundle-extensions.mjs /build/bundle-extensions.mjs
+RUN node bundle-extensions.mjs animemo watch-history-text.wasm manifest.json /build/extensions
 
 FROM gcr.io/distroless/static-debian12:nonroot
+ARG ANIMEMO_VERSION=development
+ARG ANIMEMO_REVISION=unknown
 WORKDIR /app
+LABEL org.animemo.worker-mode="separate-v1"
+LABEL org.opencontainers.image.version=$ANIMEMO_VERSION org.opencontainers.image.revision=$ANIMEMO_REVISION org.opencontainers.image.source="https://github.com/yanyuhanyue/AniMemo"
 COPY --from=api /out/animemo /app/animemo
+COPY --from=extensions /build/extensions /app/extensions
 COPY --from=web --chown=65532:65532 /source/.local/output/web /app/web
-ENV LISTEN_ADDR=0.0.0.0:18081 WEB_DIR=/app/web
+ENV LISTEN_ADDR=0.0.0.0:18081 WEB_DIR=/app/web ANIMEMO_BUNDLED_DIR=/app/extensions
 EXPOSE 18081
 ENTRYPOINT ["/app/animemo"]
 CMD ["serve"]

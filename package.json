@@ -1,6 +1,6 @@
 {
   "name": "animemo-next",
-  "version": "0.1.0",
+  "version": "1.3.0-rc.4",
   "private": true,
   "type": "module",
   "engines": {
@@ -24,13 +24,18 @@
     "test:instance": "node tooling/instance-smoke.mjs",
     "plugin:example": "node tooling/run.mjs plugin-example",
     "test:plugins": "node tooling/run.mjs test-api -run \"TestPlugin|TestRealWASISandbox|TestPackageIdentityAndCompatibility|TestTextRecordsAndAmbiguity\"",
-    "test:plugin-instance": "node tooling/plugin-smoke.mjs"
+    "test:plugin-instance": "node tooling/plugin-smoke.mjs",
+    "test:stage3": "node tooling/stage3-smoke.mjs",
+    "release": "node tooling/release.mjs"
   },
   "dependencies": {
+    "@base-ui/react": "1.8.0",
+    "@tailwindcss/vite": "4.3.3",
     "@tanstack/react-query": "5.104.1",
     "openapi-fetch": "0.17.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "tailwindcss": "4.3.3"
   },
   "devDependencies": {
     "@types/node": "24.10.0",

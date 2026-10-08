@@ -4,6 +4,7 @@ import (
 	"animemo.local/server/internal/fault"
 	"animemo.local/server/internal/governance"
 	"animemo.local/server/internal/id"
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"errors"
 	"github.com/jackc/pgx/v5"
@@ -58,7 +59,7 @@ func (s *Service) Resources(ctx context.Context, kind, state, search string, pag
 	}
 	where += ` AND $2::text IS NOT NULL`
 	search = "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.Search) + "%"
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
@@ -115,7 +116,7 @@ func (s *Service) ResourceAction(ctx context.Context, actor, kind, key, action, 
 	if kind == "column" {
 		table = "columns"
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return err
 	}

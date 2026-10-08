@@ -46,7 +46,7 @@ func (a *API) pluginImport(w http.ResponseWriter, r *http.Request) {
 		fail(w, fault.New("import_too_large", "文本文件超过 2 MiB 或上传中断。"))
 		return
 	}
-	out, err := a.plugins.Convert(r.Context(), r.PathValue("slug"), pluginproto.Request{Protocol: pluginproto.Version, Filename: r.URL.Query().Get("filename"), Text: string(data)})
+	out, err := a.plugins.Convert(r.Context(), currentUser(r).ID, r.PathValue("slug"), pluginproto.Request{Protocol: pluginproto.Version, Filename: r.URL.Query().Get("filename"), Text: string(data)})
 	if err != nil {
 		fail(w, err)
 		return

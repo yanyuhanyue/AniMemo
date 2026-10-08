@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"time"
 
@@ -36,7 +37,7 @@ func (s *Service) ApplySource(ctx context.Context, owner, entryID string, versio
 			return Entry{}, fault.Field("fields", "请选择受支持的作品资料字段。")
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -65,7 +66,7 @@ func (s *Service) ApplySource(ctx context.Context, owner, entryID string, versio
 		if count >= 5000 {
 			return Entry{}, fault.New("validation_error", "手账最多保存 5000 部番剧。")
 		}
-		entry = Entry{Title: metadata.Title, Status: "planned", Format: "tv", Accent: "violet", Tags: []string{}, Visibility: "private"}
+		entry = Entry{Title: metadata.Title, Status: "recorded", AiringState: "unknown", Format: "tv", Accent: "violet", Tags: []string{}, Visibility: "private"}
 	} else {
 		entry, err = scanEntry(tx.QueryRow(ctx, `SELECT `+columns+` FROM entries WHERE id::text=$1 AND user_id=$2 AND deleted_at IS NULL FOR UPDATE`, entryID, owner))
 		if err != nil {
@@ -128,7 +129,7 @@ func (s *Service) ApplySource(ctx context.Context, owner, entryID string, versio
 }
 
 func (s *Service) UnbindSource(ctx context.Context, owner, entryID string, version int) (Entry, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Entry{}, err
 	}

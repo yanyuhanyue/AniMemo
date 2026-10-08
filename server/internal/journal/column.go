@@ -5,6 +5,7 @@ import (
 	"animemo.local/server/internal/governance"
 	"animemo.local/server/internal/id"
 	"animemo.local/server/internal/media"
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"errors"
 	"github.com/jackc/pgx/v5"
@@ -75,7 +76,7 @@ func (s *Service) Columns(ctx context.Context, owner string, page int) (ColumnPa
 	if page < 1 || page > 100000 {
 		return out, fault.Field("page", "页码无效。")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
@@ -115,7 +116,7 @@ func (s *Service) SaveColumn(ctx context.Context, owner, key string, input Colum
 	if key != "" && !id.Valid(key) {
 		return Column{}, fault.New("not_found", "没有找到这篇专栏。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Column{}, err
 	}
@@ -171,7 +172,7 @@ func (s *Service) ColumnAction(ctx context.Context, owner, key, action string, v
 	if !id.Valid(key) {
 		return Column{}, fault.New("not_found", "没有找到这篇专栏。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Column{}, err
 	}
@@ -227,7 +228,7 @@ func (s *Service) SetColumnCover(ctx context.Context, owner, key string, version
 			return Column{}, err
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Column{}, err
 	}
@@ -283,7 +284,7 @@ func (s *Service) PublicColumn(ctx context.Context, key string) (PublicColumn, e
 	if !id.Valid(key) {
 		return out, fault.New("not_found", "专栏不存在或尚未公开。")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
@@ -338,7 +339,7 @@ func (s *Service) PublicColumns(ctx context.Context, search string, page int) (P
 		return out, err
 	}
 	search = "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.Search) + "%"
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
@@ -392,7 +393,7 @@ func (s *Service) ModerateColumn(ctx context.Context, actor, key, action, reason
 	if utf8.RuneCountInString(reason) > 400 || strings.ContainsRune(reason, 0) {
 		return Column{}, fault.Field("reason", "原因最多 400 字。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Column{}, err
 	}

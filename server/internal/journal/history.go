@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"errors"
 	"time"
@@ -45,7 +46,7 @@ func (s *Service) HistoryPage(ctx context.Context, owner, entryID, from, to stri
 			return out, err
 		}
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
@@ -75,12 +76,13 @@ func (s *Service) HistoryPage(ctx context.Context, owner, entryID, from, to stri
 }
 
 type RecordPatch struct {
-	Version     int    `json:"version"`
-	WatchedOn   string `json:"watched_on"`
-	EpisodeFrom int    `json:"episode_from"`
-	EpisodeTo   int    `json:"episode_to"`
-	Note        string `json:"note"`
-	Rewatch     int    `json:"rewatch"`
+	TimePrecision string `json:"time_precision"`
+	Version       int    `json:"version"`
+	WatchedOn     string `json:"watched_on"`
+	EpisodeFrom   int    `json:"episode_from"`
+	EpisodeTo     int    `json:"episode_to"`
+	Note          string `json:"note"`
+	Rewatch       int    `json:"rewatch"`
 }
 
 func (s *Service) ChangeRecord(ctx context.Context, owner, entryID, recordID string, version int, input *RecordPatch) (Entry, error) {
@@ -90,7 +92,7 @@ func (s *Service) ChangeRecord(ctx context.Context, owner, entryID, recordID str
 	if version < 1 {
 		return Entry{}, fault.Field("version", "请重新打开观看记录。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -113,14 +115,14 @@ func (s *Service) ChangeRecord(ctx context.Context, owner, entryID, recordID str
 	if input == nil {
 		_, err = tx.Exec(ctx, `DELETE FROM watch_records WHERE id=$1`, recordID)
 	} else {
-		r := RecordInput{WatchedOn: input.WatchedOn, EpisodeFrom: input.EpisodeFrom, EpisodeTo: input.EpisodeTo, Note: input.Note, Rewatch: input.Rewatch, RequestID: id.New()}
+		r := RecordInput{TimePrecision: input.TimePrecision, WatchedOn: input.WatchedOn, EpisodeFrom: input.EpisodeFrom, EpisodeTo: input.EpisodeTo, Note: input.Note, Rewatch: input.Rewatch, RequestID: id.New()}
 		if err = r.Validate(); err != nil {
 			return Entry{}, err
 		}
 		if e.TotalEpisodes > 0 && r.EpisodeTo > e.TotalEpisodes {
 			return Entry{}, fault.Field("episode_to", "观看话数不能超过总话数。")
 		}
-		_, err = tx.Exec(ctx, `UPDATE watch_records SET watched_on=$2,episode_from=$3,episode_to=$4,note=$5,rewatch=$6,version=version+1 WHERE id=$1`, recordID, r.WatchedOn, r.EpisodeFrom, r.EpisodeTo, r.Note, r.Rewatch)
+		_, err = tx.Exec(ctx, `UPDATE watch_records SET watched_on=nullif($2,'')::date,episode_from=$3,episode_to=$4,note=$5,rewatch=$6,time_precision=$7,version=version+1 WHERE id=$1`, recordID, r.WatchedOn, r.EpisodeFrom, r.EpisodeTo, r.Note, r.Rewatch, r.TimePrecision)
 	}
 	if err != nil {
 		return Entry{}, err
@@ -128,12 +130,16 @@ func (s *Service) ChangeRecord(ctx context.Context, owner, entryID, recordID str
 	if err = tx.QueryRow(ctx, `SELECT coalesce(max(episode_to),0) FROM watch_records WHERE entry_id=$1`, entryID).Scan(&e.WatchedEpisodes); err != nil {
 		return Entry{}, err
 	}
-	if e.Status == "completed" || e.Status == "watching" || e.Status == "planned" {
+	if e.Status == "completed" || e.Status == "caught_up" || e.Status == "watching" || e.Status == "planned" || e.Status == "recorded" {
 		e.Status = "watching"
 		if e.WatchedEpisodes == 0 {
-			e.Status = "planned"
+			e.Status = "recorded"
 		} else if e.TotalEpisodes > 0 && e.WatchedEpisodes == e.TotalEpisodes {
-			e.Status = "completed"
+			if e.AiringState == "finished" {
+				e.Status = "completed"
+			} else {
+				e.Status = "caught_up"
+			}
 		}
 	}
 	e, err = scanEntry(tx.QueryRow(ctx, `UPDATE entries SET watched_episodes=$2,status=$3,version=version+1,updated_at=now() WHERE id=$1 RETURNING `+columns, entryID, e.WatchedEpisodes, e.Status))
@@ -163,19 +169,19 @@ func (s *Service) Analytics(ctx context.Context, owner, from, to string) (Analyt
 	if err := ValidDateRange(from, to); err != nil {
 		return out, err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
 	defer tx.Rollback(context.Background())
 	where := ` FROM watch_records w JOIN entries e ON e.id=w.entry_id WHERE e.user_id=$1 AND e.deleted_at IS NULL AND ($2='' OR w.watched_on>=nullif($2,'')::date) AND ($3='' OR w.watched_on<=nullif($3,'')::date)`
-	if err = tx.QueryRow(ctx, `SELECT count(DISTINCT w.watched_on),count(*),coalesce(sum(w.episode_to-w.episode_from+1),0)`+where, owner, from, to).Scan(&out.ActiveDays, &out.Records, &out.Episodes); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT count(DISTINCT w.watched_on) FILTER (WHERE w.time_precision='day'),count(*),coalesce(sum(w.episode_to-w.episode_from+1),0)`+where, owner, from, to).Scan(&out.ActiveDays, &out.Records, &out.Episodes); err != nil {
 		return out, err
 	}
 	if err = tx.QueryRow(ctx, `SELECT avg(score)::float8 FROM entries WHERE user_id=$1 AND deleted_at IS NULL`, owner).Scan(&out.AverageScore); err != nil {
 		return out, err
 	}
-	rows, err := tx.Query(ctx, `SELECT to_char(w.watched_on,'YYYY-MM'),count(*),sum(w.episode_to-w.episode_from+1)`+where+` GROUP BY 1 ORDER BY 1`, owner, from, to)
+	rows, err := tx.Query(ctx, `SELECT to_char(w.watched_on,'YYYY-MM'),count(*),sum(w.episode_to-w.episode_from+1)`+where+` AND w.time_precision IN ('day','month') GROUP BY 1 ORDER BY 1`, owner, from, to)
 	if err != nil {
 		return out, err
 	}

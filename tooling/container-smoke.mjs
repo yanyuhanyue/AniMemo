@@ -30,7 +30,7 @@ export async function smokeContainers({ root, env, run }) {
   const arguments_ = composeArguments(environment, project, ['deploy/compose.smoke.yaml']);
   const abort = new AbortController();
   const cancel = () => abort.abort(new Error('Container smoke cancelled'));
-  const compose = (...args) => run('docker', [...arguments_, ...args], { env: environment, signal: abort.signal, timeout: 600_000 });
+  const compose = (...args) => run('docker', [...arguments_, '--profile', 'runtime-worker', ...args], { env: environment, signal: abort.signal, timeout: 600_000 });
   const reportPath = path.join(root, '.local/output/container-smoke.json');
   const report = { status: 'RUNNING', startedAt: new Date().toISOString(), project, checks: [] };
   await writeFile(reportPath, JSON.stringify(report, null, 2) + '\n');

@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"context"
 	"errors"
 	"log/slog"
@@ -57,7 +58,7 @@ func (s *Service) NewImport(ctx context.Context, owner, format string, data []by
 	if len(data) == 0 || len(data) > limit {
 		return ImportJob{}, fault.New("import_too_large", "导入文件为空或超过所选格式的大小限制。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return ImportJob{}, err
 	}
@@ -77,6 +78,9 @@ func (s *Service) NewImport(ctx context.Context, owner, format string, data []by
 	}
 	job, err := scanImport(tx.QueryRow(ctx, `INSERT INTO import_jobs(id,user_id,format,source) VALUES($1,$2,$3,$4) RETURNING `+importColumns, id.New(), owner, format, data))
 	if err != nil {
+		return job, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE import_jobs SET request_id=$2 WHERE id=$1 AND request_id=''`, job.ID, telemetry.RequestID(ctx)); err != nil {
 		return job, err
 	}
 	return job, tx.Commit(ctx)
@@ -106,10 +110,13 @@ func (s *Service) Imports(ctx context.Context, owner string) ([]ImportJob, error
 }
 
 func (s *Service) ImportAction(ctx context.Context, owner, jobID, action string) (ImportJob, error) {
+	return s.ImportActionSelected(ctx, owner, jobID, action, nil)
+}
+func (s *Service) ImportActionSelected(ctx context.Context, owner, jobID, action string, selection []ImportSelection) (ImportJob, error) {
 	if !id.Valid(jobID) {
 		return ImportJob{}, fault.New("not_found", "没有找到导入任务。")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return ImportJob{}, err
 	}
@@ -131,6 +138,9 @@ func (s *Service) ImportAction(ctx context.Context, owner, jobID, action string)
 	case "apply":
 		if job.State != "ready" {
 			return job, fault.New("version_conflict", "请等待校验完成后确认导入。")
+		}
+		if err = selectImportItems(ctx, tx, owner, jobID, selection); err != nil {
+			return job, err
 		}
 		job, err = scanImport(tx.QueryRow(ctx, `UPDATE import_jobs SET state='applying',updated_at=now() WHERE id=$1 RETURNING `+importColumns, jobID))
 	case "cancel":
@@ -210,9 +220,9 @@ func (s *Service) ProcessNextImport(ctx context.Context) (bool, error) {
 				}
 				conn.Release()
 			}()
-			var owner, format, state string
+			var owner, format, state, requestID string
 			var source []byte
-			err = conn.QueryRow(ctx, `SELECT user_id,format,state,source FROM import_jobs WHERE id=$1`, jobID).Scan(&owner, &format, &state, &source)
+			err = conn.QueryRow(ctx, `SELECT user_id,format,state,source,request_id FROM import_jobs WHERE id=$1`, jobID).Scan(&owner, &format, &state, &source, &requestID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				err = nil
 				return
@@ -220,7 +230,7 @@ func (s *Service) ProcessNextImport(ctx context.Context) (bool, error) {
 			if err != nil {
 				return
 			}
-			taskCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			taskCtx, cancel := context.WithTimeout(telemetry.WithRequestID(ctx, requestID), 2*time.Minute)
 			defer cancel()
 			if state == "validating" {
 				err = s.prepareImport(taskCtx, owner, jobID, format, source)
@@ -257,7 +267,7 @@ func (s *Service) prepareImport(ctx context.Context, owner, jobID, format string
 	if err != nil {
 		return err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	tx, err := telemetry.Begin(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -266,19 +276,21 @@ func (s *Service) prepareImport(ctx context.Context, owner, jobID, format string
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT title,coalesce((SELECT subject_id FROM entry_sources WHERE entry_id=entries.id),0) FROM entries WHERE user_id=$1`, owner)
+	rows, err := tx.Query(ctx, `SELECT id,title,version,coalesce((SELECT subject_id FROM entry_sources WHERE entry_id=entries.id),0) FROM entries WHERE user_id=$1`, owner)
 	if err != nil {
 		return err
 	}
+	candidates := map[string][]ImportCandidate{}
 	existing := map[string]bool{}
 	existingSources := map[int64]bool{}
 	for rows.Next() {
 		var e Entry
 		var subjectID int64
-		if err = rows.Scan(&e.Title, &subjectID); err != nil {
+		if err = rows.Scan(&e.ID, &e.Title, &e.Version, &subjectID); err != nil {
 			rows.Close()
 			return err
 		}
+		candidates[importIdentity(e)] = append(candidates[importIdentity(e)], ImportCandidate{ID: e.ID, Title: e.Title, Version: e.Version})
 		existing[importIdentity(e)] = true
 		if subjectID > 0 {
 			existingSources[subjectID] = true
@@ -289,12 +301,37 @@ func (s *Service) prepareImport(ctx context.Context, owner, jobID, format string
 	if err != nil {
 		return err
 	}
-	preview := ImportPreview{Total: len(document.Items), Warnings: []string{}, Titles: []string{}}
-	ready := ImportDocument{Items: []ImportItem{}}
-	for _, item := range document.Items {
+	preview := ImportPreview{CompleteMemory: document.CompleteMemory, Choices: []ImportChoice{}, Total: len(document.Items), Warnings: []string{}, Titles: []string{}}
+	ready := ImportDocument{Library: document.Library, CompleteMemory: document.CompleteMemory, Resources: document.Resources, Revisions: document.Revisions, Items: []ImportItem{}}
+	if document.CompleteMemory {
+		var occupied bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM anime_resources WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM memory_notes WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM characters WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM memory_collections WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM yearly_memories WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM private_memory_media WHERE owner_id=$1 AND state<>'reserved')`, owner).Scan(&occupied); err != nil {
+			return err
+		}
+		if occupied {
+			return fault.New("version_conflict", "完整记忆包需要导入空手账，以保留全部身份和修订关系。请使用新账号。")
+		}
+	}
+
+	for index, item := range document.Items {
 		identity := importIdentity(item.Entry)
+		choice := ImportChoice{Index: index, Title: item.Entry.Title, DefaultSelected: true, Candidates: append([]ImportCandidate{}, candidates[identity]...), History: []ImportRecordPreview{}}
+		for i, r := range item.History {
+			source := ImportSource{}
+			if i < len(item.Sources) {
+				source = item.Sources[i]
+			}
+			choice.History = append(choice.History, ImportRecordPreview{SourceLine: source.Line, SourceFilename: source.Filename, TimePrecision: r.TimePrecision, Title: item.Entry.Title, WatchedOn: r.WatchedOn, EpisodeFrom: r.EpisodeFrom, EpisodeTo: r.EpisodeTo, Rewatch: r.Rewatch, Note: r.Note})
+		}
 		if existing[identity] || (item.Entry.Source != nil && existingSources[item.Entry.Source.SubjectID]) {
+			if document.CompleteMemory {
+				return fault.New("validation_error", "完整记忆包中有重名或重复来源，无法安全合并，请先修复原手账。")
+			}
 			preview.Duplicates++
+			item.Duplicate = true
+			choice.DefaultSelected = false
+			preview.Choices = append(preview.Choices, choice)
+			ready.Items = append(ready.Items, item)
 			continue
 		}
 		existing[identity] = true
@@ -302,13 +339,14 @@ func (s *Service) prepareImport(ctx context.Context, owner, jobID, format string
 			existingSources[item.Entry.Source.SubjectID] = true
 		}
 		ready.Items = append(ready.Items, item)
+		preview.Choices = append(preview.Choices, choice)
 		preview.Ready++
 		preview.Records += len(item.History)
 		for _, record := range item.History {
 			if len(preview.History) >= 100 {
 				break
 			}
-			preview.History = append(preview.History, ImportRecordPreview{Title: item.Entry.Title, WatchedOn: record.WatchedOn, EpisodeFrom: record.EpisodeFrom, EpisodeTo: record.EpisodeTo, Rewatch: record.Rewatch, Note: record.Note})
+			preview.History = append(preview.History, ImportRecordPreview{TimePrecision: record.TimePrecision, Title: item.Entry.Title, WatchedOn: record.WatchedOn, EpisodeFrom: record.EpisodeFrom, EpisodeTo: record.EpisodeTo, Rewatch: record.Rewatch, Note: record.Note})
 		}
 		if item.CoverPath != "" {
 			preview.Covers++
@@ -334,7 +372,7 @@ func (s *Service) applyImport(ctx context.Context, owner, jobID, format string, 
 			return err
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return err
 	}
@@ -384,11 +422,41 @@ func (s *Service) applyImport(ctx context.Context, owner, jobID, format string, 
 	if used > CoverQuotaBytes {
 		return fault.New("cover_quota_exceeded", "导入后的封面总容量超过 100 MiB。")
 	}
+	if doc.CompleteMemory {
+		var occupied bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM anime_resources WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM memory_notes WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM characters WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM memory_collections WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM yearly_memories WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM private_memory_media WHERE owner_id=$1 AND state<>'reserved')`, owner).Scan(&occupied); err != nil {
+			return err
+		}
+		if occupied {
+			return fault.New("version_conflict", "预览后手账已改变，请使用空手账。")
+		}
+		if _, err = tx.Exec(ctx, `SELECT set_config('animemo.restore_history','on',true)`); err != nil {
+			return err
+		}
+	}
+	resourceMap, err := restoreMemoryResources(ctx, tx, owner, doc.Resources)
+	if err != nil {
+		return err
+	}
+	entryMap := map[string]string{}
+	recordMap := map[string]string{}
 	for _, item := range doc.Items {
+		if item.TargetID != "" {
+			if err = appendImportedRecords(ctx, tx, owner, item); err != nil {
+				return err
+			}
+			continue
+		}
 		e := item.Entry
-		created, err := insertEntry(ctx, tx, owner, Create{Title: e.Title, OriginalTitle: e.OriginalTitle, Format: e.Format, Status: e.Status, TotalEpisodes: e.TotalEpisodes, Score: e.Score, Notes: e.Notes, Tags: e.Tags, Accent: e.Accent, Details: e.Details})
+		created, err := insertEntry(ctx, tx, owner, Create{AnimeID: resourceMap[e.AnimeID], AiringState: e.AiringState, Title: e.Title, OriginalTitle: e.OriginalTitle, Format: e.Format, Status: e.Status, TotalEpisodes: e.TotalEpisodes, Score: e.Score, Notes: e.Notes, Tags: e.Tags, Accent: e.Accent, Details: e.Details})
 		if err != nil {
 			return err
+		}
+		entryMap[e.ID] = created.ID
+		if doc.Library != nil && libraryVisibility(e.Visibility) {
+			if _, err = tx.Exec(ctx, `UPDATE entries SET visibility=$2 WHERE id=$1`, created.ID, e.Visibility); err != nil {
+				return err
+			}
 		}
 		if _, err = tx.Exec(ctx, `UPDATE entries SET watched_episodes=$2 WHERE id=$1`, created.ID, e.WatchedEpisodes); err != nil {
 			return err
@@ -399,8 +467,16 @@ func (s *Service) applyImport(ctx context.Context, owner, jobID, format string, 
 				return err
 			}
 		}
-		for _, r := range item.History {
-			if _, err = tx.Exec(ctx, `INSERT INTO watch_records(id,entry_id,watched_on,episode_from,episode_to,note,request_id,rewatch) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, id.New(), created.ID, r.WatchedOn, r.EpisodeFrom, r.EpisodeTo, r.Note, id.New(), r.Rewatch); err != nil {
+		for n, r := range item.History {
+			source := ImportSource{}
+			if n < len(item.Sources) {
+				source = item.Sources[n]
+			}
+			recordID := id.New()
+			if n < len(item.HistoryIDs) {
+				recordMap[item.HistoryIDs[n]] = recordID
+			}
+			if _, err = tx.Exec(ctx, `INSERT INTO watch_records(id,entry_id,watched_on,episode_from,episode_to,note,request_id,rewatch,time_precision,source_line,source_filename) VALUES($1,$2,nullif($3,'')::date,$4,$5,$6,$7,$8,$9,$10,$11)`, recordID, created.ID, r.WatchedOn, r.EpisodeFrom, r.EpisodeTo, r.Note, id.New(), r.Rewatch, r.TimePrecision, source.Line, source.Filename); err != nil {
 				return err
 			}
 		}
@@ -418,6 +494,12 @@ func (s *Service) applyImport(ctx context.Context, owner, jobID, format string, 
 				return err
 			}
 		}
+	}
+	if err = restoreMemoryRevisions(ctx, tx, owner, doc.Revisions, resourceMap, entryMap, recordMap); err != nil {
+		return err
+	}
+	if err = restoreLibrary(ctx, tx, owner, doc.Library, resourceMap, recordMap); err != nil {
+		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE import_jobs SET state='done',created=$2,source=NULL,document=NULL,updated_at=now() WHERE id=$1`, jobID, len(doc.Items)); err != nil {
 		return err

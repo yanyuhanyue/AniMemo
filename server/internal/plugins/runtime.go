@@ -22,8 +22,11 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
+// API 1 accepts the original journal conversion. API 2 also accepts import
+// provenance fields; older converters remain valid without a migration layer.
 const (
-	HostAPI         = 1
+	HostAPI         = 2
+	MinHostAPI      = 1
 	MaxPackageBytes = 12 << 20
 	MaxModuleBytes  = 8 << 20
 	MaxInputBytes   = 2 << 20
@@ -53,7 +56,7 @@ func strictJSON(data []byte, out any) error {
 }
 
 func Compatible(m pluginproto.Manifest) error {
-	if m.Schema != 1 || m.Protocol != pluginproto.Version || m.HostMin < 1 || m.HostMin > HostAPI || m.HostMax < HostAPI || m.HostMin > m.HostMax {
+	if m.Schema != 1 || m.Protocol != pluginproto.Version || m.HostMin < MinHostAPI || m.HostMin > HostAPI || m.HostMax < MinHostAPI || m.HostMin > m.HostMax {
 		return invalid("插件协议或宿主版本范围不兼容。")
 	}
 	if len(m.Capabilities) != 1 || m.Capabilities[0] != "import.convert" {

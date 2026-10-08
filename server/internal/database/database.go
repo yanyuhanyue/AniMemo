@@ -16,6 +16,29 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
+type Migration struct {
+	Name     string `json:"name"`
+	Checksum string `json:"checksum"`
+}
+
+// Manifest describes the embedded schema without connecting to PostgreSQL.
+func Manifest() ([]Migration, error) {
+	files, err := fs.Glob(migrations, "migrations/*.sql")
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	result := make([]Migration, 0, len(files))
+	for _, name := range files {
+		contents, err := migrations.ReadFile(name)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, Migration{Name: name, Checksum: fmt.Sprintf("%x", sha256.Sum256(contents))})
+	}
+	return result, nil
+}
+
 func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(url)
 	if err != nil {

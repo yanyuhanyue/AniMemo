@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"animemo.local/server/internal/telemetry"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -128,7 +129,7 @@ func (s *Service) ApplyRemote(ctx context.Context, owner, changeID string, remot
 		Hash     string
 	}{remoteID, metadata, local, remote, includeProgress, episodeHash})
 	digest := sha256.Sum256(request)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -208,7 +209,7 @@ func saveSyncBaseline(ctx context.Context, tx pgx.Tx, entryID string, remoteID i
 	return err
 }
 func (s *Service) MarkSynced(ctx context.Context, owner string, remoteID int64, local SourceRecord, remote SyncValue, episodeHash string) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := telemetry.Begin(ctx, s.pool)
 	if err != nil {
 		return err
 	}
