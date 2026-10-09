@@ -10,6 +10,7 @@ export const noteDesigns = {
   hybrid: "融合版",
 } as const;
 export type NoteDesign = keyof typeof noteDesigns;
+const visibilityIcons = { private: "lock", unlisted: "link", public: "globe" } as const;
 
 export function currentNoteDesign(): NoteDesign | undefined {
   const value = new URLSearchParams(location.search).get("notes_ui");
@@ -75,7 +76,10 @@ export function NotePreviewList({ notes, design, titles, onRead }: {
         <footer className="preview-note-footer">
           <div className="preview-note-details">
             {!paperLayout && <span>{noteDate(note)}</span>}
-            <span>{visibilityLabels[note.visibility]}</span>
+            <span className={design === "hybrid" ? "preview-note-visibility" : undefined}>
+              {design === "hybrid" && <><span className="sr-only">可见范围：</span><Icon name={visibilityIcons[note.visibility]} /></>}
+              {visibilityLabels[note.visibility]}
+            </span>
             {note.tags.map(tag => <span className="preview-note-tag" key={tag}>#{tag}</span>)}
           </div>
           <Button className="text-button preview-note-read" aria-label={`阅读 ${note.title}`} onClick={() => onRead(note)}>阅读全文<Icon name="arrow" /></Button>
