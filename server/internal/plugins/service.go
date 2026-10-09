@@ -99,13 +99,13 @@ func (s *Service) Install(ctx context.Context, actor string, data []byte) error 
 		return err
 	}
 	var count, bytes int64
-	if err := tx.QueryRow(ctx, `SELECT count(*),COALESCE(sum(octet_length(module)),0) FROM plugin_releases`).Scan(&count, &bytes); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*),COALESCE(sum(octet_length(module)+octet_length(assets::text)),0)+octet_length($1::bytea)+octet_length($2::jsonb::text) FROM plugin_releases`, p.Module, p.Assets).Scan(&count, &bytes); err != nil {
 		return err
 	}
-	if count >= 32 || bytes+int64(len(p.Module)) > 256<<20 {
+	if count >= 32 || bytes > 256<<20 {
 		return invalid("最多保留 32 个插件版本、合计 256 MiB；当前版本尚不提供历史包清理。")
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO plugin_releases(slug,version,digest,manifest,module) VALUES($1,$2,$3,$4,$5)`, p.Manifest.Slug, p.Manifest.Version, digest, p.Manifest, p.Module); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO plugin_releases(slug,version,digest,manifest,module,assets) VALUES($1,$2,$3,$4,$5,$6)`, p.Manifest.Slug, p.Manifest.Version, digest, p.Manifest, p.Module, p.Assets); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO plugin_deployments(slug,active_version) VALUES($1,$2) ON CONFLICT DO NOTHING`, p.Manifest.Slug, p.Manifest.Version); err != nil {
@@ -168,7 +168,8 @@ func (s *Service) Change(ctx context.Context, actor, slug string, input Action) 
 		var m pluginproto.Manifest
 		var module []byte
 		var digest string
-		if err := tx.QueryRow(ctx, `SELECT manifest,module,digest FROM plugin_releases WHERE slug=$1 AND version=$2`, slug, input.Version).Scan(&m, &module, &digest); err != nil {
+		var assets map[string][]byte
+		if err := tx.QueryRow(ctx, `SELECT manifest,module,digest,assets FROM plugin_releases WHERE slug=$1 AND version=$2`, slug, input.Version).Scan(&m, &module, &digest, &assets); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fault.New("not_found", "插件版本不存在。")
 			}
@@ -182,6 +183,9 @@ func (s *Service) Change(ctx context.Context, actor, slug string, input Action) 
 			return invalid("扩展完整性检查失败，请重新安装已审阅的包。")
 		}
 		if err := validatePackageRuntime(ctx, m, module); err != nil {
+			return err
+		}
+		if err := validateThemeAssets(pluginproto.Package{Manifest: m, Assets: assets}); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `UPDATE plugin_deployments SET health='ready',health_reason='',active_version=$2,enabled=true,revision=revision+1,updated_at=now() WHERE slug=$1`, slug, input.Version)
@@ -263,7 +267,7 @@ func Preflight(ctx context.Context, pool *pgxpool.Pool) error {
 	if !exists {
 		return nil
 	}
-	rows, err := pool.Query(ctx, `SELECT r.slug,r.version,r.digest,r.manifest,r.module FROM plugin_deployments d JOIN plugin_releases r ON r.slug=d.slug AND r.version=d.active_version WHERE d.enabled ORDER BY r.slug`)
+	rows, err := pool.Query(ctx, `SELECT r.slug,r.version,r.digest,r.manifest,r.module,COALESCE(to_jsonb(r)->'assets','{}'::jsonb) FROM plugin_deployments d JOIN plugin_releases r ON r.slug=d.slug AND r.version=d.active_version WHERE d.enabled ORDER BY r.slug`)
 	if err != nil {
 		return err
 	}
@@ -272,7 +276,8 @@ func Preflight(ctx context.Context, pool *pgxpool.Pool) error {
 		var slug, version, digest string
 		var manifest []byte
 		var module []byte
-		if err := rows.Scan(&slug, &version, &digest, &manifest, &module); err != nil {
+		var assets map[string][]byte
+		if err := rows.Scan(&slug, &version, &digest, &manifest, &module, &assets); err != nil {
 			return err
 		}
 		var m pluginproto.Manifest
@@ -287,6 +292,9 @@ func Preflight(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("plugin %s@%s: package checksum mismatch", slug, version)
 		}
 		if err := validatePackageRuntime(ctx, m, module); err != nil {
+			return fmt.Errorf("plugin %s@%s: %w", slug, version, err)
+		}
+		if err := validateThemeAssets(pluginproto.Package{Manifest: m, Assets: assets}); err != nil {
 			return fmt.Errorf("plugin %s@%s: %w", slug, version, err)
 		}
 	}

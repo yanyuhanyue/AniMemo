@@ -2,22 +2,15 @@
 // It deliberately has no dependency on AniMemo internals, HTTP or a database.
 package pluginproto
 
-const Version = 1
+import (
+	"animemo.local/server/pkg/converterproto"
+	"animemo.local/server/pkg/themeproto"
+)
 
-type Request struct {
-	Protocol int    `json:"protocol"`
-	Filename string `json:"filename"`
-	Text     string `json:"text"`
-}
+const Version = converterproto.Version
 
-// Response carries an ordinary import document. Only the host validates and,
-// after the user confirms a preview, commits it. A plugin cannot write records.
-type Response struct {
-	Protocol int    `json:"protocol"`
-	Format   string `json:"format,omitempty"`
-	Data     string `json:"data,omitempty"`
-	Error    string `json:"error,omitempty"`
-}
+type Request = converterproto.Request
+type Response = converterproto.Response
 
 // Manifest is also the canonical package/compatibility vocabulary. Unknown
 // fields and capabilities are rejected, never silently granted.
@@ -35,23 +28,11 @@ type Manifest struct {
 	NotesTheme   *NotesTheme `json:"notes_theme,omitempty"`
 }
 
-// NotesTheme describes the private notes reading surface. It cannot contain CSS,
-// scripts, resource URLs or selectors. Layout and all controls remain in Core.
-type NotesTheme struct {
-	Canvas      string `json:"canvas"`
-	Paper       string `json:"paper"`
-	Ink         string `json:"ink"`
-	Muted       string `json:"muted"`
-	Primary     string `json:"primary"`
-	Border      string `json:"border"`
-	Rule        string `json:"rule"`
-	HeadingFont string `json:"heading_font"`
-	ReadingSize string `json:"reading_size"`
-	Spacing     string `json:"spacing"`
-}
+type NotesTheme = themeproto.NotesTheme
 
 // Package uses JSON/base64 instead of extracting an archive onto the host.
 type Package struct {
-	Manifest Manifest `json:"manifest"`
-	Module   []byte   `json:"module"`
+	Manifest Manifest          `json:"manifest"`
+	Module   []byte            `json:"module"`
+	Assets   map[string][]byte `json:"assets,omitempty"`
 }

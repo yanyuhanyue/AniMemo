@@ -32,8 +32,9 @@ WORKDIR /build
 COPY --from=api /out/ /build/
 COPY server/examples/watch-history-text/manifest.json /build/manifest.json
 COPY server/examples/notes-hanami/manifest.json /build/theme.json
-COPY tooling/bundle-extensions.mjs /build/bundle-extensions.mjs
-RUN node bundle-extensions.mjs animemo watch-history-text.wasm manifest.json /build/extensions theme.json
+COPY server/examples/notes-gallery /build/notes-gallery
+COPY tooling/bundle-extensions.mjs tooling/plugin-package.mjs /build/
+RUN node bundle-extensions.mjs animemo watch-history-text.wasm manifest.json /build/extensions theme.json notes-gallery/manifest.json
 
 FROM gcr.io/distroless/static-debian12:nonroot
 ARG ANIMEMO_VERSION=development

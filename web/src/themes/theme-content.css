@@ -1,0 +1,24 @@
+/* Core content defaults within the theme's ShadowRoot. Templates own structure. */
+* { box-sizing: border-box; }
+:focus-visible { outline: 3px solid #4d5e9d; outline-offset: 3px; }
+img { max-width: 100%; height: auto; }
+svg { width: 16px; height: 16px; vertical-align: middle; }
+button { font: inherit; color: inherit; border: 0; background: transparent; cursor: pointer; padding: 6px 0; text-align: left; min-height: 44px; overflow-wrap: anywhere; }
+button:hover { text-decoration: underline; }
+h3, p, blockquote { overflow-wrap: anywhere; }
+.theme-title { font-weight: 600; line-height: inherit; }
+.theme-read { color: #4d527d; font-size: 13px; font-weight: 600; }
+.theme-metadata { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; color: #536075; font-size: 12px; line-height: 1.8; }
+.theme-visibility { background: #eef0f3; border: 1px solid #cad0da; color: #495565; padding: 1px 6px; border-radius: 3px; }
+.theme-tag { background: #e6effa; color: #315d88; padding: 1px 6px; border: 1px solid #a7bfd9; border-radius: 3px; overflow-wrap: anywhere; }
+.theme-kept { background: #f5e7b8; color: #665118; padding: 1px 6px; border: 1px solid #a08d50; }
+.theme-work { display: inline; font-size: inherit; color: inherit; }
+.theme-spoiler { color: #536075; }
+.memory-prose { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 20px; }
+.memory-reading-photos { display: grid; gap: 16px; }
+.memory-reading-photos img, .memory-thumbnail img { display: block; max-width: 100%; height: auto; }
+.memory-thumbnail { display: block; }
+.memory-image-missing { font-size: 13px; color: #536075; }
+blockquote { margin: 16px 0; padding-left: 16px; border-left: 3px solid #bdcbdc; white-space: pre-wrap; }
+details summary { cursor: pointer; min-height: 44px; padding: 8px 0; font-size: 14px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

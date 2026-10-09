@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { execFileSync } from 'node:child_process';
@@ -15,9 +15,10 @@ const mark = name => { report.checks.push(name); console.log(`Stage 3: ${name}`)
 const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore','pipe','pipe'], timeout: 30000 });
 const config = async name => JSON.parse(await readFile(`.local/instances/${name}/config.json`, 'utf8'));
 async function port() { const s = createServer(); await new Promise(r => s.listen(0, '127.0.0.1', r)); const p = s.address().port; await new Promise(r => s.close(r)); return p; }
-function client(origin) { let cookie = ''; return async (method, url, body, want = 200, raw = false) => {
+function client(origin) { let cookie = ''; return async (method, url, body, want = 200, raw = false, binary = false) => {
   const r = await fetch(origin + url, { method, headers: { Origin: origin, Cookie: cookie, 'Content-Type': raw ? 'application/octet-stream' : 'application/json' }, body: body === undefined ? undefined : raw ? body : JSON.stringify(body), signal: AbortSignal.timeout(15000) });
   if (r.headers.get('set-cookie')) cookie = r.headers.get('set-cookie').split(';')[0];
+  if (binary) { assert.equal(r.status, want, `${method} ${url}`); assert.equal(r.headers.get('cache-control'), 'private, no-store'); return { bytes: Buffer.from(await r.arrayBuffer()), type: r.headers.get('content-type') }; }
   const text = await r.text(); assert.equal(r.status, want, `${method} ${url}: ${text.slice(0, 200)}`); return text ? JSON.parse(text) : null;
 }; }
 async function poll(check) { for (let n = 0; n < 80; n++) { const out = await check(); if (out) return out; await new Promise(r => setTimeout(r, 250)); } throw new Error('Timed out'); }
@@ -38,7 +39,7 @@ try {
     const retained = inventory.find(p => p.manifest.slug === old.manifest.slug && p.active);
     assert.equal(retained.manifest.version, old.manifest.version);
     assert.equal(retained.digest, old.digest); assert.equal(retained.enabled, true); assert.equal(retained.health, 'ready');
-    const added = inventory.find(p => p.manifest.slug === 'notes-hanami');
+    const added = inventory.find(p => p.manifest.slug === 'notes-gallery');
     assert.ok(added, 'old converter identity must not block the new bundled theme');
     assert.equal(added.publisher_id, 'ANIMEMO_FIRST_PARTY'); assert.equal(added.enabled, false);
     const job = await use('POST', '/api/v1/plugins/watch-history-text/imports?filename=2026.txt', '10月3日\n首刷 升级后仍使用原转换器 共12集\n', 202, true);
@@ -64,7 +65,22 @@ try {
   const themeOptions = await call('GET', '/api/v1/themes');
   await call('PUT', '/api/v1/themes/selection', { slug: theme.manifest.slug, revision: themeOptions.items[0].revision });
   assert.equal((await call('GET', '/api/v1/themes')).selected_slug, 'notes-hanami');
-  mark('bundled converter and declarative theme bound to Core; real import and personal theme selection work');
+  const gallery = (await call('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'notes-gallery');
+  assert.equal(gallery.publisher_id, 'ANIMEMO_FIRST_PARTY'); assert.equal(gallery.enabled, false);
+  const assetPath = (p, asset) => `/api/v1/themes/${p.manifest.slug}/${p.manifest.version}/assets/${asset.name}`;
+  const firstAsset = gallery.manifest.notes_theme.presentation.assets[0];
+  await call('GET', assetPath(gallery, firstAsset), undefined, 404);
+  const checkAssets = async use => {
+    for (const asset of gallery.manifest.notes_theme.presentation.assets) {
+      const actual = await use('GET', assetPath(gallery, asset), undefined, 200, false, true);
+      assert.equal(actual.type, asset.content_type);
+      assert.equal(createHash('sha256').update(actual.bytes).digest('hex'), asset.sha256);
+    }
+  };
+  await activate(call, gallery); await checkAssets(call);
+  const available = (await call('GET', '/api/v1/themes')).items.find(p => p.manifest.slug === 'notes-gallery');
+  await call('PUT', '/api/v1/themes/selection', { slug: available.manifest.slug, revision: available.revision });
+  mark('bundled converter and both theme formats bound to Core; import, template selection and authenticated asset bytes work');
   docker(['stop', `${c.project}-worker-1`]);
   const queued = await call('POST', '/api/v1/imports?format=csv', 'title\nWorker停止期间的记录\n', 202, true);
   await new Promise(r => setTimeout(r, 1500)); assert.equal((await call('GET', `/api/v1/imports/${queued.id}`)).state, 'validating');
@@ -81,9 +97,14 @@ try {
   assert.equal(restoredTheme.enabled, false);
   await activate(restored, restoredTheme);
   assert.equal((await restored('GET', '/api/v1/themes')).selected_slug, '', 'restoration clears personal activation as well as package activation');
-  mark('clone restore preserves core data and package bytes; explicit reactivation required');
+  const restoredGallery = (await restored('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'notes-gallery');
+  assert.equal(restoredGallery.enabled, false); assert.equal(restoredGallery.digest, gallery.digest);
+  await restored('GET', assetPath(gallery, firstAsset), undefined, 404);
+  await activate(restored, restoredGallery); await checkAssets(restored);
+  mark('clone restore preserves core data, template, image, font and license bytes; explicit reactivation required');
   await updateInstance(names[0], image); call = client(a.origin); await call('POST', '/api/v1/auth/login', credentials); c = await config(names[0]);
-  assert.equal((await call('GET', '/api/v1/themes')).selected_slug, 'notes-hanami', 'normal update preserves personal appearance');
+  assert.equal((await call('GET', '/api/v1/themes')).selected_slug, 'notes-gallery', 'normal update preserves personal appearance');
+  await checkAssets(call);
   const operationFile = `.local/instances/${names[0]}/operation.json`, completed = await readOperation(operationFile);
   assert.equal(completed.phase, 'completed'); await call('POST', '/api/v1/entries', { title: '中断后仍可救援的新写入' }, 201);
   // Persist the exact state an interruption leaves after switching databases.

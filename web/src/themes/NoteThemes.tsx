@@ -6,6 +6,7 @@ import { Button } from '../components/ui/Button';
 import { Dialog } from '../components/ui/Dialog';
 import { Icon } from '../components/ui/Icon';
 import { Problem } from '../public/Public';
+import { ThemePreview } from './ThemePreview';
 import './themes.css';
 
 type Theme = components['schemas']['NotesTheme'];
@@ -32,9 +33,12 @@ export function NoteThemeProvider({ userID, children }: { userID: string; childr
   return <NoteThemesContext.Provider value={{ userID, options: themes.isError ? undefined : themes.data, error: themes.error, loading: themes.isPending }}>{children}</NoteThemesContext.Provider>;
 }
 
-export function useNoteThemeStyle() {
+export function useNoteTheme() {
   const { options } = useContext(NoteThemesContext);
-  return notesThemeStyle(options?.items.find(item => item.manifest.slug === options.selected_slug)?.manifest.notes_theme);
+  return options?.items.find(item => item.manifest.slug === options.selected_slug);
+}
+export function useNoteThemeStyle() {
+  return notesThemeStyle(useNoteTheme()?.manifest.notes_theme);
 }
 
 export function NoteThemeButton() {
@@ -51,7 +55,7 @@ function ThemePicker({ onClose }: { onClose: () => void }) {
   const save = useMutation({ mutationFn: () => result(client.PUT('/api/v1/themes/selection', { body: { slug, revision: theme?.revision ?? 0 } })), onSuccess: async () => { await cache.invalidateQueries({ queryKey: ['themes', userID] }); onClose(); }, onError: () => { void cache.invalidateQueries({ queryKey: ['themes', userID] }); } });
   return <Dialog title="札记外观" onClose={onClose} wide>
     <div className="notes-appearance-picker">
-      <p>换一种纸色，继续写自己的故事。预览不会保存，应用后仅改变你的札记外观。</p>
+      <p>选择适合自己的札记排版。这里使用示例内容预览，应用后仅改变你的私人札记。</p>
       {loading ? <p role="status">正在读取可用外观…</p> : <>
         <div className="notes-appearance-options" role="group" aria-label="选择札记外观">
           <Button aria-pressed={!slug} disabled={save.isPending} onClick={() => setChosen('')}><strong>纸页原色</strong><span>默认外观</span></Button>
@@ -60,7 +64,7 @@ function ThemePicker({ onClose }: { onClose: () => void }) {
         {!options?.items.length && !error && <p className="muted">管理员启用主题扩展后，会出现在这里。纸页原色始终可用。</p>}
         <section className="notes-surface notes-appearance-preview" style={notesThemeStyle(theme?.manifest.notes_theme)} aria-label="外观预览">
           <span className="notes-preview-caption">外观预览</span>
-          <article className="note-sheet"><span className="note-sheet-work"><Icon name="book" />喜欢的那部作品</span><h3>把喜欢的故事留在纸上</h3><p className="note-sheet-excerpt">故事结束后，仍有一些画面留在心里。翻开这一页，再读一读当时的心情。</p><span className="note-sheet-tag">#温柔的故事</span></article>
+          <ThemePreview release={theme} />
         </section>
         <div className="notes-appearance-actions"><Button className="button secondary" disabled={save.isPending} onClick={onClose}>取消</Button><Button className="button primary" disabled={save.isPending || (!!slug && !theme)} onClick={() => save.mutate()}>{save.isPending ? '正在保存…' : slug ? '应用外观' : '恢复默认外观'}</Button></div>
       </>}

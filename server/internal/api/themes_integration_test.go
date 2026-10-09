@@ -3,6 +3,8 @@
 package api
 
 import (
+	"animemo.local/server/internal/plugintest"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -169,4 +171,65 @@ func TestBundledNotesThemeIntegrity(t *testing.T) {
 	if err != nil || releases[0].Enabled || releases[0].Health != "quarantined" {
 		t.Fatal("damaged theme was not isolated", err)
 	}
+}
+
+func TestThemePresentationResources(t *testing.T) {
+	pool := isolatedDatabase(t)
+	base := coverServer(t, pool)
+	ctx := context.Background()
+	admin, owner := registerBrowser(t, base, "gallery-admin@example.test")
+	alice, _ := registerBrowser(t, base, "gallery-user@example.test")
+	if _, err := pool.Exec(ctx, `UPDATE users SET is_admin=true WHERE id=$1`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	pack := plugintest.Gallery(t)
+	raw, _ := json.Marshal(pack)
+	pluginFile(t, admin, base, "/api/v1/admin/plugins", raw, 201)
+	assetPath := "/api/v1/themes/notes-gallery/1.0.0/assets/notebook.png"
+	request(t, browser(), base, "GET", assetPath, nil, 401)
+	request(t, alice, base, "GET", assetPath, nil, 404)
+	action := func(name string, revision int64, status int) {
+		request(t, admin, base, "POST", "/api/v1/admin/plugins/notes-gallery", plugins.Action{Action: name, Version: "1.0.0", Revision: revision}, status)
+	}
+	action("activate", 1, 200)
+	for _, asset := range pack.Manifest.NotesTheme.Presentation.Assets {
+		response := request(t, alice, base, "GET", "/api/v1/themes/notes-gallery/1.0.0/assets/"+asset.Name, nil, 200)
+		if response.header.Get("Content-Type") != asset.ContentType || response.header.Get("Cache-Control") != "private, no-store" {
+			t.Fatal("resource headers differ")
+		}
+		if !bytes.Equal(response.body, pack.Assets[asset.Name]) {
+			t.Fatal("resource bytes changed")
+		}
+	}
+	request(t, alice, base, "GET", "/api/v1/themes/notes-gallery/9.0.0/assets/notebook.png", nil, 404)
+	request(t, alice, base, "GET", "/api/v1/themes/notes-gallery/1.0.0/assets/missing.png", nil, 404)
+	options := decodeAs[plugins.ThemeOptions](t, request(t, alice, base, "GET", "/api/v1/themes", nil, 200))
+	if len(options.Items) != 1 || options.Items[0].Manifest.NotesTheme.Presentation.Scope != "private.notes" {
+		t.Fatal("template unavailable")
+	}
+	request(t, alice, base, "PUT", "/api/v1/themes/selection", plugins.ThemeSelection{Slug: "notes-gallery", Revision: 2}, 200)
+	pack.Manifest.NotesTheme.Presentation.CSS += ".custom{padding:10px}"
+	changed, _ := json.Marshal(pack)
+	pluginFile(t, admin, base, "/api/v1/admin/plugins", changed, 409)
+	action("disable", 2, 200)
+	request(t, alice, base, "GET", assetPath, nil, 404)
+	action("activate", 3, 200)
+	if err := plugins.Preflight(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE plugin_releases SET assets=jsonb_set(assets,'{notebook.png}',to_jsonb('AA=='::text)) WHERE slug='notes-gallery'`); err != nil {
+		t.Fatal(err)
+	}
+	request(t, alice, base, "GET", assetPath, nil, 404)
+	if err := plugins.Preflight(ctx, pool); err == nil {
+		t.Fatal("damaged resource passed upgrade preflight")
+	}
+	if err := plugins.QuarantineInvalid(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	options = decodeAs[plugins.ThemeOptions](t, request(t, alice, base, "GET", "/api/v1/themes", nil, 200))
+	if len(options.Items) != 0 || options.SelectedSlug != "" {
+		t.Fatal("damaged theme did not fall back")
+	}
+	action("activate", 5, 400)
 }

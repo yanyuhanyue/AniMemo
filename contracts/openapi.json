@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "AniMemo API",
-    "version": "1.4.0-alpha.2",
+    "version": "1.4.0-alpha.3",
     "description": "AniMemo 新项目 API。写请求必须携带与 PUBLIC_ORIGIN 完全一致的 Origin；登录使用 HttpOnly Cookie。所有 API 响应不缓存。详情见 docs/api.md。管理路径需要当前账号仍有管理权限，版本冲突为 409。"
   },
   "servers": [
@@ -5878,6 +5878,71 @@
           }
         }
       }
+    },
+    "/api/v1/themes/{slug}/{version}/assets/{name}": {
+      "get": {
+        "summary": "Read a declared asset of an enabled notes theme; authentication required",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validated local theme resource",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "font/woff2": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -11634,6 +11699,9 @@
               "comfortable",
               "relaxed"
             ]
+          },
+          "presentation": {
+            "$ref": "#/components/schemas/NotesPresentation"
           }
         },
         "required": [
@@ -11683,6 +11751,83 @@
         "required": [
           "slug",
           "revision"
+        ]
+      },
+      "ThemeAsset": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+          },
+          "content_type": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "font/woff2",
+              "text/plain"
+            ]
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "name",
+          "content_type",
+          "sha256"
+        ]
+      },
+      "NotesPresentation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "private.notes"
+            ]
+          },
+          "list": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "card": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "reader": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "css": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "assets": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/ThemeAsset"
+            }
+          }
+        },
+        "required": [
+          "schema",
+          "scope",
+          "list",
+          "card",
+          "reader",
+          "css"
         ]
       }
     },

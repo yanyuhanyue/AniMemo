@@ -24,3 +24,14 @@ func (a *API) themeSelect(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, 200, map[string]bool{"updated": true})
 }
+
+func (a *API) themeAsset(w http.ResponseWriter, r *http.Request) {
+	data, kind, err := a.plugins.ThemeAsset(r.Context(), r.PathValue("slug"), r.PathValue("version"), r.PathValue("name"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", kind)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}

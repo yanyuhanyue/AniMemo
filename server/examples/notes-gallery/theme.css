@@ -1,0 +1,34 @@
+.exhibition { padding: 20px 0 8px; }
+.exhibition-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin: 0 0 24px; padding: 12px 6px 24px; border-bottom: 1px solid #b8c7db; }
+.edition { display: block; font-family: var(--theme-font), sans-serif; font-size: 11px; letter-spacing: .12em; color: #566482; line-height: 1.8; }
+.exhibition-heading h3 { margin: 12px 0 8px; font-size: clamp(22px, 3vw, 30px); font-weight: 600; letter-spacing: .03em; }
+.exhibition-heading p { margin: 0; font-size: 13px; color: #536075; }
+.notebook { display: block; width: 70px; height: 70px; flex: none; transform: rotate(6deg); }
+.shelf { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 24px; align-items: start; }
+.exhibit { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 18px; padding: 24px; min-width: 0; background: #fff; border: 1px solid #bfccdc; border-radius: 5px 18px 5px 5px; box-shadow: 0 5px 0 #dce4ed; }
+.exhibit-cover { min-width: 0; }
+.exhibit-cover:empty { display: none; }
+.exhibit-cover:empty + .exhibit-copy { grid-column: 1 / -1; }
+.exhibit-cover img { display: block; width: 100%; height: auto; border-radius: 3px; }
+.exhibit-copy { min-width: 0; }
+.work { margin-bottom: 12px; color: #4d527d; font-size: 12px; line-height: 1.8; }
+.exhibit-copy h3 { margin: 0 0 10px; font-size: 20px; line-height: 1.65; }
+.excerpt { color: #4b586c; font-size: 14px; line-height: 2; }
+.excerpt p { margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; white-space: pre-wrap; }
+.exhibit-copy figure { margin: 16px 0 0; }
+.exhibit-copy figure img { width: 100%; max-height: 160px; object-fit: cover; border-radius: 3px; }
+.exhibit-footer { grid-column: 1 / -1; display: grid; gap: 12px; border-top: 1px dashed #bac8d9; padding-top: 14px; }
+.exhibit-footer button { justify-self: end; }
+.reading-room { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 32px; }
+.reading-aside { display: flex; flex-direction: column; gap: 18px; padding-right: 20px; border-right: 1px solid #c8d4e2; font-size: 13px; line-height: 1.8; }
+.reader-mark { width: 68px; height: 68px; margin-top: 16px; transform: rotate(-6deg); }
+.reading-body { min-width: 0; font-size: 17px; line-height: 2; }
+@media (max-width: 760px) {
+ .shelf { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+ .exhibit { grid-template-columns: 64px minmax(0, 1fr); padding: 22px; gap: 20px; }
+ .exhibition-heading { gap: 12px; }
+ .notebook { width: 48px; height: 48px; }
+ .reading-room { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+ .reading-aside { flex-direction: row; align-items: flex-start; flex-wrap: wrap; padding: 0 0 18px; border-right: 0; border-bottom: 1px solid #c8d4e2; }
+ .reader-mark { display: none; }
+}

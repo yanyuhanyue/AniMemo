@@ -19,3 +19,8 @@
   .notes-appearance-preview { padding: 12px; }
   .notes-appearance-preview .note-sheet { padding: 18px; }
 }
+/* Presentation CSS remains inside this clipped, isolated region. */
+.theme-frame { display: block; min-width: 0; contain: layout paint; isolation: isolate; color: var(--notes-ink, #273345); font-family: var(--am-font-body); }
+.notes-appearance-preview:has(.theme-frame) { padding: 16px; }
+.notes-appearance-options button { flex: 1 1 130px; }
+@media(max-width:760px) { .notes-appearance-options button { padding: 12px; } }

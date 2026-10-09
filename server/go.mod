@@ -8,8 +8,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.1
 	github.com/aws/smithy-go v1.28.1
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/tdewolff/parse/v2 v2.8.13
 	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/crypto v0.57.0
+	golang.org/x/net v0.60.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
@@ -25,6 +28,5 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )

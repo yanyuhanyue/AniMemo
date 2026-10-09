@@ -121,6 +121,7 @@ func New(pool *pgxpool.Pool, config Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/plugins", a.require(a.pluginList))
 	mux.HandleFunc("GET /api/v1/themes", a.require(a.themeList))
 	mux.HandleFunc("PUT /api/v1/themes/selection", a.require(a.themeSelect))
+	mux.HandleFunc("GET /api/v1/themes/{slug}/{version}/assets/{name}", a.require(a.themeAsset))
 	mux.HandleFunc("POST /api/v1/plugins/{slug}/imports", a.require(a.pluginImport))
 	mux.HandleFunc("POST /api/v1/auth/register", a.authLimit(a.register))
 	mux.HandleFunc("GET /api/v1/auth/options", a.emailOptions)

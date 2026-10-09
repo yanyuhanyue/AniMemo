@@ -23,9 +23,10 @@ import (
 )
 
 // API 1 accepts the original journal conversion. API 2 also accepts import
-// provenance fields; API 3 adds a declarative notes theme with no executable module.
+// provenance fields; API 3 adds theme tokens; API 4 adds inert HTML/CSS templates
+// and package assets. Themes never carry an executable module.
 const (
-	HostAPI         = 3
+	HostAPI         = 4
 	MinHostAPI      = 1
 	MaxPackageBytes = 12 << 20
 	MaxModuleBytes  = 8 << 20
@@ -71,6 +72,9 @@ func Compatible(m pluginproto.Manifest) error {
 		if m.HostMin < 3 {
 			return invalid("札记主题需要宿主接口 3。")
 		}
+		if m.NotesTheme != nil && m.NotesTheme.Presentation != nil && m.HostMin < 4 {
+			return invalid("札记模板与资源需要宿主接口 4。")
+		}
 		return validateNotesTheme(m.NotesTheme)
 	default:
 		return invalid("不支持此扩展能力。")
@@ -103,6 +107,12 @@ func ParsePackage(data []byte) (pluginproto.Package, string, error) {
 		p.Module = []byte{}
 	} else if len(p.Module) == 0 {
 		return p, "", invalid("文件转换器缺少模块。")
+	}
+	if p.Assets == nil {
+		p.Assets = map[string][]byte{}
+	}
+	if err := validateThemeAssets(p); err != nil {
+		return p, "", err
 	}
 	canonical, _ := json.Marshal(m)
 	return p, fmt.Sprintf("%x", sha256.Sum256(canonical)), nil

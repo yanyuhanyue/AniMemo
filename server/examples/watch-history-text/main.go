@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"animemo.local/server/pkg/pluginproto"
+	pluginproto "animemo.local/server/pkg/converterproto"
 )
 
 type entry struct {

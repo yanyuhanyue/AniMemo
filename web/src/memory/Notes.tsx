@@ -6,8 +6,8 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
 import { NoteThemeButton, useNoteThemeStyle } from "../themes/NoteThemes";
-import { NoteBody } from "./NoteBody";
-import { NoteList, NoteWork, noteDate } from "./NoteList";
+import { NoteReading } from "./NoteReading";
+import { NoteList } from "./NoteList";
 import { Icon } from "../components/ui/Icon";
 import { Pager, Problem } from "../public/Public";
 import { TagField } from "../journal/ManageTools";
@@ -793,19 +793,7 @@ export function Notes({
       {opened && (
         <Dialog title={opened.title} eyebrow={kind === "note" ? "札记" : undefined} onClose={() => setOpened(null)} wide className={`note-reader${kind === "note" ? " notes-surface" : ""}`} style={kind === "note" ? themeStyle : undefined}>
           <div className="memory-reading note-reading">
-            {kind === "note" && <NoteWork title={titles.get(opened.anime_id)} linked={!!opened.anime_id} />}
-            <p className="memory-meta">
-              {kind === "note" ? noteDate(opened) : opened.occurred_on || "不记日期"} ·{" "}
-              {visibilityLabels[opened.visibility]}
-            </p>
-            {opened.spoiler ? (
-              <details>
-                <summary>展开剧透内容</summary>
-                <NoteBody note={opened} />
-              </details>
-            ) : (
-              <NoteBody note={opened} />
-            )}
+            <NoteReading key={opened.id} note={opened} workTitle={titles.get(opened.anime_id)} themed={kind === "note"} />
             <MemoryRevisions userID={userID} id={opened.id} />
             <div className="memory-actions">
               <Button

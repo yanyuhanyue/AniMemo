@@ -76,9 +76,9 @@ try {
   assert.ok(await picture.evaluate(img => img.naturalWidth > 0));
   await axe(`默认札记: list`);
   await click(page.getByRole('button', { name: `阅读 ${spoiler.title}`, exact: true }));
-  assert.equal(await page.getByText(spoiler.body, { exact: true }).isVisible(), false);
+  assert.equal(await page.getByText(spoiler.body, { exact: true }).count(), 0, 'spoiler body is not mounted before disclosure');
   await click(page.getByText('展开剧透内容', { exact: true }));
-  assert.equal(await page.getByText(spoiler.body, { exact: true }).isVisible(), true);
+  await page.getByText(spoiler.body, { exact: true }).waitFor({ state: 'visible' });
   await page.getByRole('dialog').locator('img').waitFor();
   await axe(`默认札记: reader`);
   await close();

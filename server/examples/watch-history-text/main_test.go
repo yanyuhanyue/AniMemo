@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"animemo.local/server/pkg/pluginproto"
+	pluginproto "animemo.local/server/pkg/converterproto"
 )
 
 func TestTextRecordsAndAmbiguity(t *testing.T) {

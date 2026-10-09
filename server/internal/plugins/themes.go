@@ -52,7 +52,7 @@ func validateNotesTheme(t *pluginproto.NotesTheme) error {
 	if (t.HeadingFont != "serif" && t.HeadingFont != "sans") || (t.ReadingSize != "standard" && t.ReadingSize != "large") || (t.Spacing != "comfortable" && t.Spacing != "relaxed") {
 		return invalid("主题字体、字号或留白选项无效。")
 	}
-	return nil
+	return validatePresentation(t.Presentation)
 }
 
 // Theme selections confer no access to records and never execute plugin code.
@@ -131,4 +131,31 @@ func (s *Service) SelectTheme(ctx context.Context, owner string, input ThemeSele
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// Assets are decorative package files, never memory images. Access still requires
+// login and a currently enabled, healthy release (including preview use).
+func (s *Service) ThemeAsset(ctx context.Context, slug, version, name string) ([]byte, string, error) {
+	if !slugPattern.MatchString(slug) || !versionPattern.MatchString(version) || !assetName.MatchString(name) {
+		return nil, "", fault.New("not_found", "主题资源不存在。")
+	}
+	var m pluginproto.Manifest
+	var digest string
+	var data []byte
+	err := s.pool.QueryRow(ctx, `SELECT r.manifest,r.digest,decode(r.assets->>$3,'base64') FROM plugin_releases r JOIN plugin_deployments d ON d.slug=r.slug AND d.active_version=r.version WHERE r.slug=$1 AND r.version=$2 AND d.enabled AND d.health='ready'`, slug, version, name).Scan(&m, &digest, &data)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, "", fault.New("not_found", "主题资源不可用。")
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if !themeManifestValid(m, digest) || m.NotesTheme.Presentation == nil {
+		return nil, "", fault.New("not_found", "主题资源不可用。")
+	}
+	for _, a := range m.NotesTheme.Presentation.Assets {
+		if a.Name == name && fmt.Sprintf("%x", sha256.Sum256(data)) == a.SHA256 {
+			return data, a.ContentType, nil
+		}
+	}
+	return nil, "", fault.New("not_found", "主题资源不存在或已损坏。")
 }

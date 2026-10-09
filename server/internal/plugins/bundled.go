@@ -64,7 +64,7 @@ func EnsureBundled(ctx context.Context, pool *pgxpool.Pool, directory, executabl
 			return err
 		}
 		var existing string
-		if err = tx.QueryRow(ctx, `INSERT INTO plugin_releases(slug,version,digest,manifest,module,publisher_id,distribution) VALUES($1,$2,$3,$4,$5,'ANIMEMO_FIRST_PARTY','bundled') ON CONFLICT(slug,version) DO UPDATE SET slug=excluded.slug RETURNING digest`, p.Manifest.Slug, p.Manifest.Version, digest, p.Manifest, p.Module).Scan(&existing); err != nil {
+		if err = tx.QueryRow(ctx, `INSERT INTO plugin_releases(slug,version,digest,manifest,module,assets,publisher_id,distribution) VALUES($1,$2,$3,$4,$5,$6,'ANIMEMO_FIRST_PARTY','bundled') ON CONFLICT(slug,version) DO UPDATE SET slug=excluded.slug RETURNING digest`, p.Manifest.Slug, p.Manifest.Version, digest, p.Manifest, p.Module, p.Assets).Scan(&existing); err != nil {
 			return err
 		}
 		if existing != digest {
@@ -85,7 +85,7 @@ func EnsureBundled(ctx context.Context, pool *pgxpool.Pool, directory, executabl
 
 // Core recovery remains available even when an optional package is damaged.
 func QuarantineInvalid(ctx context.Context, pool *pgxpool.Pool) error {
-	rows, err := pool.Query(ctx, `SELECT r.slug,r.manifest,r.module,r.digest FROM plugin_deployments d JOIN plugin_releases r ON r.slug=d.slug AND r.version=d.active_version WHERE d.enabled`)
+	rows, err := pool.Query(ctx, `SELECT r.slug,r.manifest,r.module,r.digest,r.assets FROM plugin_deployments d JOIN plugin_releases r ON r.slug=d.slug AND r.version=d.active_version WHERE d.enabled`)
 	if err != nil {
 		return err
 	}
@@ -95,14 +95,16 @@ func QuarantineInvalid(ctx context.Context, pool *pgxpool.Pool) error {
 		var slug, digest string
 		var manifest json.RawMessage
 		var module []byte
-		if err = rows.Scan(&slug, &manifest, &module, &digest); err != nil {
+		var assets map[string][]byte
+		if err = rows.Scan(&slug, &manifest, &module, &digest, &assets); err != nil {
 			rows.Close()
 			return err
 		}
 		data, _ := json.Marshal(struct {
-			Manifest json.RawMessage `json:"manifest"`
-			Module   []byte          `json:"module"`
-		}{manifest, module})
+			Manifest json.RawMessage   `json:"manifest"`
+			Module   []byte            `json:"module"`
+			Assets   map[string][]byte `json:"assets,omitempty"`
+		}{manifest, module, assets})
 		parsed, actual, check := ParsePackage(data)
 		if check == nil && actual == digest {
 			check = validatePackageRuntime(ctx, parsed.Manifest, module)

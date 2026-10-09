@@ -2,7 +2,7 @@
   "schema": 1,
   "slug": "watch-history-text",
   "name": "TXT 观看记录导入",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "解析月日或制表符格式的观看文本，保留日期、刷次、笔记及来源行号；由核心预览选择新建作品或匹配已有作品追加。只读取所选 UTF-8 文件。",
   "protocol": 1,
   "host_api_min": 2,

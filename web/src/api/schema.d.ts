@@ -6123,6 +6123,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/themes/{slug}/{version}/assets/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read a declared asset of an enabled notes theme; authentication required */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                    version: string;
+                    name: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Validated local theme resource */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                        "image/jpeg": string;
+                        "font/woff2": string;
+                        "text/plain": string;
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -7481,6 +7525,7 @@ export interface components {
             reading_size: "standard" | "large";
             /** @enum {string} */
             spacing: "comfortable" | "relaxed";
+            presentation?: components["schemas"]["NotesPresentation"];
         };
         ThemeOptions: {
             items: components["schemas"]["PluginRelease"][];
@@ -7489,6 +7534,23 @@ export interface components {
         ThemeSelection: {
             slug: string;
             revision: number;
+        };
+        ThemeAsset: {
+            name: string;
+            /** @enum {string} */
+            content_type: "image/png" | "image/jpeg" | "font/woff2" | "text/plain";
+            sha256: string;
+        };
+        NotesPresentation: {
+            /** @enum {integer} */
+            schema: 1;
+            /** @enum {string} */
+            scope: "private.notes";
+            list: string;
+            card: string;
+            reader: string;
+            css: string;
+            assets?: components["schemas"]["ThemeAsset"][];
         };
     };
     responses: {
