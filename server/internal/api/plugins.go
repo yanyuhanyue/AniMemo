@@ -15,6 +15,15 @@ func (a *API) pluginList(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	if r.URL.Path == "/api/v1/plugins" {
+		converters := make([]plugins.Release, 0, len(items))
+		for _, item := range items {
+			if len(item.Manifest.Capabilities) == 1 && item.Manifest.Capabilities[0] == "import.convert" {
+				converters = append(converters, item)
+			}
+		}
+		items = converters
+	}
 	write(w, 200, map[string]any{"items": items})
 }
 func (a *API) pluginInstall(w http.ResponseWriter, r *http.Request) {

@@ -3009,7 +3009,7 @@ export interface paths {
             };
         };
         put?: never;
-        /** Install an administrator-reviewed JSON/base64 WASI package (max 12 MiB); never enables automatically */
+        /** Install a reviewed file converter or declarative theme package; never enables automatically */
         post: {
             parameters: {
                 query?: never;
@@ -6045,6 +6045,84 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/themes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List enabled notes themes and the current user selection; unavailable themes fall back to Core */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ThemeOptions"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/themes/selection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Select a notes theme against its current deployment revision; empty slug restores the default */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ThemeSelection"];
+                };
+            };
+            responses: {
+                /** @description Success */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PluginUpdated"];
+                    };
+                };
+                default: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -6680,6 +6758,7 @@ export interface components {
             host_api_max: number;
             capabilities: string[];
             module_sha256: string;
+            notes_theme?: components["schemas"]["NotesTheme"];
         };
         PluginRelease: {
             manifest: components["schemas"]["PluginManifest"];
@@ -7387,6 +7466,29 @@ export interface components {
             id: string;
             width: number;
             height: number;
+        };
+        NotesTheme: {
+            canvas: string;
+            paper: string;
+            ink: string;
+            muted: string;
+            primary: string;
+            border: string;
+            rule: string;
+            /** @enum {string} */
+            heading_font: "serif" | "sans";
+            /** @enum {string} */
+            reading_size: "standard" | "large";
+            /** @enum {string} */
+            spacing: "comfortable" | "relaxed";
+        };
+        ThemeOptions: {
+            items: components["schemas"]["PluginRelease"][];
+            selected_slug: string;
+        };
+        ThemeSelection: {
+            slug: string;
+            revision: number;
         };
     };
     responses: {

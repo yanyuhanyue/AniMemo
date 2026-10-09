@@ -60,7 +60,7 @@ func EnsureBundled(ctx context.Context, pool *pgxpool.Pool, directory, executabl
 		if err != nil {
 			return err
 		}
-		if err = ValidateModule(ctx, p.Module); err != nil {
+		if err = validatePackageRuntime(ctx, p.Manifest, p.Module); err != nil {
 			return err
 		}
 		var existing string
@@ -103,9 +103,9 @@ func QuarantineInvalid(ctx context.Context, pool *pgxpool.Pool) error {
 			Manifest json.RawMessage `json:"manifest"`
 			Module   []byte          `json:"module"`
 		}{manifest, module})
-		_, actual, check := ParsePackage(data)
+		parsed, actual, check := ParsePackage(data)
 		if check == nil && actual == digest {
-			check = ValidateModule(ctx, module)
+			check = validatePackageRuntime(ctx, parsed.Manifest, module)
 		}
 		if check != nil || actual != digest {
 			invalid = append(invalid, invalidPackage{slug})

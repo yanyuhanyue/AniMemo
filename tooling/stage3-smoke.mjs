@@ -25,14 +25,20 @@ try {
   created.push(names[0]); const a = await installInstance({ name: names[0], image, port: await port() }); let c = await config(names[0]);
   let call = client(a.origin); const credentials = { email: `${randomUUID()}@example.test`, password: `stage3-${randomUUID()}` };
   await call('POST', '/api/v1/setup', { ...credentials, display_name: '阶段三验收', token: c.setupToken }, 201);
-  let plugin = (await call('GET', '/api/v1/admin/plugins')).items[0];
+  let plugin = (await call('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'watch-history-text');
   assert.equal(plugin.publisher_id, 'ANIMEMO_FIRST_PARTY'); assert.equal(plugin.distribution, 'bundled'); assert.equal(plugin.enabled, false);
   const activate = async (use, p) => use('POST', `/api/v1/admin/plugins/${p.manifest.slug}`, { action: 'activate', version: p.manifest.version, revision: p.revision });
   await activate(call, plugin);
   const converted = await call('POST', '/api/v1/plugins/watch-history-text/imports?filename=2026.txt', '10月3日\n首刷 进程隔离验收 共12集\n', 202, true);
   await jobState(call, converted.id, 'ready'); await call('POST', `/api/v1/imports/${converted.id}`, { action: 'apply' }); await jobState(call, converted.id, 'done');
   assert.equal((await call('GET', '/api/v1/entries')).total, 1);
-  mark('bundled publisher bound to core; real isolated WASI child produces confirmed import');
+  const theme = (await call('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'notes-hanami');
+  assert.equal(theme.publisher_id, 'ANIMEMO_FIRST_PARTY'); assert.equal(theme.enabled, false);
+  await activate(call, theme);
+  const themeOptions = await call('GET', '/api/v1/themes');
+  await call('PUT', '/api/v1/themes/selection', { slug: theme.manifest.slug, revision: themeOptions.items[0].revision });
+  assert.equal((await call('GET', '/api/v1/themes')).selected_slug, 'notes-hanami');
+  mark('bundled converter and declarative theme bound to Core; real import and personal theme selection work');
   docker(['stop', `${c.project}-worker-1`]);
   const queued = await call('POST', '/api/v1/imports?format=csv', 'title\nWorker停止期间的记录\n', 202, true);
   await new Promise(r => setTimeout(r, 1500)); assert.equal((await call('GET', `/api/v1/imports/${queued.id}`)).state, 'validating');
@@ -43,10 +49,15 @@ try {
   mark('web does not execute queued work; worker restart resumes durable jobs');
   const backup = await backupInstance(names[0]); created.push(names[1]); const b = await installInstance({ name: names[1], backup, port: await port() }); const restored = client(b.origin);
   await restored('POST', '/api/v1/auth/login', credentials);
-  const clone = (await restored('GET', '/api/v1/admin/plugins')).items[0]; assert.equal(clone.enabled, false); assert.equal(clone.health, 'review_required'); assert.equal((await restored('GET', '/api/v1/entries')).total, 2);
+  const clone = (await restored('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'watch-history-text'); assert.equal(clone.enabled, false); assert.equal(clone.health, 'review_required'); assert.equal((await restored('GET', '/api/v1/entries')).total, 2);
   await activate(restored, clone);
+  const restoredTheme = (await restored('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'notes-hanami');
+  assert.equal(restoredTheme.enabled, false);
+  await activate(restored, restoredTheme);
+  assert.equal((await restored('GET', '/api/v1/themes')).selected_slug, '', 'restoration clears personal activation as well as package activation');
   mark('clone restore preserves core data and package bytes; explicit reactivation required');
   await updateInstance(names[0], image); call = client(a.origin); await call('POST', '/api/v1/auth/login', credentials); c = await config(names[0]);
+  assert.equal((await call('GET', '/api/v1/themes')).selected_slug, 'notes-hanami', 'normal update preserves personal appearance');
   const operationFile = `.local/instances/${names[0]}/operation.json`, completed = await readOperation(operationFile);
   assert.equal(completed.phase, 'completed'); await call('POST', '/api/v1/entries', { title: '中断后仍可救援的新写入' }, 201);
   // Persist the exact state an interruption leaves after switching databases.
@@ -58,7 +69,7 @@ try {
   docker(['exec', `${c.project}-db-1`, 'psql', '-U', 'animemo', '-d', c.database, '-v', 'ON_ERROR_STOP=1', '-c', "UPDATE plugin_releases SET module=decode('00','hex') WHERE slug='watch-history-text'"]);
   docker(['restart', `${c.project}-app-1`]);
   await poll(async () => { try { return (await fetch(a.origin + '/api/ready')).ok; } catch { return false; } });
-  const quarantined = (await call('GET', '/api/v1/admin/plugins')).items[0]; assert.equal(quarantined.health, 'quarantined'); assert.equal(quarantined.enabled, false);
+  const quarantined = (await call('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'watch-history-text'); assert.equal(quarantined.health, 'quarantined'); assert.equal(quarantined.enabled, false);
   await call('POST', '/api/v1/admin/plugins/watch-history-text', { action: 'activate', version: quarantined.manifest.version, revision: quarantined.revision }, 400);
   assert.equal((await call('GET', '/api/v1/entries')).total, 2);
   mark('damaged optional extension quarantined; core stays available and integrity blocks activation');

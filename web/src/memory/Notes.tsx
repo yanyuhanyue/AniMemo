@@ -5,6 +5,7 @@ import type { components } from "../api/schema";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
+import { NoteThemeButton, useNoteThemeStyle } from "../themes/NoteThemes";
 import { NoteBody } from "./NoteBody";
 import { NoteList, NoteWork, noteDate } from "./NoteList";
 import { Icon } from "../components/ui/Icon";
@@ -66,6 +67,7 @@ export function NoteEditor({
   animeTitle?: string;
   onClose: () => void;
 }) {
+  const themeStyle = useNoteThemeStyle();
   const [tagText, setTagText] = useState(note?.tags.join(", ") ?? "");
   const [form, setForm] = useState(() => ({
     ...initialNote(note, kind, anime),
@@ -215,6 +217,7 @@ export function NoteEditor({
       onClose={onClose}
       wide
       className={`note-composer${kind === "note" ? " notes-surface" : ""}`}
+      style={kind === "note" ? themeStyle : undefined}
     >
       <form
         className="memory-form note-editor"
@@ -596,6 +599,7 @@ export function Notes({
   animeTitle?: string;
   character?: string;
 }) {
+  const themeStyle = useNoteThemeStyle();
   const [search, setSearch] = useState("");
   const [year, setYear] = useState("");
   const [highlight, setHighlight] = useState(false);
@@ -669,10 +673,13 @@ export function Notes({
             {kind === "note" ? "那些写下来，偶尔又想翻看的文字。" : "把那一帧和当时的心情放在一起。"}
           </p>
         </div>
+        <div className="notes-heading-actions">
+        {kind === "note" && <NoteThemeButton />}
         <Button className="button primary" onClick={() => setEditor(null)}>
           <Icon name="plus" />
           {kind === "note" ? "写札记" : "收藏瞬间"}
         </Button>
+        </div>
       </header>
       <div className="memory-filters notes-filters">
         <label className="notes-search">
@@ -784,7 +791,7 @@ export function Notes({
         />
       )}
       {opened && (
-        <Dialog title={opened.title} eyebrow={kind === "note" ? "札记" : undefined} onClose={() => setOpened(null)} wide className={`note-reader${kind === "note" ? " notes-surface" : ""}`}>
+        <Dialog title={opened.title} eyebrow={kind === "note" ? "札记" : undefined} onClose={() => setOpened(null)} wide className={`note-reader${kind === "note" ? " notes-surface" : ""}`} style={kind === "note" ? themeStyle : undefined}>
           <div className="memory-reading note-reading">
             {kind === "note" && <NoteWork title={titles.get(opened.anime_id)} linked={!!opened.anime_id} />}
             <p className="memory-meta">

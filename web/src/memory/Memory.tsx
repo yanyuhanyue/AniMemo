@@ -5,6 +5,7 @@ import { client, result, type User } from "../api/client";
 import { Button } from "../components/ui/Button";
 import { Icon } from "../components/ui/Icon";
 import { PageShell, Problem, PublicCard } from "../public/Public";
+import { useNoteThemeStyle } from "../themes/NoteThemes";
 import { Notes } from "./Notes";
 import { Characters } from "./Characters";
 import { Episodes } from "./Episodes";
@@ -43,6 +44,7 @@ function currentTab(): Tab {
   return hash in tabs ? (hash as Tab) : "notes";
 }
 export function MemoryWorkspace({ user }: { user: User }) {
+  const themeStyle = useNoteThemeStyle();
   const [tab, setTab] = useState(currentTab);
   const [anime, setAnime] = useState(() => new URLSearchParams(location.search).get("anime_id") ?? "");
   const [choosingAnime, setChoosingAnime] = useState(false);
@@ -77,7 +79,7 @@ export function MemoryWorkspace({ user }: { user: User }) {
     setTab(value);
   }
   return (
-    <div className="app-shell memory-shell" data-accent={user.accent} data-memory-section={tab}>
+    <div className="app-shell memory-shell" data-accent={user.accent} data-memory-section={tab} style={tab === "notes" ? themeStyle : undefined}>
       <a href="#memory-main" className="skip-link">
         跳到记忆正文
       </a>

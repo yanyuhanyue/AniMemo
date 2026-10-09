@@ -9,6 +9,7 @@ import { EmailConfirmation } from './accounts/EmailAccess';
 import { Connections } from './accounts/Connections';
 import { changeAccount } from './accounts/session';
 import { client, errorMessage, result } from './api/client';
+import { NoteThemeProvider } from './themes/NoteThemes';
 import { Journal } from './journal/Journal';
 
 export function App() {
@@ -42,10 +43,10 @@ function PrivateApp({ admin, columns, connections }: { admin: boolean; columns: 
   if (session.isPending) return <main className="opening-screen" role="status"><span className="wordmark">AniMemo.</span><span className="spinner" />正在打开你的记忆库…</main>;
   if (session.isError) return <main className="opening-screen"><span className="wordmark">AniMemo.</span><h1>暂时无法连接</h1><p role="alert">{errorMessage(session.error)}</p><Button className="button primary" onClick={() => session.refetch()}>重新连接</Button></main>;
   if (!session.data) return <Auth onAuthenticated={user => changeAccount(cache, user)} />;
-  if (location.pathname === '/memory') return <MemoryWorkspace key={session.data.id} user={session.data} />;
+  if (location.pathname === '/memory') return <NoteThemeProvider key={session.data.id} userID={session.data.id}><MemoryWorkspace user={session.data} /></NoteThemeProvider>;
   if (location.pathname === '/universe') return <Universe key={session.data.id} user={session.data} />;
   if (columns) return <MyColumns userID={session.data.id} />;
   if (connections) return <Connections userID={session.data.id} />;
   if (admin) return session.data.is_admin ? <Admin displayName={session.data.display_name} /> : <PageShell title="需要管理员权限"><a href="/">返回我的手账</a></PageShell>;
-  return <>{logout.isError && <div className="global-error" role="alert">退出失败：{errorMessage(logout.error)}</div>}<Journal key={session.data.id} user={session.data} onLogout={() => logout.mutate()} loggingOut={logout.isPending} /></>;
+  return <NoteThemeProvider key={session.data.id} userID={session.data.id}>{logout.isError && <div className="global-error" role="alert">退出失败：{errorMessage(logout.error)}</div>}<Journal key={session.data.id} user={session.data} onLogout={() => logout.mutate()} loggingOut={logout.isPending} /></NoteThemeProvider>;
 }

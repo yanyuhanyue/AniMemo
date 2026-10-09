@@ -31,8 +31,9 @@ FROM node:24.12.0-bookworm-slim AS extensions
 WORKDIR /build
 COPY --from=api /out/ /build/
 COPY server/examples/watch-history-text/manifest.json /build/manifest.json
+COPY server/examples/notes-hanami/manifest.json /build/theme.json
 COPY tooling/bundle-extensions.mjs /build/bundle-extensions.mjs
-RUN node bundle-extensions.mjs animemo watch-history-text.wasm manifest.json /build/extensions
+RUN node bundle-extensions.mjs animemo watch-history-text.wasm manifest.json /build/extensions theme.json
 
 FROM gcr.io/distroless/static-debian12:nonroot
 ARG ANIMEMO_VERSION=development

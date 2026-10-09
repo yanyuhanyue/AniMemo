@@ -1,0 +1,21 @@
+.notes-heading-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 12px 18px; }
+.notes-appearance-button { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; font-size: 12px; color: var(--am-muted); }
+.notes-appearance-button svg { width: 15px; height: 15px; }
+.notes-appearance-picker { padding: 24px 30px; }
+.notes-appearance-picker > p { font-size: 14px; color: var(--am-muted); line-height: 1.9; }
+.notes-appearance-options { display: flex; flex-wrap: wrap; gap: 12px; margin-block: 22px; }
+.notes-appearance-options button { display: grid; gap: 5px; flex: 1; min-width: 0; padding: 14px 18px; text-align: left; border: 1px solid #c9c3cc; border-radius: 6px; background: #fff; color: #39343e; }
+.notes-appearance-options button span { font-size: 12px; color: #706575; }
+.notes-appearance-options button[aria-pressed=true] { border-color: #785983; box-shadow: inset 0 0 0 1px #785983; background: #f7f0f9; }
+.notes-appearance-preview { padding: 20px; border-radius: 6px; }
+.notes-preview-caption { font-size: 12px; color: var(--am-muted); }
+.notes-appearance-preview .note-sheet { margin-top: 12px; padding: 24px; }
+.notes-appearance-preview h3 { margin-top: 20px; font-family: var(--notes-heading-font, Georgia, "Noto Serif CJK SC", "Songti SC", SimSun, serif); font-size: 23px; font-weight: 500; line-height: 1.6; }
+.notes-appearance-preview .note-sheet-tag { font-size: 12px; }
+.notes-appearance-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+@media(max-width:760px) {
+  .notes-heading-actions { gap: 4px; }
+  .notes-appearance-picker { padding: 20px; }
+  .notes-appearance-preview { padding: 12px; }
+  .notes-appearance-preview .note-sheet { padding: 18px; }
+}

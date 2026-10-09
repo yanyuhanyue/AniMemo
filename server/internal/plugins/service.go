@@ -76,7 +76,7 @@ func (s *Service) Install(ctx context.Context, actor string, data []byte) error 
 	if err != nil {
 		return err
 	}
-	if err := ValidateModule(ctx, p.Module); err != nil {
+	if err := validatePackageRuntime(ctx, p.Manifest, p.Module); err != nil {
 		return err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -181,7 +181,7 @@ func (s *Service) Change(ctx context.Context, actor, slug string, input Action) 
 		if fmt.Sprintf("%x", sha256.Sum256(canonical)) != digest || fmt.Sprintf("%x", sha256.Sum256(module)) != m.ModuleSHA256 {
 			return invalid("扩展完整性检查失败，请重新安装已审阅的包。")
 		}
-		if err := ValidateModule(ctx, module); err != nil {
+		if err := validatePackageRuntime(ctx, m, module); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `UPDATE plugin_deployments SET health='ready',health_reason='',active_version=$2,enabled=true,revision=revision+1,updated_at=now() WHERE slug=$1`, slug, input.Version)
@@ -222,6 +222,9 @@ func (s *Service) Convert(ctx context.Context, actor, slug string, input pluginp
 	}
 	if err := Compatible(m); err != nil {
 		return out, err
+	}
+	if m.Capabilities[0] != "import.convert" {
+		return out, invalid("此扩展不是文件转换器。")
 	}
 	callID := id.New()
 	if _, err = s.pool.Exec(ctx, `INSERT INTO plugin_invocations(id,actor_id,installation_id,package_digest,capability) VALUES($1,$2,$3,$4,'import.convert')`, callID, actor, installation, digest); err != nil {
@@ -283,7 +286,7 @@ func Preflight(ctx context.Context, pool *pgxpool.Pool) error {
 		if fmt.Sprintf("%x", sha256.Sum256(canonical)) != digest || fmt.Sprintf("%x", sha256.Sum256(module)) != m.ModuleSHA256 {
 			return fmt.Errorf("plugin %s@%s: package checksum mismatch", slug, version)
 		}
-		if err := ValidateModule(ctx, module); err != nil {
+		if err := validatePackageRuntime(ctx, m, module); err != nil {
 			return fmt.Errorf("plugin %s@%s: %w", slug, version, err)
 		}
 	}

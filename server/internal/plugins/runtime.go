@@ -23,9 +23,9 @@ import (
 )
 
 // API 1 accepts the original journal conversion. API 2 also accepts import
-// provenance fields; older converters remain valid without a migration layer.
+// provenance fields; API 3 adds a declarative notes theme with no executable module.
 const (
-	HostAPI         = 2
+	HostAPI         = 3
 	MinHostAPI      = 1
 	MaxPackageBytes = 12 << 20
 	MaxModuleBytes  = 8 << 20
@@ -59,8 +59,21 @@ func Compatible(m pluginproto.Manifest) error {
 	if m.Schema != 1 || m.Protocol != pluginproto.Version || m.HostMin < MinHostAPI || m.HostMin > HostAPI || m.HostMax < MinHostAPI || m.HostMin > m.HostMax {
 		return invalid("插件协议或宿主版本范围不兼容。")
 	}
-	if len(m.Capabilities) != 1 || m.Capabilities[0] != "import.convert" {
-		return invalid("仅支持 import.convert 权限；插件不能访问数据库、网络或宿主文件。")
+	if len(m.Capabilities) != 1 {
+		return invalid("每个扩展只能声明一种受支持的能力。")
+	}
+	switch m.Capabilities[0] {
+	case "import.convert":
+		if m.NotesTheme != nil {
+			return invalid("文件转换器不能包含主题声明。")
+		}
+	case "theme.notes":
+		if m.HostMin < 3 {
+			return invalid("札记主题需要宿主接口 3。")
+		}
+		return validateNotesTheme(m.NotesTheme)
+	default:
+		return invalid("不支持此扩展能力。")
 	}
 	return nil
 }
@@ -80,11 +93,29 @@ func ParsePackage(data []byte) (pluginproto.Package, string, error) {
 	if err := Compatible(m); err != nil {
 		return p, "", err
 	}
-	if len(p.Module) == 0 || len(p.Module) > MaxModuleBytes || fmt.Sprintf("%x", sha256.Sum256(p.Module)) != m.ModuleSHA256 {
+	if len(p.Module) > MaxModuleBytes || fmt.Sprintf("%x", sha256.Sum256(p.Module)) != m.ModuleSHA256 {
 		return p, "", invalid("模块大小或 SHA-256 校验失败。")
+	}
+	if m.NotesTheme != nil {
+		if len(p.Module) != 0 {
+			return p, "", invalid("声明式主题不能包含可执行模块。")
+		}
+		p.Module = []byte{}
+	} else if len(p.Module) == 0 {
+		return p, "", invalid("文件转换器缺少模块。")
 	}
 	canonical, _ := json.Marshal(m)
 	return p, fmt.Sprintf("%x", sha256.Sum256(canonical)), nil
+}
+
+func validatePackageRuntime(ctx context.Context, m pluginproto.Manifest, module []byte) error {
+	if m.NotesTheme != nil {
+		if len(module) != 0 {
+			return invalid("声明式主题不能包含可执行模块。")
+		}
+		return validateNotesTheme(m.NotesTheme)
+	}
+	return ValidateModule(ctx, module)
 }
 
 func runtimeConfig() wazero.RuntimeConfig {

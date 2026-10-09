@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "slug": "notes-hanami",
+  "name": "樱色信笺",
+  "version": "1.0.0",
+  "description": "让札记铺上一层淡樱纸色，保留海报、正文和熟悉的留白。只改变你自己的札记外观。",
+  "protocol": 1,
+  "host_api_min": 3,
+  "host_api_max": 3,
+  "capabilities": ["theme.notes"],
+  "notes_theme": {
+    "canvas": "#f7f0f4",
+    "paper": "#fffafb",
+    "ink": "#433d49",
+    "muted": "#706575",
+    "primary": "#694e65",
+    "border": "#ded1db",
+    "rule": "#ccb7c5",
+    "heading_font": "serif",
+    "reading_size": "standard",
+    "spacing": "comfortable"
+  }
+}

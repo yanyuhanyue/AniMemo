@@ -88,6 +88,7 @@ export async function restorePlan({backup,name,image}={}){
 const revokeExternalSQL=`DO $$ BEGIN
  IF to_regclass('memory_share_tokens') IS NOT NULL THEN DELETE FROM memory_share_tokens; END IF;
  IF to_regclass('achievement_backfills') IS NOT NULL THEN UPDATE achievement_backfills SET state='paused' WHERE state='running'; END IF;
+ IF to_regclass('user_note_themes') IS NOT NULL THEN DELETE FROM user_note_themes; END IF;
  IF to_regclass('plugin_deployments') IS NOT NULL THEN UPDATE plugin_deployments SET enabled=false,revision=revision+1; END IF;
  IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='plugin_deployments' AND column_name='health') THEN UPDATE plugin_deployments SET health='review_required',health_reason='恢复后需要重新审阅并启用。'; END IF;
  IF to_regclass('email_tokens') IS NOT NULL THEN DELETE FROM email_tokens; UPDATE email_outbox SET state='cancelled',payload=NULL WHERE state IN ('pending','sending'); END IF;
