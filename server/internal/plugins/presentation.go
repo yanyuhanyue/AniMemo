@@ -40,19 +40,9 @@ func validatePresentation(p *themeproto.Presentation) error {
 	if p.Schema != 1 || p.Scope != "private.notes" || len(p.Assets) > 8 {
 		return invalid("主题模板版本、作用范围或资源数量无效。")
 	}
-	assets := map[string]string{}
-	fonts := 0
-	for _, a := range p.Assets {
-		if !assetName.MatchString(a.Name) || assets[a.Name] != "" || !hashPattern.MatchString(a.SHA256) || !includes([]string{"image/png", "image/jpeg", "font/woff2", "text/plain"}, a.ContentType) {
-			return invalid("主题资源声明无效。")
-		}
-		assets[a.Name] = a.ContentType
-		if a.ContentType == "font/woff2" {
-			fonts++
-		}
-		if fonts > 1 {
-			return invalid("当前主题模板支持一个随包 WOFF2 字体。")
-		}
+	assets, err := validateAssetDeclarations(p.Assets)
+	if err != nil {
+		return err
 	}
 	for _, spec := range []struct {
 		text               string
@@ -67,6 +57,78 @@ func validatePresentation(p *themeproto.Presentation) error {
 		}
 	}
 	return validateThemeCSS(p.CSS, assets)
+}
+
+func validateAssetDeclarations(specs []themeproto.Asset) (map[string]string, error) {
+	if len(specs) > 8 {
+		return nil, invalid("主题资源最多 8 个。")
+	}
+	assets := map[string]string{}
+	fonts := 0
+	for _, a := range specs {
+		if !assetName.MatchString(a.Name) || assets[a.Name] != "" || !hashPattern.MatchString(a.SHA256) || !includes([]string{"image/png", "image/jpeg", "font/woff2", "text/plain"}, a.ContentType) {
+			return nil, invalid("主题资源声明无效。")
+		}
+		assets[a.Name] = a.ContentType
+		if a.ContentType == "font/woff2" {
+			fonts++
+		}
+		if fonts > 1 {
+			return nil, invalid("当前主题模板支持一个随包 WOFF2 字体。")
+		}
+	}
+	return assets, nil
+}
+
+func validateJournalPresentation(p themeproto.JournalPresentation) error {
+	if p.Schema != 1 || p.Scope != "private.journal" {
+		return invalid("手账模板版本或作用范围无效。")
+	}
+	assets, err := validateAssetDeclarations(p.Assets)
+	if err != nil {
+		return err
+	}
+	for _, spec := range []struct {
+		text               string
+		required, optional []string
+	}{
+		{p.List, []string{"items"}, nil},
+		{p.Card, []string{"title", "metadata", "read"}, []string{"poster", "notes", "tags", "facts", "actions"}},
+		{p.Row, []string{"title", "metadata", "read"}, []string{"poster", "notes", "tags", "facts", "actions"}},
+		{p.Detail, []string{"metadata", "recollection", "facts", "memory"}, []string{"poster", "original", "tags"}},
+	} {
+		if err := validateTemplate(spec.text, spec.required, spec.optional, assets); err != nil {
+			return err
+		}
+	}
+	return validateThemeCSS(p.CSS, assets)
+}
+
+// Shared files within a combined theme are stored once, with identical declarations.
+func themeAssets(m pluginproto.Manifest) ([]themeproto.Asset, error) {
+	declarations := []themeproto.Asset{}
+	if m.NotesTheme != nil && m.NotesTheme.Presentation != nil {
+		declarations = append(declarations, m.NotesTheme.Presentation.Assets...)
+	}
+	if m.JournalTheme != nil {
+		declarations = append(declarations, m.JournalTheme.Presentation.Assets...)
+	}
+	byName := map[string]themeproto.Asset{}
+	out := []themeproto.Asset{}
+	for _, asset := range declarations {
+		if previous, ok := byName[asset.Name]; ok {
+			if previous != asset {
+				return nil, invalid("同名主题资源的声明必须一致。")
+			}
+			continue
+		}
+		byName[asset.Name] = asset
+		out = append(out, asset)
+	}
+	if len(out) > 8 {
+		return nil, invalid("整个主题包最多包含 8 个不同资源。")
+	}
+	return out, nil
 }
 
 // HTML is parsed with the standard HTML5 rules; only inert structural elements,
@@ -157,7 +219,7 @@ func validateThemeCSS(source string, assets map[string]string) error {
 		return invalid("主题 CSS 为空、过大或包含不支持的转义。")
 	}
 	parser := css.NewParser(parse.NewInputString(source), false)
-	functions := []string{"rgb(", "rgba(", "hsl(", "hsla(", "calc(", "min(", "max(", "clamp(", "var(", "repeat(", "minmax(", "fit-content(", "linear-gradient(", "repeating-linear-gradient(", "radial-gradient(", "rotate(", "translate(", "translatex(", "translatey(", "scale(", "scalex(", "scaley(", "cubic-bezier(", "steps("}
+	functions := []string{"rgb(", "rgba(", "hsl(", "hsla(", "calc(", "min(", "max(", "clamp(", "var(", "repeat(", "minmax(", "fit-content(", "linear-gradient(", "repeating-linear-gradient(", "radial-gradient(", "rotate(", "translate(", "translatex(", "translatey(", "scale(", "scalex(", "scaley(", "cubic-bezier(", "steps(", "has(", "is(", "not(", "where("}
 	for {
 		grammar, _, data := parser.Next()
 		if grammar == css.ErrorGrammar {
@@ -207,9 +269,9 @@ func validateThemeCSS(source string, assets map[string]string) error {
 }
 
 func validateThemeAssets(p pluginproto.Package) error {
-	var specs []themeproto.Asset
-	if p.Manifest.NotesTheme != nil && p.Manifest.NotesTheme.Presentation != nil {
-		specs = p.Manifest.NotesTheme.Presentation.Assets
+	specs, err := themeAssets(p.Manifest)
+	if err != nil {
+		return err
 	}
 	if len(specs) != len(p.Assets) {
 		return invalid("主题资源文件与声明不一致。")

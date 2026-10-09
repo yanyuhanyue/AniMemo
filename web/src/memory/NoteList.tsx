@@ -4,7 +4,7 @@ import { CoverImage } from "../journal/CoverImage";
 import type { components } from "../api/schema";
 import { MemoryImage, visibilityLabels, type Note } from "./shared";
 
-import { useNoteTheme } from '../themes/NoteThemes';
+import { useNoteTheme } from '../themes/Themes';
 import { ThemeBoundary, ThemeFrame, ThemeTemplate } from '../themes/ThemeTemplate';
 
 const visibilityIcons = { private: "lock", unlisted: "link", public: "globe" } as const;

@@ -24,3 +24,10 @@
 .notes-appearance-preview:has(.theme-frame) { padding: 16px; }
 .notes-appearance-options button { flex: 1 1 130px; }
 @media(max-width:760px) { .notes-appearance-options button { padding: 12px; } }
+.notes-preview-modes { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.notes-preview-modes button { padding: 8px 16px; min-height: 44px; border: 1px solid #c8d4e2; border-radius: 5px; background: #fff; color: #495565; }
+.notes-preview-modes button[aria-pressed=true] { color: #3e4476; background: #e9edf7; border-color: #7785a6; }
+.journal-theme-surface { background: var(--notes-canvas, #eef2f6); border-radius: 8px; padding: 16px 28px 28px; margin-top: 20px; }
+.journal-theme-overview { background: var(--notes-canvas, #eef2f6); border-radius: 6px; padding: 24px; margin-bottom: 20px; }
+.detail-theme-cover-controls { border-bottom: 1px solid var(--am-border); padding: 0 0 20px; }
+@media(max-width:760px) { .journal-theme-surface { padding: 12px; } .journal-theme-overview { padding: 18px; } }

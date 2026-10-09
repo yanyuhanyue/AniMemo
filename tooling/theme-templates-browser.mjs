@@ -4,6 +4,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 const access = JSON.parse(await readFile(process.env.REVIEW_ADMIN_ACCESS || '.local/output/theme-review-access.json', 'utf8'));
+const packagePath = process.env.REVIEW_THEME_PACKAGE || '.local/output/notes-gallery.animemo-plugin';
 const origin = process.env.REVIEW_ORIGIN || access.origin;
 const output = process.env.REVIEW_OUTPUT || '.local/output/browser/theme-templates';
 await mkdir(output, { recursive: true });
@@ -32,14 +33,11 @@ try {
   original = (await inventory()).items.find(p => p.manifest.slug === 'notes-gallery' && p.active);
   await admin.goto(origin + '/admin#plugins');
   await admin.getByRole('navigation', { name: '管理导航' }).getByRole('button', { name: '插件', exact: true }).click();
-  if (!original) {
-    await admin.getByLabel('选择插件包').setInputFiles('.local/output/notes-gallery.animemo-plugin');
-    await admin.getByRole('button', { name: '已审核，安装此版本', exact: true }).click();
-    await admin.getByRole('dialog').waitFor({ state: 'detached' });
-  }
-  const card = admin.locator('.admin-plugin-card').filter({ hasText: '星笺展架' }).first();
-  if (await card.getByRole('button', { name: '启用此版本', exact: true }).count()) await card.getByRole('button', { name: '启用此版本', exact: true }).click();
-  await card.getByRole('button', { name: '停用', exact: true }).waitFor();
+  const packaged = JSON.parse(await readFile(packagePath, 'utf8'));
+  await admin.getByLabel('选择插件包').setInputFiles(packagePath);
+  await admin.getByRole('button', { name: '已审核，安装此版本', exact: true }).click();
+  await admin.getByRole('dialog').waitFor({ state: 'detached' });
+  await change((await inventory()).items.find(p => p.manifest.slug === packaged.manifest.slug && p.manifest.version === packaged.manifest.version), 'activate');
   await call(page, 'POST', '/api/v1/auth/register', { email: `templates-${randomUUID()}@example.test`, password: `test-${randomUUID()}`, display_name: '主题模板合成验收' });
   const entry = await call(page, 'POST', '/api/v1/entries', { title: '给夏天的来信 · 合成验收' });
   const png = await readFile('server/examples/notes-gallery/assets/notebook.png');
@@ -65,7 +63,7 @@ try {
   assert.equal(mediaRequests.length, 0, 'spoiler images never fetched before disclosure');
   const options = await call(page, 'GET', '/api/v1/themes');
   const chosen = options.items.find(i => i.manifest.slug === options.selected_slug);
-  await page.waitForFunction(f => [...document.fonts].some(face => face.family === f && face.status === "loaded"), `am-theme-${chosen.digest.slice(0, 24)}`);
+  await page.waitForFunction(f => [...document.fonts].some(face => face.family === f && face.status === "loaded"), `am-theme-${chosen.digest.slice(0, 16)}-${chosen.manifest.notes_theme.presentation.assets.find(a => a.content_type === "font/woff2").sha256.slice(0, 16)}`);
   await page.locator('.notebook').evaluate(img => img.decode());
   assert.equal(await page.locator('.shelf').evaluate(n => getComputedStyle(n).gridTemplateColumns.split(' ').length), 2);
   await scan('gallery desktop'); await page.screenshot({ path: output + '/gallery-desktop.png' });
@@ -85,7 +83,7 @@ try {
   assert.equal(saved.body, '主动展开后，补上了新的感想。');
   mark('Installed HTML/CSS templates arrange the list and reader; local image/font, persistence, mobile layout and protected spoiler/edit flows pass.');
 
-  const fork = JSON.parse(await readFile('.local/output/notes-gallery.animemo-plugin', 'utf8'));
+  const fork = JSON.parse(await readFile(packagePath, 'utf8'));
   forkSlug = 'notes-fork-' + randomUUID().slice(0, 8);
   fork.manifest.slug = forkSlug; fork.manifest.name = '模板契约验证';
   fork.manifest.notes_theme.presentation.list = fork.manifest.notes_theme.presentation.list.replace('故事散场，回忆上架。', '来自新主题包的页面结构');
@@ -113,7 +111,8 @@ try {
 } finally {
   const items = (await inventory()).items;
   const fork = items.find(i => i.manifest.slug === forkSlug); if (fork) await change(fork, 'uninstall');
-  const current = (await inventory()).items.find(i => i.manifest.slug === 'notes-gallery' && i.active);
-  if (current) await change({ ...current, manifest: { ...current.manifest, version: original?.manifest.version || current.manifest.version } }, original?.enabled ? 'activate' : 'disable');
+  let current = (await inventory()).items.find(i => i.manifest.slug === 'notes-gallery' && i.active);
+  if (current && original && current.manifest.version !== original.manifest.version) { await change({ ...current, manifest: original.manifest }, 'activate'); current = (await inventory()).items.find(i => i.manifest.slug === 'notes-gallery' && i.active); }
+  if (current && (!original || current.enabled !== original.enabled)) await change(current, original?.enabled ? 'activate' : 'disable');
   await writeFile(output + '/report.json', JSON.stringify(report, null, 2)); await browser.close();
 }

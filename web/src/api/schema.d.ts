@@ -6052,10 +6052,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List enabled notes themes and the current user selection; unavailable themes fall back to Core */
+        /** List available themes and the current user selection for one private surface */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    scope?: components["schemas"]["ThemeScope"];
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -6090,7 +6092,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Select a notes theme against its current deployment revision; empty slug restores the default */
+        /** Select a theme for a private surface; empty slug restores that surface only */
         put: {
             parameters: {
                 query?: never;
@@ -6803,6 +6805,7 @@ export interface components {
             capabilities: string[];
             module_sha256: string;
             notes_theme?: components["schemas"]["NotesTheme"];
+            journal_theme?: components["schemas"]["JournalTheme"];
         };
         PluginRelease: {
             manifest: components["schemas"]["PluginManifest"];
@@ -6817,13 +6820,17 @@ export interface components {
             installation_id: string;
             health: string;
             health_reason: string;
+            /** @description Logical module bytes plus stored resource JSON size; excludes database indexes, image copies and backups. */
+            storage_bytes: number;
+            can_remove: boolean;
+            can_uninstall: boolean;
         };
         PluginReleases: {
             items: components["schemas"]["PluginRelease"][];
         };
         PluginAction: {
             /** @enum {string} */
-            action: "activate" | "disable" | "uninstall";
+            action: "activate" | "disable" | "uninstall" | "remove_version";
             version: string;
             revision: number;
         };
@@ -7534,6 +7541,7 @@ export interface components {
         ThemeSelection: {
             slug: string;
             revision: number;
+            scope?: components["schemas"]["ThemeScope"];
         };
         ThemeAsset: {
             name: string;
@@ -7552,6 +7560,39 @@ export interface components {
             css: string;
             assets?: components["schemas"]["ThemeAsset"][];
         };
+        JournalTheme: {
+            canvas: string;
+            paper: string;
+            ink: string;
+            muted: string;
+            primary: string;
+            border: string;
+            rule: string;
+            /** @enum {string} */
+            heading_font: "serif" | "sans";
+            /** @enum {string} */
+            reading_size: "standard" | "large";
+            /** @enum {string} */
+            spacing: "comfortable" | "relaxed";
+            presentation: components["schemas"]["JournalPresentation"];
+        };
+        JournalPresentation: {
+            /** @enum {integer} */
+            schema: 1;
+            /** @enum {string} */
+            scope: "private.journal";
+            list: string;
+            card: string;
+            css: string;
+            assets?: components["schemas"]["ThemeAsset"][];
+            row: string;
+            detail: string;
+        };
+        /**
+         * @default private.notes
+         * @enum {string}
+         */
+        ThemeScope: "private.notes" | "private.journal";
     };
     responses: {
         /** @description Success */

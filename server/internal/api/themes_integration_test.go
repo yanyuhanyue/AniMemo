@@ -113,7 +113,7 @@ func TestNotesThemeLifecycle(t *testing.T) {
 		t.Fatal("uninstall left a theme selection")
 	}
 	var count int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM user_note_themes`).Scan(&count); err != nil || count != 0 {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM user_theme_selections`).Scan(&count); err != nil || count != 0 {
 		t.Fatal("orphaned preferences", err)
 	}
 }
@@ -185,15 +185,15 @@ func TestThemePresentationResources(t *testing.T) {
 	pack := plugintest.Gallery(t)
 	raw, _ := json.Marshal(pack)
 	pluginFile(t, admin, base, "/api/v1/admin/plugins", raw, 201)
-	assetPath := "/api/v1/themes/notes-gallery/1.0.0/assets/notebook.png"
+	assetPath := "/api/v1/themes/notes-gallery/1.1.0/assets/notebook.png"
 	request(t, browser(), base, "GET", assetPath, nil, 401)
 	request(t, alice, base, "GET", assetPath, nil, 404)
 	action := func(name string, revision int64, status int) {
-		request(t, admin, base, "POST", "/api/v1/admin/plugins/notes-gallery", plugins.Action{Action: name, Version: "1.0.0", Revision: revision}, status)
+		request(t, admin, base, "POST", "/api/v1/admin/plugins/notes-gallery", plugins.Action{Action: name, Version: "1.1.0", Revision: revision}, status)
 	}
 	action("activate", 1, 200)
 	for _, asset := range pack.Manifest.NotesTheme.Presentation.Assets {
-		response := request(t, alice, base, "GET", "/api/v1/themes/notes-gallery/1.0.0/assets/"+asset.Name, nil, 200)
+		response := request(t, alice, base, "GET", "/api/v1/themes/notes-gallery/1.1.0/assets/"+asset.Name, nil, 200)
 		if response.header.Get("Content-Type") != asset.ContentType || response.header.Get("Cache-Control") != "private, no-store" {
 			t.Fatal("resource headers differ")
 		}
@@ -202,7 +202,7 @@ func TestThemePresentationResources(t *testing.T) {
 		}
 	}
 	request(t, alice, base, "GET", "/api/v1/themes/notes-gallery/9.0.0/assets/notebook.png", nil, 404)
-	request(t, alice, base, "GET", "/api/v1/themes/notes-gallery/1.0.0/assets/missing.png", nil, 404)
+	request(t, alice, base, "GET", "/api/v1/themes/notes-gallery/1.1.0/assets/missing.png", nil, 404)
 	options := decodeAs[plugins.ThemeOptions](t, request(t, alice, base, "GET", "/api/v1/themes", nil, 200))
 	if len(options.Items) != 1 || options.Items[0].Manifest.NotesTheme.Presentation.Scope != "private.notes" {
 		t.Fatal("template unavailable")

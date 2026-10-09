@@ -24,9 +24,10 @@ import (
 
 // API 1 accepts the original journal conversion. API 2 also accepts import
 // provenance fields; API 3 adds theme tokens; API 4 adds inert HTML/CSS templates
-// and package assets. Themes never carry an executable module.
+// and package assets; API 5 adds journal/detail templates and combined theme packages.
+// Themes never carry an executable module.
 const (
-	HostAPI         = 4
+	HostAPI         = 5
 	MinHostAPI      = 1
 	MaxPackageBytes = 12 << 20
 	MaxModuleBytes  = 8 << 20
@@ -60,24 +61,45 @@ func Compatible(m pluginproto.Manifest) error {
 	if m.Schema != 1 || m.Protocol != pluginproto.Version || m.HostMin < MinHostAPI || m.HostMin > HostAPI || m.HostMax < MinHostAPI || m.HostMin > m.HostMax {
 		return invalid("插件协议或宿主版本范围不兼容。")
 	}
-	if len(m.Capabilities) != 1 {
-		return invalid("每个扩展只能声明一种受支持的能力。")
-	}
-	switch m.Capabilities[0] {
-	case "import.convert":
-		if m.NotesTheme != nil {
+	if len(m.Capabilities) == 1 && m.Capabilities[0] == "import.convert" {
+		if m.NotesTheme != nil || m.JournalTheme != nil {
 			return invalid("文件转换器不能包含主题声明。")
 		}
-	case "theme.notes":
-		if m.HostMin < 3 {
-			return invalid("札记主题需要宿主接口 3。")
+		return nil
+	}
+	if len(m.Capabilities) == 0 || len(m.Capabilities) > 2 {
+		return invalid("扩展能力声明无效。")
+	}
+	seen := map[string]bool{}
+	for _, capability := range m.Capabilities {
+		if seen[capability] {
+			return invalid("扩展能力不能重复。")
 		}
-		if m.NotesTheme != nil && m.NotesTheme.Presentation != nil && m.HostMin < 4 {
-			return invalid("札记模板与资源需要宿主接口 4。")
+		seen[capability] = true
+		switch capability {
+		case "theme.notes":
+			if m.HostMin < 3 {
+				return invalid("札记主题需要宿主接口 3。")
+			}
+			if m.NotesTheme != nil && m.NotesTheme.Presentation != nil && m.HostMin < 4 {
+				return invalid("札记模板与资源需要宿主接口 4。")
+			}
+			if err := validateNotesTheme(m.NotesTheme); err != nil {
+				return err
+			}
+		case "theme.journal":
+			if m.HostMin < 5 {
+				return invalid("手账主题需要宿主接口 5。")
+			}
+			if err := validateJournalTheme(m.JournalTheme); err != nil {
+				return err
+			}
+		default:
+			return invalid("不支持此扩展能力，主题不能混合文件转换能力。")
 		}
-		return validateNotesTheme(m.NotesTheme)
-	default:
-		return invalid("不支持此扩展能力。")
+	}
+	if (m.NotesTheme != nil) != seen["theme.notes"] || (m.JournalTheme != nil) != seen["theme.journal"] {
+		return invalid("主题内容与声明能力不一致。")
 	}
 	return nil
 }
@@ -100,7 +122,7 @@ func ParsePackage(data []byte) (pluginproto.Package, string, error) {
 	if len(p.Module) > MaxModuleBytes || fmt.Sprintf("%x", sha256.Sum256(p.Module)) != m.ModuleSHA256 {
 		return p, "", invalid("模块大小或 SHA-256 校验失败。")
 	}
-	if m.NotesTheme != nil {
+	if m.NotesTheme != nil || m.JournalTheme != nil {
 		if len(p.Module) != 0 {
 			return p, "", invalid("声明式主题不能包含可执行模块。")
 		}
@@ -119,11 +141,11 @@ func ParsePackage(data []byte) (pluginproto.Package, string, error) {
 }
 
 func validatePackageRuntime(ctx context.Context, m pluginproto.Manifest, module []byte) error {
-	if m.NotesTheme != nil {
+	if m.NotesTheme != nil || m.JournalTheme != nil {
 		if len(module) != 0 {
 			return invalid("声明式主题不能包含可执行模块。")
 		}
-		return validateNotesTheme(m.NotesTheme)
+		return Compatible(m)
 	}
 	return ValidateModule(ctx, module)
 }

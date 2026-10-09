@@ -5,7 +5,7 @@ import type { components } from "../api/schema";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
-import { NoteThemeButton, useNoteThemeStyle } from "../themes/NoteThemes";
+import { NoteThemeButton, useNoteThemeStyle } from "../themes/Themes";
 import { NoteReading } from "./NoteReading";
 import { NoteList } from "./NoteList";
 import { Icon } from "../components/ui/Icon";

@@ -61,13 +61,7 @@ try {
   await page.goto(origin);
   await click(page.getByRole("button", { name: "记下看过的番", exact: true }));
   await page.getByRole("dialog").waitFor();
-  assert.equal(
-    await page
-      .getByRole("dialog")
-      .locator("input:visible,textarea:visible,select:visible")
-      .count(),
-    2,
-  );
+  assert.equal(await page.getByRole("dialog").locator("input:required:visible,textarea:required:visible,select:required:visible").count(), 1, "only the title is mandatory");
   await page.getByLabel("番剧名称").fill("夏日放学路上 · 合成验收");
   await page
     .getByLabel("留一点感想")
@@ -185,19 +179,13 @@ try {
   mark("collapsed optional fields preserve existing values on edit");
   await page.goto(origin + "/memory");
   await page.getByRole("button", { name: "写札记", exact: true }).waitFor();
-  assert.equal(
-    await page.getByRole("button", { name: "角色", exact: true }).isVisible(),
-    false,
-  );
-  await click(page.locator(".memory-organize summary"));
-  await page.getByRole("button", { name: "角色", exact: true }).waitFor();
-  await click(page.getByRole("button", { name: "角色", exact: true }));
+  const more = page.getByRole("button", { name: "更多整理工具", exact: true });
+  await click(more);
+  await click(page.getByRole("menuitem", { name: "角色", exact: true }));
   await page.reload();
-  await page
-    .getByRole("button", { name: "记住一个角色", exact: true })
-    .waitFor();
-  assert.ok(await page.locator(".memory-organize").evaluate((el) => el.open));
-  mark("optional tools stay available and deep links reopen their group");
+  await page.getByRole("heading", { name: "记住那些角色", exact: true }).waitFor();
+  assert.equal(await more.innerText(), "角色");
+  mark("optional tools remain in the menu and deep links preserve the current tool");
   await page.goto(origin + "/memory#search");
   await page.getByLabel("搜索全部记忆", { exact: true }).fill("多年以后");
   await page

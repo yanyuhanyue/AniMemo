@@ -8,13 +8,16 @@ export async function buildPluginPackage(manifestFile, module) {
   const manifest = JSON.parse(await readFile(manifestFile, 'utf8'));
   manifest.module_sha256 = hash(module);
   const result = { manifest, module: module.toString('base64') };
-  const presentation = manifest.notes_theme?.presentation;
-  if (presentation) {
-    const directory = path.dirname(manifestFile);
-    for (const [field, file] of Object.entries({ list: 'list.html', card: 'card.html', reader: 'reader.html', css: 'theme.css' })) {
+  const directory = path.dirname(manifestFile);
+  for (const [presentation, files] of [
+    [manifest.notes_theme?.presentation, { list: 'list.html', card: 'card.html', reader: 'reader.html', css: 'theme.css' }],
+    [manifest.journal_theme?.presentation, { list: 'journal-list.html', card: 'journal-card.html', row: 'journal-row.html', detail: 'journal-detail.html', css: 'journal.css' }],
+  ]) {
+    if (!presentation) continue;
+    for (const [field, file] of Object.entries(files)) {
       if (!presentation[field]) presentation[field] = await readFile(path.join(directory, file), 'utf8');
     }
-    result.assets = {};
+    result.assets ||= {};
     for (const asset of presentation.assets || []) {
       if (!/^[a-z][a-z0-9.-]{0,63}$/.test(asset.name)) throw new Error('Theme asset names must be plain filenames.');
       const bytes = await readFile(path.join(directory, 'assets', asset.name));

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNoteTheme } from '../themes/NoteThemes';
+import { useNoteTheme } from '../themes/Themes';
 import { ThemeBoundary, ThemeFrame, ThemeTemplate } from '../themes/ThemeTemplate';
 import { NoteBody } from './NoteBody';
 import { NoteMetadata, NoteWork, noteDate } from './NoteList';

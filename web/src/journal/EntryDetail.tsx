@@ -1,3 +1,5 @@
+import { JournalDetailOverview } from './JournalTheme';
+import { useTheme } from '../themes/Themes';
 import { RevisionHistory } from './RevisionHistory';
 import { Rating } from '../components/Rating';
 import { Button } from '../components/ui/Button';
@@ -17,6 +19,7 @@ import { WatchEditor } from './WatchEditor';
 import { SourcePicker } from './SourcePicker';
 
 export function EntryDetail({ entry, userID, onClose, onEdit, onWatch, onDeleted }: { entry: Entry; userID: string; onClose: () => void; onEdit: (entry: Entry) => void; onWatch: (entry: Entry) => void; onDeleted: (message: string) => void }) {
+  const journalTheme = useTheme('private.journal')?.manifest.journal_theme;
   const [editingRecord, setEditingRecord] = useState<WatchRecord | null>(null);
   const [source, setSource] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -52,13 +55,7 @@ export function EntryDetail({ entry, userID, onClose, onEdit, onWatch, onDeleted
       onDeleted('番剧及其观看记录已删除');
     },
   });
-  if (editingRecord) return <WatchEditor entry={shown} record={editingRecord} onClose={() => setEditingRecord(null)} onSaved={async () => { setEditingRecord(null); await cache.invalidateQueries({ queryKey: ['journal', userID] }); }} />;
-  if (source) return <SourcePicker entry={shown} onClose={() => setSource(false)} onSaved={async () => { setSource(false); await cache.invalidateQueries({ queryKey: ['journal', userID] }); }} />;
-  return <Dialog title={shown.title} eyebrow="YOUR ANIME MEMORY" onClose={onClose} wide className="entry-detail">
-    <div className="detail-content">
-      <div className="detail-overview">
-      <section className="detail-cover" aria-label="番剧封面">
-        {shown.cover_revision ? <CoverImage entry={shown} /> : <div className="detail-poster-empty"><Icon name="book" /><span>暂无封面</span></div>}
+  const coverControls = <>
         <details className="detail-cover-settings">
         <summary>管理封面</summary>
         <div className="cover-controls">
@@ -73,6 +70,15 @@ export function EntryDetail({ entry, userID, onClose, onEdit, onWatch, onDeleted
         {cover.isPending && <p className="muted" role="status">正在保存封面…</p>}
         {cover.isError && <p className="error-message" role="alert">{errorMessage(cover.error)}</p>}
         {confirmCoverDelete && <div className="delete-confirm"><strong>移除当前封面？</strong><p>番剧和观看记录会保留。需要恢复封面时，请重新上传图片。</p><div><Button className="button quiet" disabled={cover.isPending} onClick={() => setConfirmCoverDelete(false)}>保留封面</Button><Button className="button danger" disabled={cover.isPending || remove.isPending} onClick={() => cover.mutate(null)}>确认移除</Button></div></div>}
+  </>;
+  if (editingRecord) return <WatchEditor entry={shown} record={editingRecord} onClose={() => setEditingRecord(null)} onSaved={async () => { setEditingRecord(null); await cache.invalidateQueries({ queryKey: ['journal', userID] }); }} />;
+  if (source) return <SourcePicker entry={shown} onClose={() => setSource(false)} onSaved={async () => { setSource(false); await cache.invalidateQueries({ queryKey: ['journal', userID] }); }} />;
+  return <Dialog title={shown.title} eyebrow="YOUR ANIME MEMORY" onClose={onClose} wide className="entry-detail">
+    <div className="detail-content">
+      <JournalDetailOverview entry={shown} onEdit={() => onEdit(shown)} disabled={cover.isPending || remove.isPending} fallback={<div className="detail-overview">
+      <section className="detail-cover" aria-label="番剧封面">
+        {shown.cover_revision ? <CoverImage entry={shown} /> : <div className="detail-poster-empty"><Icon name="book" /><span>暂无封面</span></div>}
+        {!journalTheme && coverControls}
       </section>
       <div className="detail-personal">
       {shown.original_title && <p className="detail-original">{shown.original_title}</p>}
@@ -83,7 +89,8 @@ export function EntryDetail({ entry, userID, onClose, onEdit, onWatch, onDeleted
       <section className="detail-memory-links" aria-label="作品记忆"><a className="button primary" href={`/memory?anime_id=${shown.anime_id}#notes`}><Icon name="book" />翻开作品记忆</a><Button className="button secondary" disabled={cover.isPending || remove.isPending} onClick={() => onEdit(shown)}><Icon name="edit" />修改评分与记录</Button></section>
       <div className="detail-viewing-summary"><Icon name="play" /><span>{shown.watched_episodes > 0 ? `已记录到第 ${shown.watched_episodes} 话${shown.total_episodes ? ` · 共 ${shown.total_episodes} 话` : ''}` : '观看细节还没有补记'}</span><a href={`/memory?anime_id=${shown.anime_id}#episodes`}>长篇与集数<Icon name="arrow" /></a></div>
       </div>
-      </div>
+      </div>} />
+      {journalTheme && <section className="detail-theme-cover-controls">{coverControls}</section>}
       <section className="detail-history"><div className="section-heading"><div><p className="eyebrow">SCENES I REMEMBER</p><h3>观看足迹</h3></div><Button className="button secondary" disabled={cover.isPending || remove.isPending} onClick={() => onWatch(shown)}><Icon name="plus" />记一次观看</Button></div>{history.isPending ? <p className="muted" role="status">正在读取观看记录…</p> : history.isError ? <p className="error-message" role="alert">{errorMessage(history.error)}</p> : history.data.items.length ? <><p className="muted">最近 100 条</p><HistoryList records={history.data.items} onEdit={record => { if (!cover.isPending && !remove.isPending) setEditingRecord(record); }} /></> : <div className="detail-history-empty"><Icon name="clock" /><div><h4>记得看过，就已经足够。</h4><p>哪一天、哪一话，等想起来时再补记。</p></div></div>}</section>
       <details className="detail-tools"><summary><span><Icon name="settings" />资料与分享</span><small>{{private:'仅自己可见',unlisted:'持链接可见',public:'公开'}[shown.visibility]} · {shown.source ? '已关联 Bangumi' : '未关联外部资料'}</small></summary>
       {(shown.details.studio || shown.details.airing_period || shown.details.description || shown.details.reference_url) && <section className="detail-notes detail-reference"><h3>作品资料</h3>{(shown.details.studio || shown.details.airing_period) && <p>{[shown.details.studio, shown.details.airing_period].filter(Boolean).join(' · ')}</p>}{shown.details.description && <p>{shown.details.description}</p>}{shown.details.reference_url && <a href={shown.details.reference_url} target="_blank" rel="noreferrer noopener">查看资料来源 ↗</a>}</section>}

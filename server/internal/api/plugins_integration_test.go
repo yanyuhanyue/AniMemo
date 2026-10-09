@@ -195,7 +195,7 @@ func TestPluginUpgradePreflight(t *testing.T) {
 	if err := plugins.Preflight(ctx, pool); err == nil || !strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("corrupt package passed preflight: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `DROP TABLE user_note_themes,plugin_deployments,plugin_releases`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE user_theme_selections,plugin_deployments,plugin_releases`); err != nil {
 		t.Fatal(err)
 	}
 	if err := plugins.Preflight(ctx, pool); err != nil {

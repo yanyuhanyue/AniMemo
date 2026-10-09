@@ -46,11 +46,14 @@ type Release struct {
 	Active         bool                 `json:"active"`
 	Enabled        bool                 `json:"enabled"`
 	Revision       int64                `json:"revision"`
+	StorageBytes   int64                `json:"storage_bytes"`
+	CanRemove      bool                 `json:"can_remove"`
+	CanUninstall   bool                 `json:"can_uninstall"`
 	InstalledAt    time.Time            `json:"installed_at"`
 }
 
 func (s *Service) List(ctx context.Context, all bool) ([]Release, error) {
-	rows, err := s.pool.Query(ctx, `SELECT r.manifest,r.digest,r.version=d.active_version,d.enabled,d.revision,r.installed_at,r.publisher_id,r.distribution,d.installation_id,d.health,d.health_reason FROM plugin_releases r JOIN plugin_deployments d USING(slug) WHERE $1 OR (d.enabled AND d.active_version=r.version) ORDER BY r.slug,r.installed_at DESC`, all)
+	rows, err := s.pool.Query(ctx, `SELECT r.manifest,r.digest,r.version=d.active_version,d.enabled,d.revision,r.installed_at,r.publisher_id,r.distribution,d.installation_id,d.health,d.health_reason,octet_length(r.module)+octet_length(r.assets::text),r.version<>d.active_version AND NOT EXISTS(SELECT 1 FROM bundled_extensions b WHERE b.slug=r.slug AND b.version=r.version),NOT EXISTS(SELECT 1 FROM bundled_extensions b WHERE b.slug=r.slug) FROM plugin_releases r JOIN plugin_deployments d USING(slug) WHERE $1 OR (d.enabled AND d.active_version=r.version) ORDER BY r.slug,r.installed_at DESC`, all)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +61,7 @@ func (s *Service) List(ctx context.Context, all bool) ([]Release, error) {
 	out := []Release{}
 	for rows.Next() {
 		var r Release
-		if err := rows.Scan(&r.Manifest, &r.Digest, &r.Active, &r.Enabled, &r.Revision, &r.InstalledAt, &r.PublisherID, &r.Distribution, &r.InstallationID, &r.Health, &r.HealthReason); err != nil {
+		if err := rows.Scan(&r.Manifest, &r.Digest, &r.Active, &r.Enabled, &r.Revision, &r.InstalledAt, &r.PublisherID, &r.Distribution, &r.InstallationID, &r.Health, &r.HealthReason, &r.StorageBytes, &r.CanRemove, &r.CanUninstall); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -103,7 +106,10 @@ func (s *Service) Install(ctx context.Context, actor string, data []byte) error 
 		return err
 	}
 	if count >= 32 || bytes > 256<<20 {
-		return invalid("最多保留 32 个插件版本、合计 256 MiB；当前版本尚不提供历史包清理。")
+		return invalid("最多保留 32 个插件版本、合计 256 MiB；请先清理不再需要的历史版本。")
+	}
+	if err := reservePackageIdentity(ctx, tx, p.Manifest, digest); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO plugin_releases(slug,version,digest,manifest,module,assets) VALUES($1,$2,$3,$4,$5,$6)`, p.Manifest.Slug, p.Manifest.Version, digest, p.Manifest, p.Module, p.Assets); err != nil {
 		return err
@@ -124,7 +130,7 @@ type Action struct {
 }
 
 func (s *Service) Change(ctx context.Context, actor, slug string, input Action) error {
-	if !slugPattern.MatchString(slug) || (input.Action != "activate" && input.Action != "disable" && input.Action != "uninstall") || input.Revision < 1 {
+	if !slugPattern.MatchString(slug) || (input.Action != "activate" && input.Action != "disable" && input.Action != "uninstall" && input.Action != "remove_version") || input.Revision < 1 {
 		return invalid("插件操作无效。")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -144,6 +150,29 @@ func (s *Service) Change(ctx context.Context, actor, slug string, input Action) 
 	}
 	if revision != input.Revision {
 		return fault.New("version_conflict", "插件状态已变更，请刷新后重试。")
+	}
+	if input.Action == "remove_version" {
+		if !versionPattern.MatchString(input.Version) {
+			return invalid("请选择有效的历史版本。")
+		}
+		var active, bundled bool
+		err := tx.QueryRow(ctx, `SELECT r.version=d.active_version,EXISTS(SELECT 1 FROM bundled_extensions b WHERE b.slug=r.slug AND b.version=r.version) FROM plugin_releases r JOIN plugin_deployments d USING(slug) WHERE r.slug=$1 AND r.version=$2`, slug, input.Version).Scan(&active, &bundled)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fault.New("not_found", "这个版本已经不存在。")
+		}
+		if err != nil {
+			return err
+		}
+		if active || bundled {
+			return invalid("当前使用版本和当前镜像随附版本不能清理；请先切换使用版本。")
+		}
+		if _, err = tx.Exec(ctx, `DELETE FROM plugin_releases WHERE slug=$1 AND version=$2`, slug, input.Version); err != nil {
+			return err
+		}
+		if err = governance.Audit(ctx, tx, actor, "plugin.remove_version", "plugin", slug, input); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	if input.Action == "uninstall" {
 		var bundled bool
@@ -299,4 +328,17 @@ func Preflight(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 	return rows.Err()
+}
+
+// Keep the small version/digest identity after package bytes are removed.
+func reservePackageIdentity(ctx context.Context, tx pgx.Tx, m pluginproto.Manifest, digest string) error {
+	var known string
+	err := tx.QueryRow(ctx, `INSERT INTO plugin_release_identities(slug,version,digest) VALUES($1,$2,$3) ON CONFLICT(slug,version) DO UPDATE SET digest=plugin_release_identities.digest RETURNING digest`, m.Slug, m.Version, digest).Scan(&known)
+	if err != nil {
+		return err
+	}
+	if known != digest {
+		return fault.New("version_conflict", "这个版本曾安装过不同内容，请递增版本；清理不能改写包身份。")
+	}
+	return nil
 }

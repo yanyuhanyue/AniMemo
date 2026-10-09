@@ -33,6 +33,12 @@ try {
     await use('POST', '/api/v1/setup', { ...credentials, display_name: '跨版本扩展验收', token: priorConfig.setupToken }, 201);
     const old = (await use('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'watch-history-text' && p.active);
     await use('POST', '/api/v1/admin/plugins/watch-history-text', { action: 'activate', version: old.manifest.version, revision: old.revision });
+    const oldGallery = (await use('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'notes-gallery');
+    if (oldGallery) {
+      await use('POST', '/api/v1/admin/plugins/notes-gallery', { action: 'activate', version: oldGallery.manifest.version, revision: oldGallery.revision });
+      const choice = (await use('GET', '/api/v1/themes')).items.find(p => p.manifest.slug === 'notes-gallery');
+      await use('PUT', '/api/v1/themes/selection', { slug: choice.manifest.slug, revision: choice.revision });
+    }
     await updateInstance(names[2], image);
     use = client(prior.origin); await use('POST', '/api/v1/auth/login', credentials);
     const inventory = (await use('GET', '/api/v1/admin/plugins')).items;
@@ -41,11 +47,18 @@ try {
     assert.equal(retained.digest, old.digest); assert.equal(retained.enabled, true); assert.equal(retained.health, 'ready');
     const added = inventory.find(p => p.manifest.slug === 'notes-gallery');
     assert.ok(added, 'old converter identity must not block the new bundled theme');
-    assert.equal(added.publisher_id, 'ANIMEMO_FIRST_PARTY'); assert.equal(added.enabled, false);
+    assert.equal(added.publisher_id, 'ANIMEMO_FIRST_PARTY');
+    if (oldGallery) {
+      const preserved = inventory.find(p => p.manifest.slug === 'notes-gallery' && p.active);
+      assert.equal(preserved.digest, oldGallery.digest); assert.equal(preserved.manifest.version, oldGallery.manifest.version);
+      assert.equal(preserved.enabled, true);
+      assert.equal((await use('GET', '/api/v1/themes')).selected_slug, 'notes-gallery');
+      assert.equal((await use('GET', '/api/v1/themes?scope=private.journal')).selected_slug, '');
+    } else assert.equal(added.enabled, false);
     const job = await use('POST', '/api/v1/plugins/watch-history-text/imports?filename=2026.txt', '10月3日\n首刷 升级后仍使用原转换器 共12集\n', 202, true);
     await jobState(use, job.id, 'ready'); await use('POST', `/api/v1/imports/${job.id}`, { action: 'apply' }); await jobState(use, job.id, 'done');
     assert.equal((await use('GET', '/api/v1/entries')).total, 1);
-    mark('cross-version update preserves the enabled immutable converter and installs the new official theme without switching versions');
+    mark('cross-version update preserves the enabled immutable converter and notes preference; new official theme is available without switching versions');
     await removeTestInstance(names[2]); created.pop();
     report.cleanup.push({ name: names[2], removed: true });
   }
@@ -80,6 +93,15 @@ try {
   await activate(call, gallery); await checkAssets(call);
   const available = (await call('GET', '/api/v1/themes')).items.find(p => p.manifest.slug === 'notes-gallery');
   await call('PUT', '/api/v1/themes/selection', { slug: available.manifest.slug, revision: available.revision });
+  await call('PUT', '/api/v1/themes/selection', { slug: available.manifest.slug, scope: 'private.journal', revision: available.revision });
+  assert.equal((await call('GET', '/api/v1/themes?scope=private.journal')).selected_slug, 'notes-gallery');
+  // A cleaned version keeps only its immutable identity through backup/clone restore.
+  const cleanupPackage = JSON.parse(await readFile('.local/output/notes-gallery.animemo-plugin', 'utf8'));
+  cleanupPackage.manifest.slug = 'cleanup-probe'; cleanupPackage.manifest.version = '1.0.0';
+  await call('POST', '/api/v1/admin/plugins', cleanupPackage, 201);
+  cleanupPackage.manifest.version = '1.1.0'; await call('POST', '/api/v1/admin/plugins', cleanupPackage, 201);
+  const cleanupRelease = (await call('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'cleanup-probe');
+  await call('POST', '/api/v1/admin/plugins/cleanup-probe', { action: 'remove_version', version: '1.1.0', revision: cleanupRelease.revision });
   mark('bundled converter and both theme formats bound to Core; import, template selection and authenticated asset bytes work');
   docker(['stop', `${c.project}-worker-1`]);
   const queued = await call('POST', '/api/v1/imports?format=csv', 'title\nWorker停止期间的记录\n', 202, true);
@@ -101,9 +123,14 @@ try {
   assert.equal(restoredGallery.enabled, false); assert.equal(restoredGallery.digest, gallery.digest);
   await restored('GET', assetPath(gallery, firstAsset), undefined, 404);
   await activate(restored, restoredGallery); await checkAssets(restored);
+  assert.equal((await restored('GET', '/api/v1/themes?scope=private.journal')).selected_slug, '', 'clone also clears journal choice');
+  cleanupPackage.manifest.name = 'Changed after cleanup';
+  await restored('POST', '/api/v1/admin/plugins', cleanupPackage, 409);
+  assert.equal((await restored('GET', '/api/v1/admin/plugins')).items.filter(p => p.manifest.slug === 'cleanup-probe').length, 1);
   mark('clone restore preserves core data, template, image, font and license bytes; explicit reactivation required');
   await updateInstance(names[0], image); call = client(a.origin); await call('POST', '/api/v1/auth/login', credentials); c = await config(names[0]);
   assert.equal((await call('GET', '/api/v1/themes')).selected_slug, 'notes-gallery', 'normal update preserves personal appearance');
+  assert.equal((await call('GET', '/api/v1/themes?scope=private.journal')).selected_slug, 'notes-gallery');
   await checkAssets(call);
   const operationFile = `.local/instances/${names[0]}/operation.json`, completed = await readOperation(operationFile);
   assert.equal(completed.phase, 'completed'); await call('POST', '/api/v1/entries', { title: '中断后仍可救援的新写入' }, 201);

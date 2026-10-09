@@ -40,5 +40,19 @@ func Gallery(t *testing.T) pluginproto.Package {
 		a.SHA256 = fmt.Sprintf("%x", sha256.Sum256(data))
 		pack.Assets[a.Name] = data
 	}
+	if pack.Manifest.JournalTheme != nil {
+		j := &pack.Manifest.JournalTheme.Presentation
+		j.List = string(read("journal-list.html"))
+		j.Card = string(read("journal-card.html"))
+		j.Row = string(read("journal-row.html"))
+		j.Detail = string(read("journal-detail.html"))
+		j.CSS = string(read("journal.css"))
+		for i := range j.Assets {
+			a := &j.Assets[i]
+			data := read(filepath.Join("assets", a.Name))
+			a.SHA256 = fmt.Sprintf("%x", sha256.Sum256(data))
+			pack.Assets[a.Name] = data
+		}
+	}
 	return pack
 }

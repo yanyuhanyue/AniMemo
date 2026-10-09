@@ -1,21 +1,22 @@
-# 札记主题：模板、样式与随包资源
+# 私人页面主题：模板、样式与随包资源
 
-`1.4.0-alpha.3` 支持通过安装 `theme.notes` 包改变私人札记的排版。默认仍是已经确认的纸页；「樱色信笺」1.0.0 提供配色，「星笺展架」1.0.0 提供另一套列表、卡片与阅读布局。新增主题不需要修改核心代码或重新编译网站。
+`1.4.0-alpha.4` 支持通过安装 `theme.notes` / `theme.journal` 包改变私人札记、手账清单和作品详情概览的排版。默认仍是已经确认的纸页；「樱色信笺」1.0.0 提供配色，「星笺展架」1.1.0 提供札记展卡、手账片架及详情布局。新增主题不需要修改核心代码或重新编译网站。
 
 ## 使用与作用范围
 
 1. 管理员在「插件」审核并启用随附主题，或上传自己的 `.animemo-plugin` 包。
-2. 用户打开「札记 → 札记外观」选择主题。预览使用包内模板和合成内容；取消不改变页面或保存选择。
-3. 「应用外观」只保存自己的选择，刷新和其他设备继续使用。选择「纸页原色 → 恢复默认外观」清除个人偏好。
+2. 用户打开「札记 → 札记外观」或「手账 → 手账外观」选择主题。预览使用包内模板和合成内容；取消不改变页面或保存选择。
+3. 「应用外观」只保存自己的选择，刷新和其他设备继续使用。选择「纸页原色 / 手账原色 → 恢复默认外观」只清除当前页面范围的偏好，两个范围互不影响。
 4. 停用、卸载或隔离主题后回退到内置外观。刷新、回到页面或最长约 30 秒在线刷新时更新状态。停用保留偏好以便重新启用；卸载清除对该包的选择。
 
-当前只实现 `private.notes`。列表和阅读正文使用可选模板，写作窗口只应用色彩/字号等 token；编辑、删除、剧透展开、保存和确认控件继续由核心提供。主题不改变记忆内容、日期、权限或其他账号的选择，也不应用到后台、登录、瞬间、收藏、年度或公开页。
+当前实现 `private.notes` 与 `private.journal`。手账支持卡片/列表、详情概览模板；观看足迹、封面管理、评分修改、分享和危险确认仍使用核心界面，批量管理暂时使用默认列表以便勾选。札记列表和阅读正文使用可选模板，写作窗口只应用色彩/字号等 token；编辑、删除、剧透展开、保存和确认控件继续由核心提供。主题不改变记忆内容、日期、权限或其他账号的选择，也不应用到后台、登录、瞬间、收藏、年度或公开页。
 
 全站扩展按以下边界逐批实现，不把保留的范围当作现成功能：
 
 | 范围 | 选择者及规则 | 当前状态 |
 | --- | --- | --- |
 | 私人札记 `private.notes` | 用户选择管理员已启用的包；无有效选择回退内置 | 已实现 |
+| 私人手账 `private.journal` | 用户单独选择；同一包可以同时提供札记和手账模板 | 已实现清单、详情概览 |
 | 私人其他页面 | 后续复用主题系统；站点默认之上允许个人选择 | 计划中，无相关 API |
 | 站点首页/导航 | 管理员设置站点主题；不能替换身份或授权流程 | 计划中 |
 | 公开作品/分享/年度册 | 使用发布者或站点明确选定的公开主题，只接收核心公开投影；不继承访问者私人主题 | 计划中 |
@@ -23,13 +24,13 @@
 
 ## 开发自己的主题
 
-复制 `server/examples/notes-gallery/`，改 `manifest.json` 中的 `slug`、名称及版本，再修改同目录 `list.html`、`card.html`、`reader.html`、`theme.css` 和 `assets/`。无需 Go 或 WASM 构建：
+复制 `server/examples/notes-gallery/`，改 `manifest.json` 中的 `slug`、名称及版本，再修改同目录 `list.html`、`card.html`、`reader.html`、`theme.css` 和 `assets/`。手账模板位于 `journal-list.html`、`journal-card.html`、`journal-row.html`、`journal-detail.html`、`journal.css`。无需 Go 或 WASM 构建：
 
 ```sh
 node tooling/package-plugin.mjs server/examples/notes-gallery/manifest.json - .local/output/notes-gallery.animemo-plugin
 ```
 
-打包工具将模板嵌入 JSON，并计算资源 SHA-256。安装仍由服务端重新检查，打包成功不代表已审核。`capabilities` 为 `["theme.notes"]`，`module` 为空，`module_sha256` 为其摘要。含模板的包要求 `host_api_min` 至少为 4；纯 token 主题继续支持 API 3。
+打包工具将模板嵌入 JSON，并计算资源 SHA-256。安装仍由服务端重新检查，打包成功不代表已审核。`capabilities` 可选 `["theme.notes"]`、`["theme.journal"]` 或同时包含这两项，不能与转换能力混用。`module` 为空，`module_sha256` 为其摘要。含模板的包要求 `host_api_min` 至少为 4；纯 token 主题继续支持 API 3；手账主题及组合包要求 API 5。
 
 `notes_theme` 保留 `canvas/paper/ink/muted/primary/border/rule` 六位色值，以及 `heading_font`（serif/sans）、`reading_size`（standard/large）、`spacing`（comfortable/relaxed）。宿主检查浅色背景和这些 token 的文字对比度；自定义 CSS 的最终对比度仍需主题作者实际验证。
 
@@ -44,6 +45,18 @@ node tooling/package-plugin.mjs server/examples/notes-gallery/manifest.json - .l
 | `css` | 本包模板内的 CSS；不依赖网站外层 DOM |
 | `assets` | 资源声明数组：`name`、`content_type`、`sha256`；原始字节存于包的顶层 `assets` 对象，以 base64 编码 |
 
+`journal_theme` 使用同样的 token，并要求 `presentation`：
+
+| 字段 | 内容 |
+| --- | --- |
+| `schema` / `scope` | `1` / `private.journal` |
+| `list` | 必需 `items` 槽 |
+| `card` / `row` | 必需 `title`、`metadata`、`read`；可选 `poster`、`notes`、`tags`、`facts`、`actions` |
+| `detail` | 必需 `metadata`、`recollection`、`facts`、`memory`；可选 `poster`、`original`、`tags`。作品主标题保留在核心窗口标题 |
+| `css` / `assets` | 与札记相同的样式与资源契约 |
+
+手账内容类包括 `.theme-entry-metadata/.theme-entry-tags/.theme-entry-facts/.theme-entry-actions/.theme-recollection/.theme-memory-link`；评分及标签使用核心组件，主题可安排其位置。空海报和加载失败仍有核心回退。
+
 使用标准 HTML 形式的占位符，如 `<div class="copy"><slot name="excerpt"></slot></div>`。宿主解析模板并插入 React 内容，槽中不能带备用内容、重复名称或自定义事件。槽可能产生块级内容，应放入 `div/section` 等容器。标题和阅读槽自带核心按钮；主题不自行构造业务链接。
 
 允许的 HTML 元素为 `div section article header footer aside figure figcaption span p h3 h4 strong em small ul li br hr slot img`；结构元素只允许 `class`。装饰图片必须写成 `<img src="asset:notebook.png" alt="">`，引用包内图片，不能冒充用户海报。实际海报和私人附件由核心槽按原权限加载。每个模板最多 16 KiB、128 个节点、12 层。
@@ -52,7 +65,7 @@ CSS 最多 32 KiB，支持常规选择器、Grid/Flex、媒体查询，以及颜
 
 模板样式运行在 Shadow DOM 中，宿主限制绘制范围。只将 `--notes-*` 主题 token、`--theme-font` 和核心内容的 `.theme-title/.theme-read/.theme-work/.theme-metadata/.theme-visibility/.theme-kept/.theme-tag/.theme-spoiler` 类用于当前模板契约；不要依赖 Tailwind、Base UI 或外层页面类。阅读正文保持核心结构，复杂排版先围绕 `body` 槽完成。
 
-资源最多 8 个、单个 2 MiB、总计 4 MiB，只允许 PNG/JPEG、一个 WOFF2 字体及 UTF-8 许可文本（最多 32 KiB）。文件名为简单小写名称，不接受路径。图片检查实际解码及尺寸；字体检查头部和展开大小，由浏览器加载验证，失败回退系统字体。字体通过 `font-family:var(--theme-font),sans-serif` 使用，不写 `@font-face`。图片及字体许可须随包保留。
+整个包最多 8 个资源、单个 2 MiB、总计 4 MiB，只允许 PNG/JPEG、每个页面范围一个 WOFF2 字体及 UTF-8 许可文本（最多 32 KiB）。文件名为简单小写名称，不接受路径。图片检查实际解码及尺寸；字体检查头部和展开大小，由浏览器加载验证，失败回退系统字体。字体通过 `font-family:var(--theme-font),sans-serif` 使用，不写 `@font-face`。图片及字体许可须随包保留。同一组合包的两个范围可引用同名且同摘要的资源，顶层只存一份；同名但声明不同会被拒绝。多个用户应用主题只存个人选择，不复制包。
 
 ## 核心内容与安全边界
 
@@ -64,11 +77,13 @@ Shadow DOM 是样式隔离，不是任意脚本沙箱。管理员仍须审核主
 
 ## 版本、兼容与恢复
 
-同一 `slug + version` 内容不可改写；模板、CSS 或资源变化均需递增版本。上传新版不自动启用，复用插件页切换指定版本及历史版本。个人选择跟随该包当前启用的版本；过期修订请求要求重新预览。
+同一 `slug + version` 内容不可改写；模板、CSS 或资源变化均需递增版本。上传新版不自动启用，复用插件页切换指定版本及历史版本。个人选择跟随该包当前启用的版本；过期修订请求要求重新预览。相同版本重复上传不增加资源占用；后台可清理非当前、非本镜像随附基线的历史版本。模块和资源删除后仍保留少量版本摘要，防止清理/卸载后换内容冒用旧版本。详情见 [扩展空间管理](plugins.md#权限撤销与状态语义)。
 
 协议分为独立的 `server/pkg/converterproto`、`themeproto` 和包清单 `pluginproto`。TXT 示例只依赖转换协议，避免主题结构变化再牵动 WASM 字节。本次拆分后的 TXT 包为 1.1.3，转换语义不变；升级继续保留原先启用的旧包和字节。
 
-镜像随附清单绑定准确核心二进制与包摘要，只有匹配清单的包获得官方身份；手动上传示例不自动获得身份。API 1–2 转换器、API 3 token 主题继续可用；旧宿主拒绝 API 4 模板包。降低核心版本须按实例回滚/恢复流程，不能将新数据库直接交给旧镜像。
+镜像随附清单绑定准确核心二进制与包摘要，只有匹配清单的包获得官方身份；手动上传示例不自动获得身份。API 1–2 转换器、API 3 token 主题继续可用；API 4 的札记模板继续可用；低版本宿主拒绝 API 5 手账包。降低核心版本须按实例回滚/恢复流程，不能将新数据库直接交给旧镜像。
+
+迁移 025 将个人偏好迁移为 `user_theme_selections(user_id,scope)`，保留原札记选择；新建 `plugin_release_identities` 记录清理后仍须遵守的版本身份。`GET /api/v1/themes?scope=private.journal` 和 `PUT /api/v1/themes/selection` 的可选 `scope` 支持分区选择；省略时默认 `private.notes`。
 
 迁移 024 把资源存入 `plugin_releases.assets`，模板与资源都随完整数据库备份带走；没有新的外部资源服务。正常更新保留包和个人选择；克隆恢复停用扩展并清除个人选择，重新审核启用后资源可用。个人记忆 JSON/ZIP 不包含实例主题或账号偏好。
 
@@ -76,9 +91,10 @@ Shadow DOM 是样式隔离，不是任意脚本沙箱。管理员仍须审核主
 
 ```sh
 npm run check
-npm run test:api -- -run 'TestThemePresentation|TestNotesTheme|TestBundledNotesTheme|TestPluginLifecycleAndRealImport|TestPluginUpgradePreflight|TestPackageIdentityAndCompatibility'
+npm run test:api -- -run 'TestJournalTheme|TestThemePresentation|TestNotesTheme|TestBundledNotesTheme|TestPluginLifecycleAndRealImport|TestPluginUpgradePreflight|TestPackageIdentityAndCompatibility'
 # 仅在隔离的合成实例运行，凭据文件不提交 Git。
 REVIEW_ADMIN_ACCESS=.local/output/theme-review-access.json node tooling/theme-templates-browser.mjs
+REVIEW_ADMIN_ACCESS=.local/output/theme-review-access.json node tooling/journal-themes-browser.mjs
 ANIMEMO_CANDIDATE_IMAGE=候选镜像 ANIMEMO_PREVIOUS_IMAGE=旧验收镜像 npm run test:stage3
 ```
 

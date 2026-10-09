@@ -22,3 +22,22 @@ h3, p, blockquote { overflow-wrap: anywhere; }
 blockquote { margin: 16px 0; padding-left: 16px; border-left: 3px solid #bdcbdc; white-space: pre-wrap; }
 details summary { cursor: pointer; min-height: 44px; padding: 8px 0; font-size: 14px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+a { color: #4d527d; text-underline-offset: 4px; }
+.theme-entry-tags, .theme-entry-metadata, .theme-entry-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.theme-entry-tags { margin: 12px 0; }
+.theme-entry-metadata { font-size: 12px; color: #495565; line-height: 1.8; }
+.theme-entry-metadata .theme-rating { font-size: 15px; font-weight: 600; color: #4d527d; }
+.theme-entry-facts { display: grid; gap: 6px; color: #536075; font-size: 13px; line-height: 1.9; margin: 14px 0; }
+.theme-entry-actions button { color: #4d527d; font-size: 13px; }
+.theme-cover-empty { display: grid; place-content: center; gap: 8px; min-height: 130px; padding: 12px; background: #eef2f6; color: #536075; font-size: 12px; text-align: center; }
+.theme-cover-empty svg { margin: auto; }
+.theme-memory-link { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 0; font-size: 14px; }
+.cover-error { font-size: 13px; }
+.theme-entry-poster:has(img) > .theme-cover-empty, .theme-entry-poster:has(.cover-error) > .theme-cover-empty { display: none; }
+.theme-entry-tags > span { background: #e6effa; color: #315d88; border: 1px solid #a7bfd9; padding: 1px 6px; border-radius: 3px; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+/* Retain the core score tiers with contrast on light theme canvases. */
+.theme-entry-metadata .rating--red { --rating-ink: #c82323; }
+.theme-entry-metadata .rating--unrated { --rating-ink: #665f70; }
+
+.theme-rating-edit { display: inline-flex; align-items: center; gap: 6px; }
+button:disabled { cursor: not-allowed; opacity: .6; }

@@ -63,6 +63,9 @@ func EnsureBundled(ctx context.Context, pool *pgxpool.Pool, directory, executabl
 		if err = validatePackageRuntime(ctx, p.Manifest, p.Module); err != nil {
 			return err
 		}
+		if err = reservePackageIdentity(ctx, tx, p.Manifest, digest); err != nil {
+			return err
+		}
 		var existing string
 		if err = tx.QueryRow(ctx, `INSERT INTO plugin_releases(slug,version,digest,manifest,module,assets,publisher_id,distribution) VALUES($1,$2,$3,$4,$5,$6,'ANIMEMO_FIRST_PARTY','bundled') ON CONFLICT(slug,version) DO UPDATE SET slug=excluded.slug RETURNING digest`, p.Manifest.Slug, p.Manifest.Version, digest, p.Manifest, p.Module, p.Assets).Scan(&existing); err != nil {
 			return err

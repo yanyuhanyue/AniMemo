@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "AniMemo API",
-    "version": "1.4.0-alpha.3",
+    "version": "1.4.0-alpha.4",
     "description": "AniMemo 新项目 API。写请求必须携带与 PUBLIC_ORIGIN 完全一致的 Origin；登录使用 HttpOnly Cookie。所有 API 响应不缓存。详情见 docs/api.md。管理路径需要当前账号仍有管理权限，版本冲突为 409。"
   },
   "servers": [
@@ -5831,7 +5831,7 @@
     },
     "/api/v1/themes": {
       "get": {
-        "summary": "List enabled notes themes and the current user selection; unavailable themes fall back to Core",
+        "summary": "List available themes and the current user selection for one private surface",
         "responses": {
           "200": {
             "description": "Success",
@@ -5846,12 +5846,21 @@
           "default": {
             "$ref": "#/components/responses/Error"
           }
-        }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "$ref": "#/components/schemas/ThemeScope"
+            }
+          }
+        ]
       }
     },
     "/api/v1/themes/selection": {
       "put": {
-        "summary": "Select a notes theme against its current deployment revision; empty slug restores the default",
+        "summary": "Select a theme for a private surface; empty slug restores that surface only",
         "requestBody": {
           "required": true,
           "content": {
@@ -8680,6 +8689,9 @@
           },
           "notes_theme": {
             "$ref": "#/components/schemas/NotesTheme"
+          },
+          "journal_theme": {
+            "$ref": "#/components/schemas/JournalTheme"
           }
         }
       },
@@ -8697,7 +8709,10 @@
           "distribution",
           "installation_id",
           "health",
-          "health_reason"
+          "health_reason",
+          "storage_bytes",
+          "can_remove",
+          "can_uninstall"
         ],
         "properties": {
           "manifest": {
@@ -8733,6 +8748,17 @@
           },
           "health_reason": {
             "type": "string"
+          },
+          "storage_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Logical module bytes plus stored resource JSON size; excludes database indexes, image copies and backups."
+          },
+          "can_remove": {
+            "type": "boolean"
+          },
+          "can_uninstall": {
+            "type": "boolean"
           }
         }
       },
@@ -8765,7 +8791,8 @@
             "enum": [
               "activate",
               "disable",
-              "uninstall"
+              "uninstall",
+              "remove_version"
             ]
           },
           "version": {
@@ -11746,6 +11773,9 @@
           "revision": {
             "type": "integer",
             "minimum": 0
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ThemeScope"
           }
         },
         "required": [
@@ -11829,6 +11859,139 @@
           "reader",
           "css"
         ]
+      },
+      "JournalTheme": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "canvas": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "paper": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "ink": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "muted": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "primary": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "border": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "rule": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "heading_font": {
+            "type": "string",
+            "enum": [
+              "serif",
+              "sans"
+            ]
+          },
+          "reading_size": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "large"
+            ]
+          },
+          "spacing": {
+            "type": "string",
+            "enum": [
+              "comfortable",
+              "relaxed"
+            ]
+          },
+          "presentation": {
+            "$ref": "#/components/schemas/JournalPresentation"
+          }
+        },
+        "required": [
+          "canvas",
+          "paper",
+          "ink",
+          "muted",
+          "primary",
+          "border",
+          "rule",
+          "heading_font",
+          "reading_size",
+          "spacing",
+          "presentation"
+        ]
+      },
+      "JournalPresentation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "private.journal"
+            ]
+          },
+          "list": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "card": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "css": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "assets": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/ThemeAsset"
+            }
+          },
+          "row": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 16384
+          }
+        },
+        "required": [
+          "schema",
+          "scope",
+          "list",
+          "card",
+          "css",
+          "row",
+          "detail"
+        ]
+      },
+      "ThemeScope": {
+        "type": "string",
+        "enum": [
+          "private.notes",
+          "private.journal"
+        ],
+        "default": "private.notes"
       }
     },
     "responses": {

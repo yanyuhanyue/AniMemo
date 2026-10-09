@@ -6,7 +6,7 @@ import (
 )
 
 func (a *API) themeList(w http.ResponseWriter, r *http.Request) {
-	themes, err := a.plugins.Themes(r.Context(), currentUser(r).ID)
+	themes, err := a.plugins.Themes(r.Context(), currentUser(r).ID, r.URL.Query().Get("scope"))
 	if err != nil {
 		fail(w, err)
 		return

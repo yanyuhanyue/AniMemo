@@ -2,13 +2,14 @@
   "schema": 1,
   "slug": "notes-gallery",
   "name": "星笺展架",
-  "version": "1.0.0",
-  "description": "把札记放进一间小小的回忆展室：双列展卡、作品海报、独立阅读侧栏。含本地装饰图与字体，无脚本、无外部资源。",
+  "version": "1.1.0",
+  "description": "札记展卡与私藏片架：手账卡片/列表、作品详情和札记采用独立模板，共用本地图案与字体。各页面可单独选择。",
   "protocol": 1,
-  "host_api_min": 4,
-  "host_api_max": 4,
+  "host_api_min": 5,
+  "host_api_max": 5,
   "capabilities": [
-    "theme.notes"
+    "theme.notes",
+    "theme.journal"
   ],
   "module_sha256": "",
   "notes_theme": {
@@ -28,6 +29,44 @@
       "list": "",
       "card": "",
       "reader": "",
+      "css": "",
+      "assets": [
+        {
+          "name": "notebook.png",
+          "content_type": "image/png",
+          "sha256": ""
+        },
+        {
+          "name": "display.woff2",
+          "content_type": "font/woff2",
+          "sha256": ""
+        },
+        {
+          "name": "font-license.txt",
+          "content_type": "text/plain",
+          "sha256": ""
+        }
+      ]
+    }
+  },
+  "journal_theme": {
+    "canvas": "#eef2f6",
+    "paper": "#ffffff",
+    "ink": "#273345",
+    "muted": "#536075",
+    "primary": "#4d527d",
+    "border": "#c8d4e2",
+    "rule": "#bdcbdc",
+    "heading_font": "sans",
+    "reading_size": "standard",
+    "spacing": "relaxed",
+    "presentation": {
+      "schema": 1,
+      "scope": "private.journal",
+      "list": "",
+      "card": "",
+      "row": "",
+      "detail": "",
       "css": "",
       "assets": [
         {

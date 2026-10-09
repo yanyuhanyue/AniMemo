@@ -79,3 +79,38 @@ func TestThemePresentationPackage(t *testing.T) {
 		t.Fatal("template content not bound to package identity")
 	}
 }
+
+func TestJournalThemePackage(t *testing.T) {
+	for name, change := range map[string]func(*pluginproto.Package){
+		"older host":           func(p *pluginproto.Package) { p.Manifest.HostMin = 4 },
+		"missing capability":   func(p *pluginproto.Package) { p.Manifest.Capabilities = []string{"theme.notes"} },
+		"duplicate capability": func(p *pluginproto.Package) { p.Manifest.Capabilities = []string{"theme.journal", "theme.journal"} },
+		"wrong scope":          func(p *pluginproto.Package) { p.Manifest.JournalTheme.Presentation.Scope = "public.journal" },
+		"missing list view":    func(p *pluginproto.Package) { p.Manifest.JournalTheme.Presentation.Row = "" },
+		"missing detail content": func(p *pluginproto.Package) {
+			p.Manifest.JournalTheme.Presentation.Detail = "<div><slot name='metadata'></slot></div>"
+		},
+		"unknown business action": func(p *pluginproto.Package) {
+			p.Manifest.JournalTheme.Presentation.Detail += "<slot name='delete'></slot>"
+		},
+		"conflicting shared asset": func(p *pluginproto.Package) {
+			p.Manifest.JournalTheme.Presentation.Assets[0].SHA256 = strings.Repeat("a", 64)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := plugintest.Gallery(t)
+			change(&p)
+			raw, _ := json.Marshal(p)
+			if _, _, err := ParsePackage(raw); err == nil {
+				t.Fatal("invalid journal template accepted")
+			}
+		})
+	}
+	p := plugintest.Gallery(t)
+	p.Manifest.NotesTheme = nil
+	p.Manifest.Capabilities = []string{"theme.journal"}
+	raw, _ := json.Marshal(p)
+	if _, _, err := ParsePackage(raw); err != nil {
+		t.Fatalf("journal-only theme rejected: %v", err)
+	}
+}

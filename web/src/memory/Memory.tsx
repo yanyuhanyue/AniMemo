@@ -5,7 +5,7 @@ import { client, result, type User } from "../api/client";
 import { Button } from "../components/ui/Button";
 import { Icon } from "../components/ui/Icon";
 import { PageShell, Problem, PublicCard } from "../public/Public";
-import { useNoteThemeStyle } from "../themes/NoteThemes";
+import { useNoteThemeStyle } from "../themes/Themes";
 import { Notes } from "./Notes";
 import { Characters } from "./Characters";
 import { Episodes } from "./Episodes";

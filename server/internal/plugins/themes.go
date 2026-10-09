@@ -12,6 +12,7 @@ import (
 
 	"animemo.local/server/internal/fault"
 	"animemo.local/server/pkg/pluginproto"
+	"animemo.local/server/pkg/themeproto"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -33,6 +34,13 @@ func validateNotesTheme(t *pluginproto.NotesTheme) error {
 	if t == nil {
 		return invalid("主题缺少札记外观声明。")
 	}
+	if err := validateTokens(t.Tokens); err != nil {
+		return err
+	}
+	return validatePresentation(t.Presentation)
+}
+
+func validateTokens(t themeproto.Tokens) error {
 	for _, color := range []string{t.Canvas, t.Paper, t.Ink, t.Muted, t.Primary, t.Border, t.Rule} {
 		if !themeColor.MatchString(color) {
 			return invalid("主题颜色需要完整的六位十六进制色值。")
@@ -52,7 +60,7 @@ func validateNotesTheme(t *pluginproto.NotesTheme) error {
 	if (t.HeadingFont != "serif" && t.HeadingFont != "sans") || (t.ReadingSize != "standard" && t.ReadingSize != "large") || (t.Spacing != "comfortable" && t.Spacing != "relaxed") {
 		return invalid("主题字体、字号或留白选项无效。")
 	}
-	return validatePresentation(t.Presentation)
+	return nil
 }
 
 // Theme selections confer no access to records and never execute plugin code.
@@ -63,29 +71,34 @@ type ThemeOptions struct {
 type ThemeSelection struct {
 	Slug     string `json:"slug"`
 	Revision int64  `json:"revision"`
+	Scope    string `json:"scope,omitempty"`
 }
 
 func themeManifestValid(m pluginproto.Manifest, digest string) bool {
-	if m.NotesTheme == nil || Compatible(m) != nil {
+	if (m.NotesTheme == nil && m.JournalTheme == nil) || Compatible(m) != nil {
 		return false
 	}
 	canonical, _ := json.Marshal(m)
 	return fmt.Sprintf("%x", sha256.Sum256(canonical)) == digest && m.ModuleSHA256 == fmt.Sprintf("%x", sha256.Sum256(nil))
 }
 
-func (s *Service) Themes(ctx context.Context, owner string) (ThemeOptions, error) {
+func (s *Service) Themes(ctx context.Context, owner, scope string) (ThemeOptions, error) {
 	out := ThemeOptions{Items: []Release{}}
+	scope, err := themeScope(scope)
+	if err != nil {
+		return out, err
+	}
 	releases, err := s.List(ctx, false)
 	if err != nil {
 		return out, err
 	}
 	var selected string
-	err = s.pool.QueryRow(ctx, `SELECT slug FROM user_note_themes WHERE user_id=$1`, owner).Scan(&selected)
+	err = s.pool.QueryRow(ctx, `SELECT slug FROM user_theme_selections WHERE user_id=$1 AND scope=$2`, owner, scope).Scan(&selected)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return out, err
 	}
 	for _, r := range releases {
-		if r.Health != "ready" || !themeManifestValid(r.Manifest, r.Digest) {
+		if r.Health != "ready" || !themeManifestValid(r.Manifest, r.Digest) || !supportsTheme(r.Manifest, scope) {
 			continue
 		}
 		out.Items = append(out.Items, r)
@@ -97,8 +110,12 @@ func (s *Service) Themes(ctx context.Context, owner string) (ThemeOptions, error
 }
 
 func (s *Service) SelectTheme(ctx context.Context, owner string, input ThemeSelection) error {
+	scope, err := themeScope(input.Scope)
+	if err != nil {
+		return err
+	}
 	if input.Slug == "" {
-		_, err := s.pool.Exec(ctx, `DELETE FROM user_note_themes WHERE user_id=$1`, owner)
+		_, err := s.pool.Exec(ctx, `DELETE FROM user_theme_selections WHERE user_id=$1 AND scope=$2`, owner, scope)
 		return err
 	}
 	if !slugPattern.MatchString(input.Slug) || input.Revision < 1 {
@@ -124,10 +141,10 @@ func (s *Service) SelectTheme(ctx context.Context, owner string, input ThemeSele
 	if revision != input.Revision {
 		return fault.New("version_conflict", "主题版本已变化，请重新预览。")
 	}
-	if !themeManifestValid(m, digest) {
+	if !themeManifestValid(m, digest) || !supportsTheme(m, scope) {
 		return invalid("主题声明无效，请选择其他主题。")
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO user_note_themes(user_id,slug) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET slug=excluded.slug`, owner, input.Slug); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO user_theme_selections(user_id,scope,slug) VALUES($1,$2,$3) ON CONFLICT(user_id,scope) DO UPDATE SET slug=excluded.slug`, owner, scope, input.Slug); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -149,13 +166,39 @@ func (s *Service) ThemeAsset(ctx context.Context, slug, version, name string) ([
 	if err != nil {
 		return nil, "", err
 	}
-	if !themeManifestValid(m, digest) || m.NotesTheme.Presentation == nil {
+	if !themeManifestValid(m, digest) {
 		return nil, "", fault.New("not_found", "主题资源不可用。")
 	}
-	for _, a := range m.NotesTheme.Presentation.Assets {
+	specs, err := themeAssets(m)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, a := range specs {
 		if a.Name == name && fmt.Sprintf("%x", sha256.Sum256(data)) == a.SHA256 {
 			return data, a.ContentType, nil
 		}
 	}
 	return nil, "", fault.New("not_found", "主题资源不存在或已损坏。")
+}
+
+func themeScope(scope string) (string, error) {
+	if scope == "" {
+		return "private.notes", nil
+	}
+	if scope != "private.notes" && scope != "private.journal" {
+		return "", invalid("不支持此主题作用范围。")
+	}
+	return scope, nil
+}
+func supportsTheme(m pluginproto.Manifest, scope string) bool {
+	return (scope == "private.notes" && m.NotesTheme != nil) || (scope == "private.journal" && m.JournalTheme != nil)
+}
+func validateJournalTheme(t *themeproto.JournalTheme) error {
+	if t == nil {
+		return invalid("缺少手账主题声明。")
+	}
+	if err := validateTokens(t.Tokens); err != nil {
+		return err
+	}
+	return validateJournalPresentation(t.Presentation)
 }
