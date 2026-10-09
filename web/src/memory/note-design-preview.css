@@ -135,6 +135,11 @@
 .notes-page[data-note-design=hybrid] .button.primary, .notes-design-hybrid .button.primary { background: #f3d478; border: 1.5px solid #35382f; color: #30332d; border-radius: 3px; box-shadow: 3px 3px 0 #35382f; }
 .notes-page[data-note-design=hybrid] .notes-filters { border-top-color: #777362; }
 .note-preview-hybrid { border: 1.5px solid #777362; box-shadow: 4px 4px 0 #d6cebd; }
+.preview-note-poster { width: 86px; max-width: 100%; aspect-ratio: 2 / 3; margin-top: 8px; padding: 3px; border: 1px solid #c9c1b1; background: #fffefb; box-shadow: 2px 3px 0 #e2dbcc; }
+.preview-note-poster:not(:has(img)) { display: none; }
+.preview-note-poster .cover-photo { position: static; display: block; width: 100%; height: 100%; background: transparent; box-shadow: none; }
+.preview-note-poster .cover-photo::after { display: none; }
+.preview-note-poster .cover-photo img { display: block; object-fit: contain; }
 .note-preview-hybrid .preview-note-work, .notes-design-hybrid .preview-note-work { padding: 4px 9px; border: 1px solid #8a7779; border-radius: 2px; background: #f0dbe0; color: #544348; font-weight: 500; }
 .note-preview-hybrid .preview-note-work svg { display: block; width: 13px; height: 13px; }
 .note-preview-hybrid .preview-note:nth-child(3n+2) .preview-note-work { background: #dce8e6; border-color: #778e87; color: #3e5852; }
@@ -171,6 +176,9 @@
   .note-preview-paper .preview-note { grid-template-columns: minmax(0, 1fr); }
   .preview-note-margin { flex-direction: row; flex-wrap: wrap; align-items: center; padding: 20px 0 0; gap: 8px; }
   .preview-note-margin > span:first-child { display: none; }
+  .preview-note-margin:has(.preview-note-poster img) { display: grid; grid-template-columns: 56px minmax(0, 1fr); column-gap: 12px; row-gap: 6px; align-items: start; }
+  .preview-note-margin:has(.preview-note-poster img) > span { grid-column: 2; justify-self: start; }
+  .preview-note-poster { grid-column: 1; grid-row: 1 / span 2; width: 56px; margin: 0; }
   .note-preview-paper .preview-note-content { padding: 16px 0 18px; border-left: 0; }
   .note-preview-paper .preview-note-picture { width: 150px; }
   .note-preview-classic { grid-template-columns: minmax(0, 1fr); gap: 22px; }

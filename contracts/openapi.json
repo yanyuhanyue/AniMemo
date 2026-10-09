@@ -11153,6 +11153,14 @@
           },
           "available": {
             "type": "boolean"
+          },
+          "entry_id": {
+            "type": "string",
+            "description": "Active journal entry owned by the caller, for anime references only."
+          },
+          "cover_revision": {
+            "type": "string",
+            "description": "Existing private entry cover revision. Omitted when no cover is available."
           }
         },
         "required": [

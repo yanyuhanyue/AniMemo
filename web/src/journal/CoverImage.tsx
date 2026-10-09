@@ -34,7 +34,7 @@ export function CoverImage({
   entry,
   card = false,
 }: {
-  entry: Entry;
+  entry: Pick<Entry, "id" | "title" | "cover_revision">;
   card?: boolean;
 }) {
   const [failed, setFailed] = useState("");

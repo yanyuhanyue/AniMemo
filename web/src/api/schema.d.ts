@@ -7303,6 +7303,10 @@ export interface components {
             kind: "anime" | "character" | "note" | "moment";
             title: string;
             available: boolean;
+            /** @description Active journal entry owned by the caller, for anime references only. */
+            entry_id?: string;
+            /** @description Existing private entry cover revision. Omitted when no cover is available. */
+            cover_revision?: string;
         };
         ImportCandidate: {
             id: string;

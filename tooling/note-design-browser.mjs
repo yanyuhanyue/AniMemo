@@ -44,6 +44,8 @@ try {
   const longTitle = '这一段很长的札记标题也应该完整换行' .repeat(5);
   await call('POST', '/api/v1/memory/notes', { title: longTitle });
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMISNnyHwAE2AJoEeqx4gAAAABJRU5ErkJggg==', 'base64');
+  const cover = await page.request.put(`${origin}/api/v1/entries/${entry.id}/cover?version=${entry.version}`, { headers: { Origin: origin, 'Content-Type': 'image/png' }, data: png });
+  assert.ok(cover.ok(), 'upload a real private entry cover');
   const media = await call('POST', '/api/v1/memory/media', { byte_size: png.length });
   assert.ok((await page.request.put(`${origin}/api/v1/memory/media/${media.id}`, { headers: { Origin: origin, 'Content-Type': 'image/png' }, data: png })).ok());
   await call('POST', '/api/v1/memory/notes', { title: '配图札记', body: '图片跟随原有权限读取。', media_ids: [media.id] });
@@ -63,8 +65,15 @@ try {
     assert.ok(await page.getByText('2024年', { exact: true }).isVisible());
     assert.ok(await page.getByText('日期未记', { exact: true }).first().isVisible());
     const spoilerCard = page.locator('.preview-note').filter({ has: page.getByRole('button', { name: spoiler.title, exact: true }) });
-    assert.equal(await spoilerCard.locator('img').count(), 0);
+    assert.equal(await spoilerCard.locator('.preview-note-picture img').count(), 0);
     assert.equal(await spoilerCard.getByText(spoiler.body, { exact: true }).count(), 0);
+    if (design === 'hybrid') {
+      const poster = page.locator('.preview-note').filter({ has: page.getByRole('button', { name: note.title, exact: true }) }).locator('.preview-note-poster img');
+      await poster.scrollIntoViewIfNeeded();
+      await poster.evaluate(img => img.decode());
+      assert.ok((await poster.getAttribute('src')).startsWith(`/api/v1/entries/${entry.id}/cover/`));
+      assert.equal(await page.locator('.preview-note').filter({ has: page.getByRole('button', { name: longTitle, exact: true }) }).locator('.preview-note-poster').count(), 0, 'unlinked notes have no fabricated poster');
+    }
     const picture = page.locator('.preview-note').filter({ has: page.getByRole('button', { name: '配图札记', exact: true }) }).locator('img');
     await picture.scrollIntoViewIfNeeded();
     await picture.evaluate(img => img.decode());
@@ -109,6 +118,19 @@ try {
     assert.equal((await call('GET', `/api/v1/memory/notes/${saved.id}`)).body, `已在 ${design} 中修改`);
     for (const width of [390, 320]) { await page.setViewportSize({ width, height: 844 }); await fits(); await capture(`${design}-${width}`); }
     check(`${design}: reading, private images, spoiler disclosure, filters, empty state, create/edit persistence, precise dates and 390/320px layouts passed.`);
+  }
+  if (designs.at(-1) === 'hybrid') {
+    await page.waitForLoadState('networkidle');
+    const liveEntry = await call('GET', `/api/v1/entries/${entry.id}`);
+    await call('DELETE', `/api/v1/entries/${entry.id}/cover?version=${liveEntry.version}`);
+    assert.equal((await page.request.get(`${origin}/api/v1/entries/${entry.id}/cover/${liveEntry.cover_revision}`)).status(), 404);
+    await page.reload();
+    await page.locator('.preview-note-work').filter({ hasText: entry.title }).first().waitFor();
+    const staleCard = page.locator('.preview-note').filter({ has: page.getByRole('button', { name: note.title, exact: true }) });
+    await staleCard.scrollIntoViewIfNeeded();
+    assert.equal(await staleCard.locator('.preview-note-poster').count(), 0, 'a removed cover leaves no empty image frame after refresh');
+    assert.ok(await staleCard.getByText(note.body, { exact: true }).isVisible());
+    check('A removed cover returns a real 404 and disappears after refresh while the note remains readable.');
   }
   await fill(page.getByLabel('查找记忆', { exact: true }), '没有确切日期');
   await page.getByRole('button', { name: `阅读 ${note.title}`, exact: true }).waitFor();

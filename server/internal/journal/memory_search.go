@@ -71,8 +71,10 @@ func (s *Service) SearchMemory(ctx context.Context, owner string, f MemorySearch
 
 type MemoryReference struct {
 	CollectionItem
-	Title     string `json:"title"`
-	Available bool   `json:"available"`
+	Title         string `json:"title"`
+	Available     bool   `json:"available"`
+	EntryID       string `json:"entry_id,omitempty"`
+	CoverRevision string `json:"cover_revision,omitempty"`
 }
 
 func (s *Service) MemoryReferences(ctx context.Context, owner string, items []CollectionItem) ([]MemoryReference, error) {
@@ -86,26 +88,33 @@ func (s *Service) MemoryReferences(ctx context.Context, owner string, items []Co
 		}
 		ids = append(ids, v.ID)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,title,'anime' FROM anime_resources WHERE owner_id=$1 AND id=ANY($2::uuid[]) UNION ALL SELECT id,name,'character' FROM characters WHERE owner_id=$1 AND id=ANY($2::uuid[]) UNION ALL SELECT id,title,kind FROM memory_notes WHERE owner_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL`, owner, ids)
+	rows, err := s.pool.Query(ctx, `SELECT a.id,a.title,'anime',coalesce(e.id::text,''),coalesce(c.revision::text,'')
+ FROM anime_resources a
+ LEFT JOIN entries e ON e.anime_id=a.id AND e.user_id=a.owner_id AND e.deleted_at IS NULL
+ LEFT JOIN entry_covers c ON c.entry_id=e.id
+ WHERE a.owner_id=$1 AND a.id=ANY($2::uuid[])
+ UNION ALL SELECT id,name,'character','','' FROM characters WHERE owner_id=$1 AND id=ANY($2::uuid[])
+ UNION ALL SELECT id,title,kind,'','' FROM memory_notes WHERE owner_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL`, owner, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	titles := map[string]string{}
+	references := map[string]MemoryReference{}
 	for rows.Next() {
-		var key, title, kind string
-		if err = rows.Scan(&key, &title, &kind); err != nil {
+		var ref MemoryReference
+		if err = rows.Scan(&ref.ID, &ref.Title, &ref.Kind, &ref.EntryID, &ref.CoverRevision); err != nil {
 			return nil, err
 		}
-		titles[kind+":"+key] = title
+		references[ref.Kind+":"+ref.ID] = ref
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
 	out := []MemoryReference{}
 	for _, v := range items {
-		title, ok := titles[v.Kind+":"+v.ID]
-		out = append(out, MemoryReference{CollectionItem: v, Title: title, Available: ok})
+		ref, ok := references[v.Kind+":"+v.ID]
+		ref.CollectionItem, ref.Available = v, ok
+		out = append(out, ref)
 	}
 	return out, nil
 }

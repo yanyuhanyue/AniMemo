@@ -7,13 +7,13 @@
 | 番剧影评 | `/memory?notes_ui=review#notes` | 单栏文章列表，突出关联作品、标题与正文；有配图时并排展示 |
 | 纸本札记 | `/memory?notes_ui=paper#notes` | 暖纸色、宋体标题、日期页边与连续页面；窄屏日期移到正文上方 |
 | 旧版风格 | `/memory?notes_ui=classic#notes` | 参考旧项目的墨线边框、偏移阴影和彩色标签，桌面双栏、手机单栏 |
-| 融合版 | `/memory?notes_ui=hybrid#notes` | 纸本的连续页面、宋体标题与日期页边，结合小面积彩色作品标签、墨线和醒目的操作按钮 |
+| 融合版 | `/memory?notes_ui=hybrid#notes` | 纸本的连续页面、宋体标题与日期页边，结合小面积彩色作品标签、墨线和醒目的操作按钮；已有番剧海报显示在日期/珍藏下方 |
 
 各版均可阅读、编辑和保存，使用同一份真实数据，保存会生效。对比切换保留当前搜索、年份、珍藏筛选与分页，支持浏览器返回。瞬间等其他分类保持原有排版。阅读窗口和写作窗口也跟随选择；未选定前不把试用版式扩展成长期主题系统。融合版复用纸本布局，只增加局部视觉样式。
 
-正文、图片、剧透保护和修订记录复用现有组件，未引入新 API、数据库迁移或生产依赖。关联作品通过当前页去重后的批量引用接口读取；没有逐卡片请求。无日期仍显示「日期未记」，只记年份时不会补出月份；列表仍按最近修改排序，纸本的日期页边不代表时间线排序。
+正文、图片、剧透保护和修订记录复用现有组件，没有新增路由、数据库迁移或生产依赖。关联作品通过当前页去重后的批量引用接口读取；海报接入时在引用响应增加可选 `entry_id` / `cover_revision` 字段，同一查询返回当前账号的有效作品封面信息，没有逐卡片查询作品。图片复用原有私有封面接口及 `CoverImage`。无日期仍显示「日期未记」，只记年份时不会补出月份；列表仍按最近修改排序，纸本的日期页边不代表时间线排序。
 
-纸本标题使用本机中文衬线字体（Linux Noto Serif CJK SC / Windows 宋体等），没有新增字体下载，因此不同系统字形略有差异。配图来自实际札记附件，未给无图札记填入无关海报。
+纸本标题使用本机中文衬线字体（Linux Noto Serif CJK SC / Windows 宋体等），没有新增字体下载，因此不同系统字形略有差异。配图来自实际札记附件；融合版页边海报来自关联番剧已经保存的封面。无封面、无关联或原封面读取失败时保留留白，手机使用日期旁的 56 px 缩略图。预览截图的「海报排版示例」是合成记录，明确使用旧项目演示画作，不冒充真实番剧的官方海报。
 
 ## 验证与截图
 
@@ -24,6 +24,7 @@
 - `REVIEW_OUTPUT=.local/output/browser/notes-directions/default-regression node tooling/reading-browser.mjs` PASS。现有默认版与收藏/详情流程回归，7 组检查、7 次 axe 扫描无检出，0 页面脚本异常。
 - 截图在 `.local/output/browser/notes-directions/`，每版包含 `*-desktop.png`、`*-reader.png`、`*-composer.png`、`*-mobile.png` 和 `*-composer-mobile.png`。截图账户只有合成内容；自动化另建独立测试账户，没有请求拦截或 mock API。
 - 融合版追加验证：`REVIEW_DESIGNS=hybrid REVIEW_OUTPUT=.local/output/browser/notes-directions/hybrid-verification node tooling/note-design-browser.mjs` PASS，包含相同真实 API 流程、版式切换、390/320 px 布局，3 次 axe 扫描无检出、0 页面脚本异常。前端检查与生产构建通过；此次没有重跑其他版式的完整交互套件。融合版截图为 `hybrid-*.png`，原纸本与旧版风格仍可对照。
+- 页边海报追加验证：`npm run check`、Vite 生产构建和 `npm run test:api -- -run 'TestMemoryReferenceCovers|TestPrivateCoverLifecycle|TestMemoryLibraryOwnershipAndHistory'` PASS；真实 PostgreSQL 覆盖批量封面引用、账号隔离、无封面、删除封面及删除作品后仍保留记忆身份。浏览器海报检查及证据在 `poster-verification/`，截图为 `hybrid-poster-*.png`。同时将既有菜单引擎引用收回公共 UI 层，修复项目依赖检查发现的旧问题。
 - 此处是 Linux Chromium 与手机视口检查，不代表 Safari 或真实手机软键盘验收；本轮未运行无关的 VM/长时负载检查。
 
 复跑脚本可传 `REVIEW_ORIGIN` 指向本地真实开发服务；单独复查某版可传 `REVIEW_DESIGNS=classic`（或 `review,paper`）。脚本沿用已有 `.local/tools/browser` 的 Playwright、axe 与系统 Chromium。

@@ -732,7 +732,7 @@ export function Notes({
       ) : (
         <>
           <p className="notes-result-count">{q.data.total} {kind === "moment" ? "个瞬间" : "篇札记"}{(search || year || highlight) && " · 筛选结果"}{design && <span>最近修改在前</span>}</p>
-          {design ? <NotePreviewList notes={q.data.items} design={design} titles={titles} onRead={note => { setOpened(note); setConfirm(false); }} /> : <div
+          {design ? <NotePreviewList notes={q.data.items} design={design} titles={titles} works={works.data?.items ?? []} onRead={note => { setOpened(note); setConfirm(false); }} /> : <div
             className={
               kind === "moment" ? "memory-gallery" : "memory-note-list"
             }

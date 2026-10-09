@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Menu } from "@base-ui/react/menu";
+import { Menu } from "../components/ui/Menu";
 import { client, result, type User } from "../api/client";
 import { Button } from "../components/ui/Button";
 import { Icon } from "../components/ui/Icon";

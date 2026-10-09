@@ -1,5 +1,7 @@
 import { Button } from "../components/ui/Button";
 import { Icon } from "../components/ui/Icon";
+import { CoverImage } from "../journal/CoverImage";
+import type { components } from "../api/schema";
 import { MemoryImage, visibilityLabels, type Note } from "./shared";
 
 // Temporary, URL-selected alternatives using the existing note actions.
@@ -42,18 +44,24 @@ export function NoteWork({ title, linked }: { title?: string; linked: boolean })
   return <span className="preview-note-work"><Icon name="book" />{linked ? title ?? "正在读取作品…" : "随记"}</span>;
 }
 
-export function NotePreviewList({ notes, design, titles, onRead }: {
+export function NotePreviewList({ notes, design, titles, works, onRead }: {
   notes: Note[];
   design: NoteDesign;
   titles: Map<string, string>;
+  works: components["schemas"]["MemoryReference"][];
   onRead: (note: Note) => void;
 }) {
   const paperLayout = design === "paper" || design === "hybrid";
+  const posters = new Map(works.flatMap(work => work.available && work.entry_id && work.cover_revision
+    ? [[work.id, { id: work.entry_id, title: work.title, cover_revision: work.cover_revision }] as const] : []));
   return <div className={`note-preview-list note-preview-${design}${design === "hybrid" ? " note-preview-paper" : ""}`}>
     {notes.map(note => <article key={note.id} className="preview-note" data-highlight={note.highlight || undefined}>
       {paperLayout && <div className="preview-note-margin">
         <span>回忆日期</span><span>{noteDate(note)}</span>
         {note.highlight && <span className="preview-note-kept"><Icon name="star" />珍藏</span>}
+        {design === "hybrid" && posters.has(note.anime_id) && <div className="preview-note-poster">
+          <CoverImage card entry={posters.get(note.anime_id)!} />
+        </div>}
       </div>}
       <div className="preview-note-content">
         <div className="preview-note-topline">
