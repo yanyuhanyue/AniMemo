@@ -6,6 +6,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Dialog } from "../components/ui/Dialog";
 import { NoteBody } from "./NoteBody";
+import { NotePreviewList, NoteWork, noteDate, type NoteDesign } from "./NoteDesignPreview";
 import { Icon } from "../components/ui/Icon";
 import { Pager, Problem } from "../public/Public";
 import { TagField } from "../journal/ManageTools";
@@ -56,6 +57,7 @@ export function NoteEditor({
   kind,
   anime = "",
   animeTitle,
+  design,
   onClose,
 }: {
   userID: string;
@@ -63,6 +65,7 @@ export function NoteEditor({
   kind: "note" | "moment";
   anime?: string;
   animeTitle?: string;
+  design?: NoteDesign;
   onClose: () => void;
 }) {
   const [tagText, setTagText] = useState(note?.tags.join(", ") ?? "");
@@ -213,7 +216,7 @@ export function NoteEditor({
       }
       onClose={onClose}
       wide
-      className="note-composer"
+      className={`note-composer${design ? ` notes-design-${design}` : ""}`}
     >
       <form
         className="memory-form note-editor"
@@ -223,7 +226,7 @@ export function NoteEditor({
         }}
       >
         <fieldset disabled={save.isPending || upload.isPending}>
-          <div className="composer-caption"><Icon name="edit" /><span>{note ? "重读，也为回忆添上一笔" : "写给未来的自己"}</span><span>{visibilityLabels[form.visibility ?? 'private']}</span></div>
+          <div className="composer-caption"><Icon name="edit" /><span>{design ? linkedTitle ? `关于《${linkedTitle}》` : "札记正文" : note ? "重读，也为回忆添上一笔" : "写给未来的自己"}</span><span>{visibilityLabels[form.visibility ?? 'private']}</span></div>
           <label className="composer-title">
             <span className="sr-only">记忆标题</span>
             <Input
@@ -588,12 +591,16 @@ export function Notes({
   anime = "",
   animeTitle,
   character = "",
+  design,
+  onPreview,
 }: {
   userID: string;
   kind?: "note" | "moment";
   anime?: string;
   animeTitle?: string;
   character?: string;
+  design?: NoteDesign;
+  onPreview?: () => void;
 }) {
   const [search, setSearch] = useState("");
   const [year, setYear] = useState("");
@@ -603,6 +610,7 @@ export function Notes({
   const [opened, setOpened] = useState<Note | null>(null);
   const [sharing, setSharing] = useState("");
   const [confirm, setConfirm] = useState(false);
+  const Heading = design && !anime ? "h1" : "h2";
   const refresh = useMemoryRefresh(userID);
   const q = useQuery({
     queryKey: [
@@ -635,6 +643,16 @@ export function Notes({
         }),
       ),
   });
+  const animeIDs = [...new Set((q.data?.items ?? []).map(n => n.anime_id).filter(Boolean))].sort();
+  const works = useQuery({
+    queryKey: ["memory", userID, "note-design-works", animeIDs],
+    enabled: !!design && animeIDs.length > 0,
+    queryFn: ({ signal }) => result(client.POST("/api/v1/memory/references", {
+      signal, body: { items: animeIDs.map(id => ({ kind: "anime" as const, id })) },
+    })),
+  });
+  const titles = new Map(works.data?.items.map(item => [item.id, item.available ? item.title : "作品已不可用"]));
+  if (works.error) animeIDs.forEach(id => titles.set(id, "作品信息暂时无法读取"));
   const remove = useMutation({
     mutationFn: (n: Note) =>
       result(
@@ -649,20 +667,23 @@ export function Notes({
     },
   });
   return (
-    <section className="notes-page">
+    <section className="notes-page" data-note-design={design}>
       <header className="memory-section-heading">
         <div>
-          <h2>{kind === "moment" ? "值得留住的瞬间" : "记忆札记"}</h2>
+          <Heading>{design ? "札记" : kind === "moment" ? "值得留住的瞬间" : "记忆札记"}</Heading>
           <p>
-            {kind === "moment"
+            {design ? design === "review" ? "关于作品，也关于看完之后的想法。" : design === "paper" ? "那些写下来，偶尔又想翻看的文字。" : "看过的故事，我有话说。" : kind === "moment"
               ? "把那一帧和当时的心情放在一起。"
               : "留下一段感想，也留住当时的自己。"}
           </p>
         </div>
+        <div className="notes-heading-actions">
+        {!design && kind === "note" && onPreview && <Button className="text-button" onClick={onPreview}>试用新排版</Button>}
         <Button className="button primary" onClick={() => setEditor(null)}>
           <Icon name="plus" />
-          {kind === "moment" ? "收藏瞬间" : "写一页记忆"}
+          {design ? "写札记" : kind === "moment" ? "收藏瞬间" : "写一页记忆"}
         </Button>
+        </div>
       </header>
       <div className="memory-filters notes-filters">
         <label className="notes-search">
@@ -710,8 +731,8 @@ export function Notes({
         <Problem error={q.error} />
       ) : (
         <>
-          <p className="notes-result-count">{q.data.total} {kind === "moment" ? "个瞬间" : "篇札记"}{(search || year || highlight) && " · 筛选结果"}</p>
-          <div
+          <p className="notes-result-count">{q.data.total} {kind === "moment" ? "个瞬间" : "篇札记"}{(search || year || highlight) && " · 筛选结果"}{design && <span>最近修改在前</span>}</p>
+          {design ? <NotePreviewList notes={q.data.items} design={design} titles={titles} onRead={note => { setOpened(note); setConfirm(false); }} /> : <div
             className={
               kind === "moment" ? "memory-gallery" : "memory-note-list"
             }
@@ -750,7 +771,7 @@ export function Notes({
                 </div>
               </article>
             ))}
-          </div>
+          </div>}
           {!q.data.items.length && (
             <div className="memory-empty">
               <Icon name="book" />
@@ -774,14 +795,16 @@ export function Notes({
           kind={kind}
           anime={anime}
           animeTitle={animeTitle}
+          design={design}
           onClose={() => setEditor(undefined)}
         />
       )}
       {opened && (
-        <Dialog title={opened.title} onClose={() => setOpened(null)} wide className="note-reader">
+        <Dialog title={opened.title} eyebrow={design ? "札记" : undefined} onClose={() => setOpened(null)} wide className={`note-reader${design ? ` notes-design-${design}` : ""}`}>
           <div className="memory-reading note-reading">
+            {design && <NoteWork title={titles.get(opened.anime_id)} linked={!!opened.anime_id} />}
             <p className="memory-meta">
-              {opened.occurred_on || "不记日期"} ·{" "}
+              {design ? noteDate(opened) : opened.occurred_on || "不记日期"} ·{" "}
               {visibilityLabels[opened.visibility]}
             </p>
             {opened.spoiler ? (
