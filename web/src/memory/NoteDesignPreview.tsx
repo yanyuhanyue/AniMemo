@@ -57,8 +57,10 @@ export function NotePreviewList({ notes, design, titles, works, onRead }: {
   return <div className={`note-preview-list note-preview-${design}${design === "hybrid" ? " note-preview-paper" : ""}`}>
     {notes.map(note => <article key={note.id} className="preview-note" data-highlight={note.highlight || undefined}>
       {paperLayout && <div className="preview-note-margin">
-        <span>回忆日期</span><span>{noteDate(note)}</span>
-        {note.highlight && <span className="preview-note-kept"><Icon name="star" />珍藏</span>}
+        <div className="preview-note-margin-meta">
+          <span className="preview-note-date-label">回忆日期</span><span>{noteDate(note)}</span>
+          {note.highlight && <span className="preview-note-kept"><Icon name="star" />珍藏</span>}
+        </div>
         {design === "hybrid" && posters.has(note.anime_id) && <div className="preview-note-poster">
           <CoverImage card entry={posters.get(note.anime_id)!} />
         </div>}
