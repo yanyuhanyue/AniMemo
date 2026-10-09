@@ -10,7 +10,7 @@ const image = process.env.ANIMEMO_CANDIDATE_IMAGE;
 const previousImage = process.env.ANIMEMO_PREVIOUS_IMAGE;
 if (!image) throw new Error('Set ANIMEMO_CANDIDATE_IMAGE to a locally built stage 3 image.');
 const names = [0, 1, 2].map(() => `probe-${randomBytes(6).toString('hex')}`), created = [];
-const report = { status: 'RUNNING', started_at: new Date().toISOString(), image, previous_image: previousImage, checks: [] };
+const report = { status: 'RUNNING', started_at: new Date().toISOString(), image, previous_image: previousImage, checks: [], cleanup: [] };
 const mark = name => { report.checks.push(name); console.log(`Stage 3: ${name}`); };
 const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore','pipe','pipe'], timeout: 30000 });
 const config = async name => JSON.parse(await readFile(`.local/instances/${name}/config.json`, 'utf8'));
@@ -45,6 +45,8 @@ try {
     await jobState(use, job.id, 'ready'); await use('POST', `/api/v1/imports/${job.id}`, { action: 'apply' }); await jobState(use, job.id, 'done');
     assert.equal((await use('GET', '/api/v1/entries')).total, 1);
     mark('cross-version update preserves the enabled immutable converter and installs the new official theme without switching versions');
+    await removeTestInstance(names[2]); created.pop();
+    report.cleanup.push({ name: names[2], removed: true });
   }
   created.push(names[0]); const a = await installInstance({ name: names[0], image, port: await port() }); let c = await config(names[0]);
   let call = client(a.origin); const credentials = { email: `${randomUUID()}@example.test`, password: `stage3-${randomUUID()}` };
@@ -100,7 +102,6 @@ try {
   report.status = 'PASS';
 } catch (e) { report.status = 'FAIL'; report.error = e.message; throw e; }
 finally {
-  report.cleanup = [];
   for (const name of created.reverse()) { try { await removeTestInstance(name); report.cleanup.push({ name, removed: true }); } catch (e) { report.cleanup.push({ name, removed: false, error: e.message }); report.status = 'FAIL'; } }
   report.finished_at = new Date().toISOString(); await mkdir('.local/output', { recursive: true }); await writeFile('.local/output/stage3-smoke.json', JSON.stringify(report, null, 2) + '\n');
   if (report.cleanup.some(item => !item.removed)) throw new Error('Cleanup incomplete; inspect stage3-smoke report.');

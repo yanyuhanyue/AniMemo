@@ -2,6 +2,8 @@
 
 执行顺序以 [当前更新路线](refactor-next-steps.md) 为准。主开发与首批部署基线为 Linux + Docker；Windows 保留本地接手入口。VM 和约 25 分钟负载测试是可选专项，不作为开发、合并或发布的默认前置。
 
+2026-10-09 接手补充：当前源码和云端 `stage3-review` 为 `1.4.0-alpha.2`，迁移到 023，已加入札记主题与最新默认 UI。GitHub 分支写入本轮成功，镜像、升级中发现的版本冲突及 vfs 空间问题见 [1.4 首批交付](v1.4-delivery.md)。下面的阶段记录保留其历史范围，不用旧环境限制代替当前检查结果。
+
 ## 代码位置和范围
 
 本地源代码位于 `animemo-next`，在 [yanyuhanyue/AniMemo](https://github.com/yanyuhanyue/AniMemo/tree/codex/animemo-next) 的 `codex/animemo-next` 分支中位于仓库根目录。当前工作区已继续实现完整手账管理、账号安全、持久导入、分享、专栏、审核、实例安装和备份更新流程；实际验收见 `verification.md`，原项目功能覆盖见 `feature-parity.md`。云端工作区路径为 `/workspace/animemo-next`，工作分支为 `codex/animemo-next-cloud-check`；未推送的改动需要通过源码交接包或后续代码同步取得。
