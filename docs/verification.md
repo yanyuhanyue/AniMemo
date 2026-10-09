@@ -8,7 +8,21 @@
 
 真实 API 浏览器已验证手账卡片/列表/详情、分区预览及保存、320/390 px、评分修改、封面/删除确认、编辑持久化、批量管理、清理取消/确认、停用回退；默认札记、API 3 token 主题和原札记模板回归通过。已修正预览装饰图溢出和灰底评分对比度。扫描不代表完整无障碍认证。
 
-容器构建、跨版本升级/备份恢复和最终实例验证将在候选冻结后记录；当前不将未执行检查标为通过。
+| 最终验证 | 实际结果 |
+| --- | --- |
+| 浏览器回归 | 新手账主题 9 次 axe、原札记模板 6 次、API 3 token 主题 5 次、默认札记 3 次均无检出，均无页面异常。默认录入、短评、观看日期/话数不自动补全、编辑保留字段、整理菜单和检索 7 组通过；旧录入脚本的“固定两个字段”和已替换菜单定位已更新 |
+| 实际镜像 | 只构建一次；在 alpha.4 容器重跑手账主题完整流程，9 次 axe 无检出、0 页面异常，含快捷评分编辑和历史版本清理；桌面及手机截图已查看 |
+| 跨版本与恢复 | alpha.3 → alpha.4 的 `test:stage3` 6 组通过，124.7 秒。旧 TXT 版本/摘要、旧札记模板/偏好保留；手账/札记分别选择、正常更新保留、克隆恢复清除两类选择、清理后的不可变身份随备份恢复均通过；Worker 续跑、中断救援、坏包隔离通过；3 个自建 probe 实例已清理 |
+| 原验收实例 | `stage3-review` 已更新，doctor PASS，app/worker/db healthy；13 张账号/内容表升级前后摘要一致：13 个原账号、15 部记录、10 条观看、10 篇札记、封面/附件、收藏/年度/成就。比对完成后才新增最终浏览器合成数据；星笺展架 1.1.0 已启用，未批量修改个人选择 |
+
+应用源码 `0fc1b60cd03f119c5f20d354ce19a87d1591d3b1`，镜像 `sha256:3ef1afaf698271218de3d8ba8b52a7f417ee2e40326de5fbd3959d3615d8034d`，25 项迁移。归档 53,800,960 字节、SHA-256 `55c6f7185ec0732815320f4a38a2f8c2c716c39f4959083dc76dfca3d1ec8814`；后续只更正文档。候选 `development: true`，未正式签发或发布 Release。
+
+Docker vfs 构建后可用空间约 6.0 GiB，核对构建前后 ID、生成时间和用途后，仅清理本次 38 个可回收构建缓存记录，恢复到约 14 GiB；镜像、数据卷和备份保留。开发数据库的迭代包采用独立临时版本号，未绕过不可变身份约束修改旧包。批量合成注册触发开发进程的频率限制，重启隔离开发服务后完成录入回归，没有放宽正式限流。
+
+证据：`.local/logs/journal-theme-{check,unit,api,stage3,container-browser}.log`；`.local/output/journal-theme-stage3.json`、`journal-theme-review-data-{before,after}.json`、`journal-theme-review-{update,doctor,status,enabled}.json`、`release-v14-alpha4/release.json`。浏览器证据在 `.local/output/browser/{journal-themes,journal-themes-container,theme-templates,themes,notes-tests,recording}/`。更新前完整备份 `/workspace/animemo-next/.local/output/backups/stage3-review-2026-10-09T03-48-12-037Z-faa091`。
+
+交接 ZIP：`.local/output/animemo-next-v1.4-alpha4-handoff.zip`，含提交源码、同一候选镜像/清单、星笺展架包及合成验收证据；不含账号凭据、实例配置、数据库或备份。云端服务仍绑定回环 18082，本轮未建立公网代理。Windows 原生、Safari、VM、25 分钟负载和邮件/OAuth/R2 正式凭据联调未执行。
+
 
 ## 历史：v1.4 札记模板与资源（2026-10-09，云端 Linux）
 
