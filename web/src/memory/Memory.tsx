@@ -6,7 +6,6 @@ import { Button } from "../components/ui/Button";
 import { Icon } from "../components/ui/Icon";
 import { PageShell, Problem, PublicCard } from "../public/Public";
 import { Notes } from "./Notes";
-import { currentNoteDesign, NoteDesignSwitcher, type NoteDesign } from "./NoteDesignPreview";
 import { Characters } from "./Characters";
 import { Episodes } from "./Episodes";
 import { Collections } from "./Collections";
@@ -18,7 +17,7 @@ import { AnimeSelect, useAnimeReference } from "./shared";
 import { Rating } from "../components/Rating";
 import { SiteBrand, SiteCard, useSite } from "../components/SiteIdentity";
 import "./memory.css";
-import "./note-design-preview.css";
+import "./notes.css";
 const tabs = {
   search: "找回记忆",
   notes: "札记",
@@ -45,7 +44,6 @@ function currentTab(): Tab {
 }
 export function MemoryWorkspace({ user }: { user: User }) {
   const [tab, setTab] = useState(currentTab);
-  const [noteDesign, setNoteDesign] = useState(currentNoteDesign);
   const [anime, setAnime] = useState(() => new URLSearchParams(location.search).get("anime_id") ?? "");
   const [choosingAnime, setChoosingAnime] = useState(false);
   const reference = useAnimeReference(user.id, anime);
@@ -58,7 +56,6 @@ export function MemoryWorkspace({ user }: { user: User }) {
     const changed = () => {
       const next = currentTab();
       setTab(next);
-      setNoteDesign(currentNoteDesign());
       setAnime(new URLSearchParams(location.search).get("anime_id") ?? "");
     };
     addEventListener("hashchange", changed);
@@ -68,12 +65,6 @@ export function MemoryWorkspace({ user }: { user: User }) {
       removeEventListener("popstate", changed);
     };
   }, []);
-  function changeNoteDesign(design: NoteDesign | undefined) {
-    const url = new URL(location.href);
-    if (design) url.searchParams.set("notes_ui", design); else url.searchParams.delete("notes_ui");
-    history.pushState(null, "", url);
-    setNoteDesign(design);
-  }
   function changeAnime(id: string) {
     const url = new URL(location.href);
     if (id) url.searchParams.set("anime_id", id); else url.searchParams.delete("anime_id");
@@ -86,7 +77,7 @@ export function MemoryWorkspace({ user }: { user: User }) {
     setTab(value);
   }
   return (
-    <div className="app-shell memory-shell" data-accent={user.accent} data-notes-design={tab === "notes" ? noteDesign : undefined}>
+    <div className="app-shell memory-shell" data-accent={user.accent} data-memory-section={tab}>
       <a href="#memory-main" className="skip-link">
         跳到记忆正文
       </a>
@@ -117,7 +108,6 @@ export function MemoryWorkspace({ user }: { user: User }) {
         </div>
       </header>
       <main className="memory-main" id="memory-main">
-        {tab === "notes" && noteDesign && <NoteDesignSwitcher design={noteDesign} onChange={changeNoteDesign} />}
         <section className="memory-intro memory-masthead" data-scoped={scoped || undefined}>
           <div className="memory-breadcrumb"><a href="/">我的番剧</a><Icon name="chevron" /><span>{scoped ? "作品记忆" : "记忆库"}</span></div>
           <div className="memory-context-heading"><div><h1>{scoped ? animeTitle || (reference.isPending ? "正在读取作品…" : "作品记忆") : "我的记忆库"}</h1><p>{scoped ? "与这部作品有关的文字、片段和观看记忆。" : "把看过的故事，写进自己的记忆。"}</p></div>{scoped && <div className="memory-context-actions"><Button className="button secondary" aria-expanded={choosingAnime} onClick={() => setChoosingAnime(!choosingAnime)}>更换作品</Button><a href={`/memory#${tab}`}>查看全部记忆<Icon name="arrow" /></a></div>}</div>
@@ -160,7 +150,7 @@ export function MemoryWorkspace({ user }: { user: User }) {
           <MemorySearch userID={user.id} anime={anime} character={character} />
         )}{" "}
         {tab === "notes" && (
-          <Notes key={`notes:${anime}`} userID={user.id} anime={anime} animeTitle={animeTitle} character={character} design={noteDesign} onPreview={() => changeNoteDesign("review")} />
+          <Notes key={`notes:${anime}`} userID={user.id} anime={anime} animeTitle={animeTitle} character={character} />
         )}
         {tab === "moment" && (
           <Notes

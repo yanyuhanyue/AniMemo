@@ -112,7 +112,7 @@ try {
   mark('The explicit editor persists description and item order, and the reader reflects saved changes.');
 
   await page.goto(origin + '/memory#notes');
-  await click(page.getByRole('button', { name: '写一页记忆', exact: true }));
+  await click(page.getByRole('button', { name: '写札记', exact: true }));
   assert.equal(await page.getByRole('dialog').locator('input:visible,textarea:visible,select:visible').count(), 2);
   await fill(page.getByLabel('记忆标题', { exact: true }), '写给未来的自己');
   await fill(page.getByLabel('记忆正文', { exact: true }), '不需要记得具体日期，也能把这一页好好留下。');
@@ -150,7 +150,7 @@ try {
     if (width === 390) await axe('mobile collection reader');
     await close();
     await page.goto(origin + '/memory#notes');
-    await click(page.getByRole('button', { name: '写一页记忆', exact: true }));
+    await click(page.getByRole('button', { name: '写札记', exact: true }));
     await fill(page.getByLabel('记忆标题', { exact: true }), '在手机上也能安心写下回忆');
     await noOverflow(); await capture(`07-composer-mobile-${width}`);
     if (width === 390) await axe('mobile note composer');

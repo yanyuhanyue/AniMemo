@@ -1,0 +1,104 @@
+/* Default notes: a continuous paper surface with dated margins. */
+.memory-shell[data-memory-section=notes], .notes-surface {
+  --am-ink: #2d302e; --am-muted: #6b6c64; --am-primary: #566856; --am-paper: #fffcf4; --am-border: #dfd8c7;
+  --ink: var(--am-ink); --muted: var(--am-muted); --border: var(--am-border); color: var(--am-ink); background: #f5f1e7;
+}
+.memory-shell[data-memory-section=notes] .memory-main { max-width: 1184px; }
+.memory-shell[data-memory-section=notes] .memory-masthead { background: none; border: 0; border-radius: 0; padding: 0; margin: 22px 0 12px; }
+.memory-shell[data-memory-section=notes] .memory-masthead:not([data-scoped]) { display: none; }
+.memory-shell[data-memory-section=notes] .memory-masthead h1 { font-size: 20px; margin: 10px 0 0; letter-spacing: 0; }
+.memory-shell[data-memory-section=notes] .memory-context-heading p { display: none; }
+.memory-shell[data-memory-section=notes] .memory-breadcrumb { font-size: 11px; color: var(--am-muted); }
+.memory-shell[data-memory-section=notes] .memory-navigation { margin-top: 18px; margin-bottom: 26px; border-bottom: 1px solid #777362; }
+.memory-shell[data-memory-section=notes] .memory-sections button { color: var(--am-muted); }
+.memory-shell[data-memory-section=notes] .memory-sections button[aria-current] { color: var(--am-ink); }
+.memory-shell[data-memory-section=notes] .memory-sections button[aria-current]::after { background: var(--am-ink); }
+.memory-shell[data-memory-section=notes] .memory-sections button[aria-current] span { background: #f3dfa0; border-bottom: 2px solid #35382f; padding: 3px 6px; }
+.memory-shell[data-memory-section=notes] .notes-page { max-width: 910px; margin-inline: auto; }
+.notes-page[data-kind=note] .memory-section-heading { margin-bottom: 24px; }
+.notes-page[data-kind=note] .memory-section-heading :is(h1, h2) { font-size: 38px; font-weight: 700; line-height: 1.3; letter-spacing: .03em; margin-bottom: 10px; }
+.notes-page[data-kind=note] .memory-section-heading p { color: var(--am-muted); font-size: 14px; }
+.notes-page[data-kind=note] .button.primary, .notes-surface .button.primary { background: #f3d478; border: 1.5px solid #35382f; color: #30332d; border-radius: 3px; box-shadow: 3px 3px 0 #35382f; }
+.notes-page[data-kind=note] .notes-filters { margin: 0; gap: 16px; padding: 12px 0; border-block: 1px solid var(--am-border); border-top-color: #777362; }
+.notes-page[data-kind=note] .notes-filters .notes-search { max-width: 470px; }
+.notes-page[data-kind=note] .notes-filters input:not([type=checkbox]) { border: 0; background: transparent; border-radius: 0; }
+.notes-page[data-kind=note] .notes-filters .notes-year { margin-left: auto; }
+.notes-page[data-kind=note] .notes-result-count { display: flex; justify-content: space-between; gap: 16px; margin: 22px 0 0; font-size: 12px; }
+
+.note-sheet { padding-inline: 30px; margin-top: 22px; background: #fffcf4; border: 1.5px solid #777362; box-shadow: 4px 4px 0 #d6cebd; }
+.note-sheet-entry { min-width: 0; display: grid; grid-template-columns: 105px minmax(0, 1fr); }
+.note-sheet-content, .note-sheet-text { min-width: 0; }
+.note-sheet-margin { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 32px 18px 32px 0; }
+.note-sheet-margin-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; color: #797061; font-size: 12px; line-height: 1.8; }
+.note-sheet-date-label { font-size: 10px; letter-spacing: .06em; }
+.note-sheet-content { padding: 30px 0 24px 30px; border-left: 1px solid #d8bbae; border-bottom: 1px solid #e8e1d2; }
+.note-sheet-entry:last-child .note-sheet-content { border-bottom: 0; }
+.note-sheet-topline { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+.note-sheet-work { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; padding: 4px 9px; border: 1px solid #8a7779; border-radius: 2px; background: #f0dbe0; color: #544348; font-weight: 500; overflow-wrap: anywhere; }
+.note-sheet .note-sheet-work { font-size: 12px; }
+.note-sheet-work svg { width: 15px; height: 15px; flex: none; }
+.note-sheet .note-sheet-work svg { width: 13px; height: 13px; }
+.note-sheet-entry:nth-child(3n+2) .note-sheet-work { background: #dce8e6; border-color: #778e87; color: #3e5852; }
+.note-sheet-entry:nth-child(3n) .note-sheet-work { background: #e8e8ce; border-color: #89896a; color: #545637; }
+.note-sheet-kept { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; background: #f5e7b8; border: 1px solid #a08d50; padding: 2px 6px; color: #665118; }
+.note-sheet-kept svg { width: 14px; height: 14px; }
+.note-sheet-poster { width: 86px; max-width: 100%; aspect-ratio: 2 / 3; margin-top: 8px; padding: 3px; border: 1px solid #c9c1b1; background: #fffefb; box-shadow: 2px 3px 0 #e2dbcc; }
+.note-sheet-poster:not(:has(img)) { display: none; }
+.note-sheet-poster .cover-photo { position: static; display: block; width: 100%; height: 100%; background: transparent; box-shadow: none; }
+.note-sheet-poster .cover-photo::after { display: none; }
+.note-sheet-poster .cover-photo img { display: block; object-fit: contain; }
+.note-sheet-article { display: flex; align-items: flex-start; gap: 28px; margin-top: 10px; }
+.note-sheet-text { flex: 1; }
+.note-sheet-entry h3 { margin: 0 0 10px; }
+.note-sheet-entry .memory-title-button { font-family: Georgia, "Noto Serif CJK SC", "Songti SC", SimSun, serif; font-size: 25px; font-weight: 500; line-height: 1.6; color: var(--am-ink); }
+.note-sheet-entry .memory-title-button:hover { color: var(--am-primary); }
+.note-sheet-excerpt { max-width: 65ch; font-size: 15px; line-height: 2.2; color: #5b574f; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; overflow: hidden; }
+.note-sheet-entry blockquote { font-size: 15px; line-height: 2; margin: 0; padding-left: 18px; border-left: 2px solid var(--am-border); white-space: pre-wrap; overflow-wrap: anywhere; }
+.note-sheet-spoiler { font-size: 13px; padding-block: 12px; color: var(--am-muted); }
+.note-sheet-picture { position: relative; width: 140px; flex: none; padding: 7px 7px 18px; border: 1px solid #ded5c7; background: white; transform: rotate(2deg); }
+.note-sheet-picture .memory-thumbnail { display: block; border-radius: 0; aspect-ratio: 1; }
+.note-sheet-picture > span:not(.memory-image-missing) { position: absolute; bottom: 8px; right: 8px; background: #232b2be6; color: white; font-size: 11px; padding: 3px 7px; }
+.note-sheet-footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; }
+.note-sheet-details { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; font-size: 12px; line-height: 1.8; color: var(--am-muted); }
+.note-sheet-tag { display: inline-flex; max-width: 100%; padding: 2px 8px; border: 1px solid #a7bfd9; border-radius: 4px; background: #e6effa; color: #315d88; font-weight: 500; line-height: 1.7; overflow-wrap: anywhere; }
+.note-sheet-visibility { display: inline-flex; align-items: center; gap: 5px; margin-right: 6px; padding: 2px 7px; border: 1px solid #d9dbd1; border-radius: 3px; background: #edeee8; color: #5b6257; line-height: 1.7; white-space: nowrap; }
+.note-sheet-visibility svg { width: 13px; height: 13px; flex: none; }
+.note-sheet-read { display: inline-flex; align-items: center; justify-content: flex-end; gap: 9px; flex: none; min-height: 44px; font-size: 12px; color: #424f3f; font-weight: 600; }
+.note-sheet-read svg { width: 16px; height: 16px; }
+
+/* Dialogs render in a portal, so they carry the notes palette themselves. */
+.dialog.notes-surface { color: var(--am-ink); background: var(--am-paper); border: 1.5px solid #777362; border-top: 4px solid #566856; border-radius: 3px; box-shadow: 5px 5px 0 #35382f; }
+.note-reader.notes-surface .dialog-header { background: var(--am-paper); border-bottom: 1px solid var(--am-border); }
+.note-reader.notes-surface .dialog-header h2 { font-size: 29px; line-height: 1.6; }
+.note-reader.notes-surface .eyebrow { color: var(--am-primary); margin-bottom: 8px; }
+.note-reader.notes-surface .memory-meta { margin-top: 12px; }
+.note-reader.notes-surface .dialog-header h2, .notes-surface .composer-title input { font-family: Georgia, "Noto Serif CJK SC", "Songti SC", SimSun, serif; font-weight: 500; }
+.note-reader.notes-surface .memory-prose { color: #514d45; }
+.notes-surface .composer-body textarea { background: repeating-linear-gradient(transparent 0 35px, #e7dfce 35px 36px); }
+.notes-surface .button.secondary { border: 1px solid #777362; background: #fffcf4; border-radius: 3px; color: #35382f; }
+.notes-surface .dialog-header .icon-button { color: #424f3f; }
+
+@media(max-width:760px) {
+  .memory-shell[data-memory-section=notes] .memory-masthead { margin-top: 18px; }
+  .memory-shell[data-memory-section=notes] .memory-navigation { margin-bottom: 24px; }
+  .notes-page[data-kind=note] .memory-section-heading :is(h1, h2) { font-size: 34px; }
+  .notes-page[data-kind=note] .memory-section-heading p { font-size: 12px; }
+  .notes-page[data-kind=note] .notes-filters { gap: 0 8px; padding-block: 4px; }
+  .notes-page[data-kind=note] .notes-filters .notes-search { max-width: none; }
+  .notes-page[data-kind=note] .notes-result-count { margin-top: 16px; }
+  .note-sheet { padding-inline: 24px; }
+  .note-sheet-entry { grid-template-columns: minmax(0, 1fr); padding-block: 28px 22px; gap: 16px 24px; border-bottom: 1px solid #e8e1d2; }
+  .note-sheet-entry:last-child { border-bottom: 0; }
+  .note-sheet-entry:has(.note-sheet-poster img) { grid-template-columns: 64px minmax(0, 1fr); }
+  .note-sheet-margin, .note-sheet-content { display: contents; }
+  .note-sheet-date-label { display: none; }
+  .note-sheet-topline { grid-column: -2 / -1; grid-row: 1; align-self: end; }
+  .note-sheet-margin-meta { grid-column: -2 / -1; grid-row: 2; align-self: start; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
+  .note-sheet-poster { grid-column: 1; grid-row: 1 / span 2; align-self: center; width: 64px; margin: 0; }
+  .note-sheet-article { grid-column: 1 / -1; grid-row: 3; margin-top: 8px; gap: 16px; flex-direction: column; }
+  .note-sheet-entry .memory-title-button { font-size: 23px; }
+  .note-sheet-picture { width: 150px; max-width: 360px; }
+  .note-sheet-footer { grid-column: 1 / -1; grid-row: 4; margin-top: 0; flex-wrap: wrap; gap: 4px 12px; }
+  .note-sheet-read { margin-left: auto; }
+  .note-reader.notes-surface .dialog-header h2 { font-size: 23px; }
+}

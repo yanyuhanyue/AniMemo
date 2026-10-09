@@ -184,7 +184,7 @@ try {
   assert.equal(after.total_episodes, 12);
   mark("collapsed optional fields preserve existing values on edit");
   await page.goto(origin + "/memory");
-  await page.getByRole("button", { name: "写一页记忆", exact: true }).waitFor();
+  await page.getByRole("button", { name: "写札记", exact: true }).waitFor();
   assert.equal(
     await page.getByRole("button", { name: "角色", exact: true }).isVisible(),
     false,
