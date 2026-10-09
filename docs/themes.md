@@ -1,6 +1,6 @@
 # 札记主题扩展
 
-`1.4.0-alpha.1` 首批提供 `theme.notes`：私人札记列表、阅读及写作窗口的浅色主题。当前确认过的纸页版式始终是内置默认。安装主题不改变任何人的外观；管理员启用后，用户自行选择。
+`1.4.0-alpha.2` 首批提供 `theme.notes`：私人札记列表、阅读及写作窗口的浅色主题。当前确认过的纸页版式始终是内置默认。安装主题不改变任何人的外观；管理员启用后，用户自行选择。
 
 ## 使用
 
@@ -48,7 +48,7 @@ npm run test:api -- -run 'TestNotesTheme|TestBundledNotesTheme|TestPluginLifecyc
 # 仅在隔离的合成验收实例执行；文件含测试管理员凭据，不提交 Git。
 REVIEW_ADMIN_ACCESS=.local/output/theme-review-access.json node tooling/themes-browser.mjs
 # 对实际候选镜像验证随附身份、备份/恢复和更新；仅创建/清理 probe-* 实例。
-ANIMEMO_CANDIDATE_IMAGE=候选镜像 npm run test:stage3
+ANIMEMO_CANDIDATE_IMAGE=候选镜像 ANIMEMO_PREVIOUS_IMAGE=旧验收镜像 npm run test:stage3
 ```
 
 浏览器报告在 `.local/output/browser/themes/`。当前阶段未实现插件市场、任意前端插件、访问记忆的持久授权或 AstrBot Bridge。

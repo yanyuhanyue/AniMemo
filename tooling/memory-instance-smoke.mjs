@@ -272,7 +272,7 @@ export async function memoryInstanceSmoke({ image, previousImage = image }) {
     const converter = plugins.find(
       (p) =>
         p.manifest.slug === "watch-history-text" &&
-        p.manifest.version === "1.1.1",
+        p.active,
     );
     assert.ok(converter);
     await call("POST", "/api/v1/admin/plugins/watch-history-text", {

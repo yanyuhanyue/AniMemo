@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "AniMemo API",
-    "version": "1.4.0-alpha.1",
+    "version": "1.4.0-alpha.2",
     "description": "AniMemo 新项目 API。写请求必须携带与 PUBLIC_ORIGIN 完全一致的 Origin；登录使用 HttpOnly Cookie。所有 API 响应不缓存。详情见 docs/api.md。管理路径需要当前账号仍有管理权限，版本冲突为 409。"
   },
   "servers": [

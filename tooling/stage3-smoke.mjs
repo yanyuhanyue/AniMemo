@@ -7,9 +7,10 @@ import { installInstance, backupInstance, updateInstance, recoverInstance, insta
 import { readOperation, advanceOperation } from './operation-journal.mjs';
 
 const image = process.env.ANIMEMO_CANDIDATE_IMAGE;
+const previousImage = process.env.ANIMEMO_PREVIOUS_IMAGE;
 if (!image) throw new Error('Set ANIMEMO_CANDIDATE_IMAGE to a locally built stage 3 image.');
-const names = [0, 1].map(() => `probe-${randomBytes(6).toString('hex')}`), created = [];
-const report = { status: 'RUNNING', started_at: new Date().toISOString(), checks: [] };
+const names = [0, 1, 2].map(() => `probe-${randomBytes(6).toString('hex')}`), created = [];
+const report = { status: 'RUNNING', started_at: new Date().toISOString(), image, previous_image: previousImage, checks: [] };
 const mark = name => { report.checks.push(name); console.log(`Stage 3: ${name}`); };
 const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore','pipe','pipe'], timeout: 30000 });
 const config = async name => JSON.parse(await readFile(`.local/instances/${name}/config.json`, 'utf8'));
@@ -22,6 +23,29 @@ function client(origin) { let cookie = ''; return async (method, url, body, want
 async function poll(check) { for (let n = 0; n < 80; n++) { const out = await check(); if (out) return out; await new Promise(r => setTimeout(r, 250)); } throw new Error('Timed out'); }
 async function jobState(call, id, state) { return poll(async () => { const j = await call('GET', `/api/v1/imports/${id}`); assert.notEqual(j.state, 'failed', j.error); return j.state === state && j; }); }
 try {
+  if (previousImage && previousImage !== image) {
+    created.push(names[2]);
+    const prior = await installInstance({ name: names[2], image: previousImage, port: await port() });
+    const priorConfig = await config(names[2]);
+    const credentials = { email: `${randomUUID()}@example.test`, password: `upgrade-${randomUUID()}` };
+    let use = client(prior.origin);
+    await use('POST', '/api/v1/setup', { ...credentials, display_name: '跨版本扩展验收', token: priorConfig.setupToken }, 201);
+    const old = (await use('GET', '/api/v1/admin/plugins')).items.find(p => p.manifest.slug === 'watch-history-text' && p.active);
+    await use('POST', '/api/v1/admin/plugins/watch-history-text', { action: 'activate', version: old.manifest.version, revision: old.revision });
+    await updateInstance(names[2], image);
+    use = client(prior.origin); await use('POST', '/api/v1/auth/login', credentials);
+    const inventory = (await use('GET', '/api/v1/admin/plugins')).items;
+    const retained = inventory.find(p => p.manifest.slug === old.manifest.slug && p.active);
+    assert.equal(retained.manifest.version, old.manifest.version);
+    assert.equal(retained.digest, old.digest); assert.equal(retained.enabled, true); assert.equal(retained.health, 'ready');
+    const added = inventory.find(p => p.manifest.slug === 'notes-hanami');
+    assert.ok(added, 'old converter identity must not block the new bundled theme');
+    assert.equal(added.publisher_id, 'ANIMEMO_FIRST_PARTY'); assert.equal(added.enabled, false);
+    const job = await use('POST', '/api/v1/plugins/watch-history-text/imports?filename=2026.txt', '10月3日\n首刷 升级后仍使用原转换器 共12集\n', 202, true);
+    await jobState(use, job.id, 'ready'); await use('POST', `/api/v1/imports/${job.id}`, { action: 'apply' }); await jobState(use, job.id, 'done');
+    assert.equal((await use('GET', '/api/v1/entries')).total, 1);
+    mark('cross-version update preserves the enabled immutable converter and installs the new official theme without switching versions');
+  }
   created.push(names[0]); const a = await installInstance({ name: names[0], image, port: await port() }); let c = await config(names[0]);
   let call = client(a.origin); const credentials = { email: `${randomUUID()}@example.test`, password: `stage3-${randomUUID()}` };
   await call('POST', '/api/v1/setup', { ...credentials, display_name: '阶段三验收', token: c.setupToken }, 201);
