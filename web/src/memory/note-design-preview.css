@@ -67,8 +67,8 @@
 .note-preview-review .preview-note:first-child .preview-note-excerpt { -webkit-line-clamp: 4; font-size: 16px; }
 
 /* A dated margin and uninterrupted writing surface. */
-.memory-shell[data-notes-design=paper], .notes-design-paper { --am-primary: #566856; --am-paper: #fffcf4; --am-border: #dfd8c7; background: #f5f1e7; }
-.memory-shell[data-notes-design=paper] .notes-page { max-width: 910px; margin-inline: auto; }
+.memory-shell:is([data-notes-design=paper], [data-notes-design=hybrid]), .notes-design-paper { --am-primary: #566856; --am-paper: #fffcf4; --am-border: #dfd8c7; background: #f5f1e7; }
+.memory-shell:is([data-notes-design=paper], [data-notes-design=hybrid]) .notes-page { max-width: 910px; margin-inline: auto; }
 .notes-page[data-note-design=paper] .memory-section-heading :is(h1, h2) { font-family: Georgia, "Noto Serif CJK SC", "Songti SC", SimSun, serif; font-weight: 500; }
 .note-preview-paper { padding-inline: 30px; margin-top: 22px; background: #fffcf4; border: 1px solid #e4ddce; }
 .note-preview-paper .preview-note { display: grid; grid-template-columns: 105px minmax(0, 1fr); padding: 0; border: 0; }
@@ -127,6 +127,23 @@
 .dialog.notes-design-classic .dialog-header :is(h2, .icon-button) { color: var(--am-ink); }
 .notes-design-classic .composer-body textarea { background: none; line-height: 2; }
 .notes-design-classic .button.secondary { border: 2px solid #262633; border-radius: 0; color: #262633; }
+
+/* Paper carries the reading; ink and color mark the actions and work labels. */
+.memory-shell[data-notes-design=hybrid] .memory-navigation { border-bottom: 1px solid #777362; }
+.memory-shell[data-notes-design=hybrid] .memory-sections button[aria-current] span { background: #f3dfa0; border-bottom: 2px solid #35382f; padding: 3px 6px; }
+.notes-page[data-note-design=hybrid] .memory-section-heading :is(h1, h2) { font-size: 38px; font-weight: 700; }
+.notes-page[data-note-design=hybrid] .button.primary, .notes-design-hybrid .button.primary { background: #f3d478; border: 1.5px solid #35382f; color: #30332d; border-radius: 3px; box-shadow: 3px 3px 0 #35382f; }
+.notes-page[data-note-design=hybrid] .notes-filters { border-top-color: #777362; }
+.note-preview-hybrid { border: 1.5px solid #777362; box-shadow: 4px 4px 0 #d6cebd; }
+.note-preview-hybrid .preview-note-work, .notes-design-hybrid .preview-note-work { padding: 4px 9px; border: 1px solid #8a7779; border-radius: 2px; background: #f0dbe0; color: #544348; font-weight: 500; }
+.note-preview-hybrid .preview-note-work svg { display: block; width: 13px; height: 13px; }
+.note-preview-hybrid .preview-note:nth-child(3n+2) .preview-note-work { background: #dce8e6; border-color: #778e87; color: #3e5852; }
+.note-preview-hybrid .preview-note:nth-child(3n) .preview-note-work { background: #e8e8ce; border-color: #89896a; color: #545637; }
+.note-preview-hybrid .preview-note-kept { background: #f5e7b8; border: 1px solid #a08d50; padding: 2px 6px; color: #665118; }
+.note-preview-hybrid .preview-note-read { color: #424f3f; font-weight: 600; }
+.dialog.notes-design-hybrid { border: 1.5px solid #777362; border-top: 4px solid #566856; border-radius: 3px; box-shadow: 5px 5px 0 #35382f; }
+.notes-design-hybrid .button.secondary { border: 1px solid #777362; background: #fffcf4; border-radius: 3px; color: #35382f; }
+.notes-design-hybrid .dialog-header .icon-button { color: #424f3f; }
 
 @media(max-width:760px) {
   .note-design-switcher { flex-wrap: wrap; gap: 10px 16px; }

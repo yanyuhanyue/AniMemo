@@ -3,10 +3,10 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 
-// Three temporary layout candidates, exercised against the real API.
+// Temporary layout candidates, exercised against the real API.
 const origin = process.env.REVIEW_ORIGIN || 'http://127.0.0.1:5177';
 const output = process.env.REVIEW_OUTPUT || '.local/output/browser/note-design-tests';
-const designs = process.env.REVIEW_DESIGNS?.split(',') || ['review', 'paper', 'classic'];
+const designs = process.env.REVIEW_DESIGNS?.split(',') || ['review', 'paper', 'classic', 'hybrid'];
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.ANIMEMO_BROWSER || '/usr/bin/chromium', args: ['--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN', timezoneId: 'Asia/Shanghai' });
@@ -94,7 +94,7 @@ try {
 
     await click(page.getByRole('button', { name: '写札记', exact: true }));
     await fill(page.getByLabel('记忆标题', { exact: true }), `体验 ${design}`);
-    await fill(page.getByLabel('记忆正文', { exact: true }), '三个版式共用同一套保存逻辑。');
+    await fill(page.getByLabel('记忆正文', { exact: true }), '不同版式共用同一套保存逻辑。');
     await axe(`${design}: composer`);
     for (const width of [390, 320]) { await page.setViewportSize({ width, height: 844 }); await fits(); }
     await click(page.getByRole('button', { name: '保存记忆', exact: true }));
@@ -112,10 +112,12 @@ try {
   }
   await fill(page.getByLabel('查找记忆', { exact: true }), '没有确切日期');
   await page.getByRole('button', { name: `阅读 ${note.title}`, exact: true }).waitFor();
-  await click(page.getByRole('button', { name: '纸本札记', exact: true }));
+  const previousDesign = new URL(page.url()).searchParams.get('notes_ui');
+  const nextDesign = previousDesign === 'paper' ? 'review' : 'paper';
+  await click(page.getByRole('button', { name: nextDesign === 'paper' ? '纸本札记' : '番剧影评', exact: true }));
   assert.equal(await page.getByLabel('查找记忆', { exact: true }).inputValue(), '没有确切日期');
-  assert.equal(new URL(page.url()).searchParams.get('notes_ui'), 'paper');
-  await page.goBack(); await page.locator('[data-note-design=classic]').waitFor();
+  assert.equal(new URL(page.url()).searchParams.get('notes_ui'), nextDesign);
+  await page.goBack(); await page.locator(`[data-note-design=${previousDesign}]`).waitFor();
   await click(page.getByRole('button', { name: '返回现有版', exact: true }));
   await page.locator('.memory-note-card').first().waitFor();
   assert.equal(new URL(page.url()).searchParams.get('notes_ui'), null);

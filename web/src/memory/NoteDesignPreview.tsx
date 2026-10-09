@@ -2,11 +2,12 @@ import { Button } from "../components/ui/Button";
 import { Icon } from "../components/ui/Icon";
 import { MemoryImage, visibilityLabels, type Note } from "./shared";
 
-// Temporary, URL-selected alternatives. All three use the existing note actions.
+// Temporary, URL-selected alternatives using the existing note actions.
 export const noteDesigns = {
   review: "番剧影评",
   paper: "纸本札记",
   classic: "旧版风格",
+  hybrid: "融合版",
 } as const;
 export type NoteDesign = keyof typeof noteDesigns;
 
@@ -46,22 +47,23 @@ export function NotePreviewList({ notes, design, titles, onRead }: {
   titles: Map<string, string>;
   onRead: (note: Note) => void;
 }) {
-  return <div className={`note-preview-list note-preview-${design}`}>
+  const paperLayout = design === "paper" || design === "hybrid";
+  return <div className={`note-preview-list note-preview-${design}${design === "hybrid" ? " note-preview-paper" : ""}`}>
     {notes.map(note => <article key={note.id} className="preview-note" data-highlight={note.highlight || undefined}>
-      {design === "paper" && <div className="preview-note-margin">
+      {paperLayout && <div className="preview-note-margin">
         <span>回忆日期</span><span>{noteDate(note)}</span>
         {note.highlight && <span className="preview-note-kept"><Icon name="star" />珍藏</span>}
       </div>}
       <div className="preview-note-content">
         <div className="preview-note-topline">
           <NoteWork title={titles.get(note.anime_id)} linked={!!note.anime_id} />
-          {design !== "paper" && note.highlight && <span className="preview-note-kept"><Icon name="star" />珍藏</span>}
+          {!paperLayout && note.highlight && <span className="preview-note-kept"><Icon name="star" />珍藏</span>}
         </div>
         <div className="preview-note-article">
           <div className="preview-note-text">
             <h3><Button className="memory-title-button" onClick={() => onRead(note)}>{note.title}</Button></h3>
             {note.spoiler ? <p className="preview-note-spoiler">含剧透 · 阅读时展开</p> : <>
-              {note.body && <p className="preview-note-excerpt">{design === "paper" ? note.body : note.body.replace(/\s+/g, " ").trim()}</p>}
+              {note.body && <p className="preview-note-excerpt">{paperLayout ? note.body : note.body.replace(/\s+/g, " ").trim()}</p>}
               {!note.body && note.anchor.quote && <blockquote>{note.anchor.quote}</blockquote>}
             </>}
           </div>
@@ -72,7 +74,7 @@ export function NotePreviewList({ notes, design, titles, onRead }: {
         </div>
         <footer className="preview-note-footer">
           <div className="preview-note-details">
-            {design !== "paper" && <span>{noteDate(note)}</span>}
+            {!paperLayout && <span>{noteDate(note)}</span>}
             <span>{visibilityLabels[note.visibility]}</span>
             {note.tags.map(tag => <span className="preview-note-tag" key={tag}>#{tag}</span>)}
           </div>

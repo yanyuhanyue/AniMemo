@@ -216,7 +216,7 @@ export function NoteEditor({
       }
       onClose={onClose}
       wide
-      className={`note-composer${design ? ` notes-design-${design}` : ""}`}
+      className={`note-composer${design ? ` notes-design-${design}` : ""}${design === "hybrid" ? " notes-design-paper" : ""}`}
     >
       <form
         className="memory-form note-editor"
@@ -672,7 +672,7 @@ export function Notes({
         <div>
           <Heading>{design ? "札记" : kind === "moment" ? "值得留住的瞬间" : "记忆札记"}</Heading>
           <p>
-            {design ? design === "review" ? "关于作品，也关于看完之后的想法。" : design === "paper" ? "那些写下来，偶尔又想翻看的文字。" : "看过的故事，我有话说。" : kind === "moment"
+            {design ? design === "review" ? "关于作品，也关于看完之后的想法。" : design === "paper" || design === "hybrid" ? "那些写下来，偶尔又想翻看的文字。" : "看过的故事，我有话说。" : kind === "moment"
               ? "把那一帧和当时的心情放在一起。"
               : "留下一段感想，也留住当时的自己。"}
           </p>
@@ -800,7 +800,7 @@ export function Notes({
         />
       )}
       {opened && (
-        <Dialog title={opened.title} eyebrow={design ? "札记" : undefined} onClose={() => setOpened(null)} wide className={`note-reader${design ? ` notes-design-${design}` : ""}`}>
+        <Dialog title={opened.title} eyebrow={design ? "札记" : undefined} onClose={() => setOpened(null)} wide className={`note-reader${design ? ` notes-design-${design}` : ""}${design === "hybrid" ? " notes-design-paper" : ""}`}>
           <div className="memory-reading note-reading">
             {design && <NoteWork title={titles.get(opened.anime_id)} linked={!!opened.anime_id} />}
             <p className="memory-meta">
