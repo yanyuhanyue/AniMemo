@@ -84,7 +84,7 @@ VM 与约 25 分钟持续负载是独立的可选专项，不接入默认开发�
 
 ## 插件合同与受限执行
 
-`pkg/pluginproto` 定义 Manifest、Request 和 Response；`internal/plugins` 拥有不可变包、启用状态、管理员审计和 wazero WASI 执行。`api` 认证用户、协调文件转换与 `journal.NewImport`，`journal` 不导入插件模块，插件也不能接触 SQL 或事务。
+`pkg/pluginproto` 定义包清单，`pkg/converterproto` 定义转换消息，`pkg/themeproto` 定义主题；`internal/plugins` 拥有不可变包、启用状态、管理员审计和 wazero WASI 执行。`api` 认证用户、协调文件转换与 `journal.NewImport`，`journal` 不导入插件模块，插件也不能接触 SQL 或事务。
 
 首个消费者是独立编译的 `examples/watch-history-text`。它只得到所选文件名与文本，返回普通导入 JSON；用户核对最多 100 条观看记录明细后确认。插件无文件、网络、环境、持久状态或任意前端脚本能力。生产执行使用独立子进程中的 WASI 沙箱，受时间、输入输出、内存和 Linux CPU / 虚拟地址限制；它仍不等于面向任意恶意发布者的完整 OS 沙箱。
 
@@ -106,4 +106,12 @@ Manifest 协议版本、宿主 API 支持范围和唯一能力均严格校验。
 
 私人图片现阶段直接使用 PostgreSQL bytea 保存原件与缩略图；预留、配额和终结仍由核心控制。这样个人导出和数据库快照都能完整包含图片，不要求先打通 R2 才能使用长期记忆；以后更换存储后端仍需保留同样的原件身份、授权与备份合同。
 
-文件转换宿主现在支持 API 1–2；API 2 增加观看来源字段。随附 TXT 1.1.1 声明只使用 API 2，旧宿主在安装时拒绝，而旧 API 1 转换器仍可在新宿主运行。消息信封 `protocol=1` 未改变；API 版本、产品版本和插件包版本分别管理。
+文件转换宿主现在支持 API 1–2；API 2 增加观看来源字段。随附 TXT 1.1.3 声明只使用 API 2，旧宿主在安装时拒绝，而旧 API 1 转换器仍可在新宿主运行。消息信封 `protocol=1` 未改变；API 版本、产品版本和插件包版本分别管理。
+
+## 1.4 主题模板增量
+
+插件宿主 API 3 提供纯 token 主题，API 4 增加私人札记的 HTML/CSS 模板与包内资源。转换器只依赖 `converterproto`，新增主题类型不再传导到示例转换器的编译依赖。现有 API 1–2 文件转换继续兼容。
+
+`internal/plugins` 解析、校验和保存模板/资源，主题不运行 WASI。模板提供固定名称的内容槽；`web/src/themes` 的通用渲染器将核心内容填入受限 HTML，在 Shadow DOM 中加载经检查的 CSS。没有按主题 slug 硬编码布局。安全控件和剧透展开在样式范围之外，正文与私人图片仍由核心授权并渲染。
+
+资源摘要进入不可变清单，字节存于 `plugin_releases.assets`，随实例数据库备份恢复；受登录和启用状态保护的资源接口不暴露媒体存储或宿主目录。`user_note_themes` 保存个人选择，缺包回退内置。Shadow DOM 只隔离样式，不构成任意脚本沙箱，也不保证第三方 CSS 的可用性。当前作用范围及全站扩展顺序见 [主题契约](themes.md)。

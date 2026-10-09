@@ -1,6 +1,28 @@
 # 开发验收记录
 
-## 当前：v1.4 首批札记主题（2026-10-09，云端 Linux）
+## 当前：v1.4 札记模板与资源（2026-10-09，云端 Linux）
+
+`1.4.0-alpha.3`，应用源码 `32bbe5a5eba8ad26114beeb1d5154231e9ca9709`，24 项迁移。交付可安装的私人札记 HTML/CSS 模板及图片/字体，新增随附「星笺展架」1.0.0，保留默认纸页和「樱色信笺」。这完成主题开发安排的前两批，不代表全站主题或完整 v1.4 已完成；见 [交付与本地同步](v1.4-theme-templates.md)、[作者契约](themes.md)。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 静态与单元 | `npm run check` PASS；18 项 Node 检查和 Go 单元 PASS；模板/资源无效输入、脚本/事件/外部地址拒绝、缺槽及包摘要验证通过 |
+| 真实 PostgreSQL | 主题生命周期、身份冲突、账号选择、资源认证/启用状态/字节/响应头、篡改资源隔离、升级预检及真实 TXT 导入通过；资源配额调整后定向复验通过 |
+| 新模板浏览器 | 实际后台安装、预览取消、应用持久化、真实图片/字体加载、桌面双列与 390/320 px、阅读/编辑、剧透挂载边界、键盘焦点恢复均 PASS；另一份不同 slug/模板的包无需改核心即生效，样式无法隐藏外层操作；6 次 axe 无检出，0 页面异常 |
+| 默认与 API 3 主题回归 | 默认纸页及「樱色信笺」真实 API 流程 PASS，含阅读、编辑、海报、筛选、退出/切号和移动布局；分别 3 次、5 次 axe 无检出，0 页面异常 |
+| 最终镜像浏览器 | 在 alpha.3 实际容器重跑新模板流程，6 次 axe 无检出，0 页面异常，已查看截图 |
+| 实际镜像升级/恢复 | `test:stage3` 6 组 PASS，126.7 秒；alpha.2 → alpha.3 保留旧转换器版本/摘要并完成导入，新主题官方身份、图片/字体/许可资源摘要、个人选择、克隆恢复重新启用、正常更新、Worker 续跑、中断救援、坏包隔离均通过，3 个自建 probe 实例已清理 |
+| 原验收实例 | `stage3-review` 更新完成，app/worker/db healthy，doctor PASS；13 张原账号/内容表升级前后摘要一致，含原 12 个账号、14 条记录、10 条观看、7 篇札记及图片/收藏/年度/成就。核对后才新增浏览器合成账号和内容；旧 TXT 1.1.1、两款主题均 ready，原账号的外观选择未批量修改 |
+
+镜像 `sha256:7beb821792c8b9a659fec913b992c5616c7391117f646ba36eecb169100b2976`，归档 53,762,560 字节，SHA-256 `b5efa6ebf93e4edacca3f4691cc8f62fca64e62f450534314ede5da08903127f`，仅构建一次并由全部容器验证复用。后续更正仅涉及文档；候选为 `development: true`，未创建发行标签、签发或发布 Release。
+
+本轮修正了测试脚本的旧字段/定位方式和剧透延迟挂载后的等待条件，最终上述流程均通过。Docker vfs 构建后可用磁盘降至约 6.3 GiB；核对时间、ID 和构建描述后，只清理本次构建的 38 个可回收缓存记录，可用空间恢复到约 15 GiB。没有删除镜像、数据卷、备份或其他工作，未因磁盘不足中断此次升级。
+
+证据：`.local/logs/theme-template-{check,unit,api,quota,stage3}.log`；`.local/output/theme-template-stage3.json`、`theme-template-review-data-{before,after}.json`、`theme-template-review-{update,doctor,status,enabled}.json`、`release-v14-alpha3/release.json`。浏览器证据在 `.local/output/browser/{theme-templates,theme-templates-container,themes,notes-tests}/`。升级前完整快照保留于 `.local/output/backups/stage3-review-2026-10-09T03-10-22-580Z-aca093`。
+
+云端验收实例仍使用回环端口 18082；它不是用户 Windows 的 localhost，本轮未建立公网代理。VM、25 分钟负载、Safari、邮件/OAuth/R2 正式凭据联调未执行。全站主题、插件展示槽、持久个人授权和 AstrBot Bridge 按路线继续开发。
+
+## 历史：v1.4 首批札记主题（2026-10-09，云端 Linux）
 
 交付版本 `1.4.0-alpha.2`，应用源码 `49036d5fd79a1e00d0cca2d4d843ea406d1e1cc1`，23 项迁移。新增声明式 `theme.notes`、随附「樱色信笺」1.0.0、个人预览/应用/恢复默认。沿用上一批确认的唯一默认版式，不恢复试用布局。实现边界见 [札记主题](themes.md)，镜像和本地接手见 [1.4 首批交付](v1.4-delivery.md)。
 
