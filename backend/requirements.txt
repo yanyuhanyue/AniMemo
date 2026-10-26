@@ -28,7 +28,7 @@ charset-normalizer==3.5.1
     # via requests
 cryptography==50.0.0
     # via -r requirements.in
-dj-database-url==2.3.0
+dj-database-url==3.1.2
     # via -r requirements.in
 django==5.2.17
     # via
@@ -116,13 +116,8 @@ sqlparse==0.6.0
     #   django
 typing-extensions==4.16.0
     # via
-    #   dj-database-url
     #   psycopg
     #   referencing
-tzdata==2026.3 ; sys_platform == "win32"
-    # via
-    #   django
-    #   psycopg
 uritemplate==4.2.0
     # via drf-spectacular
 urllib3==2.7.0
